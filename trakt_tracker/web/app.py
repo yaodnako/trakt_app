@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 
 from trakt_tracker.application.services import ServiceContainer, build_services
 from trakt_tracker.config import ConfigStore, format_local_datetime, get_app_data_dir, normalize_utc_offset
-from trakt_tracker.domain import HistoryItemInput, RatingInput
+from trakt_tracker.domain import RatingInput
 from trakt_tracker.persistence.database import Database
 from trakt_tracker.startup_profile import StartupProfiler
 from trakt_tracker.infrastructure.cache import BinaryCache
@@ -443,21 +443,7 @@ def create_app() -> FastAPI:
             )
         episode = current.next_episode
         services.operations.publish("Progress action", f"Mark watched: {current.title} S{episode.season:02d}E{episode.number:02d}")
-        services.notifications.mark_episode_seen(
-            show_trakt_id=current.trakt_id,
-            show_title=current.title,
-            episode=episode,
-        )
-        services.library.add_history_item(
-            HistoryItemInput(
-                title_type="show",
-                trakt_id=current.trakt_id,
-                watched_at=datetime.now(),
-                season=episode.season,
-                episode=episode.number,
-                title=current.title,
-            )
-        )
+        services.interactions.mark_progress_episode_watched(current, watched_at=datetime.now())
         services.progress.sync_progress([current.trakt_id], dropped_only=show_dropped_value)
         return progress_redirect(
             hide_upcoming=hide_upcoming_value,
@@ -490,30 +476,16 @@ def create_app() -> FastAPI:
                 flash="No released episode to mark seen.",
             )
         episode = current.next_episode
-        if episode.first_aired is None:
+        try:
+            services.interactions.mark_progress_episode_seen(current, now=datetime.now(tz=UTC))
+        except RuntimeError as exc:
             return progress_redirect(
                 hide_upcoming=hide_upcoming_value,
                 show_dropped=show_dropped_value,
                 min_year=min_year_value,
                 use_year_filter=use_year_filter_value,
-                flash="Episode has not aired yet.",
+                flash=str(exc),
             )
-        release_at = episode.first_aired
-        if release_at.tzinfo is None:
-            release_at = release_at.replace(tzinfo=UTC)
-        if release_at > datetime.now(tz=UTC):
-            return progress_redirect(
-                hide_upcoming=hide_upcoming_value,
-                show_dropped=show_dropped_value,
-                min_year=min_year_value,
-                use_year_filter=use_year_filter_value,
-                flash="Episode has not aired yet.",
-            )
-        services.notifications.mark_episode_seen(
-            show_trakt_id=current.trakt_id,
-            show_title=current.title,
-            episode=episode,
-        )
         services.operations.publish("Progress action", f"Marked seen: {current.title} S{episode.season:02d}E{episode.number:02d}")
         return progress_redirect(
             hide_upcoming=hide_upcoming_value,
@@ -540,7 +512,7 @@ def create_app() -> FastAPI:
             rating = int(str(form.get("rating", "0") or "0"))
             services.operations.publish("Progress action", f"Save rating: {title} S{season:02d}E{episode:02d} -> {rating}/10")
             try:
-                services.library.set_rating(
+                services.interactions.save_rating(
                     RatingInput(
                         title_type="show",
                         trakt_id=trakt_id,
@@ -550,14 +522,6 @@ def create_app() -> FastAPI:
                     ),
                     title=title,
                 )
-                saved_rating = services.library.displayed_history_rating(
-                    title_type="show",
-                    trakt_id=trakt_id,
-                    season=season,
-                    episode=episode,
-                )
-                if saved_rating != rating:
-                    raise RuntimeError("Rating did not appear in history after save")
                 flash = f"Saved rating for {title}."
             except Exception as exc:
                 flash = f"Rating failed: {exc}"
@@ -582,10 +546,10 @@ def create_app() -> FastAPI:
         use_year_filter_value = parse_bool_flag(str(form.get("use_year_filter", "")))
         current_is_dropped = parse_bool_flag(str(form.get("is_dropped", "")))
         if current_is_dropped:
-            services.progress.undrop_show(trakt_id)
+            services.interactions.set_progress_dropped(trakt_id, dropped=False)
             flash = "Show restored."
         else:
-            services.progress.drop_show(trakt_id)
+            services.interactions.set_progress_dropped(trakt_id, dropped=True)
             flash = "Show dropped."
         return progress_redirect(
             hide_upcoming=hide_upcoming_value,
@@ -697,7 +661,7 @@ def create_app() -> FastAPI:
         flash = "Rating saved."
         services.operations.publish("History action", f"Save rating: {title} -> {rating}/10")
         try:
-            services.library.set_rating(
+            services.interactions.save_rating(
                 RatingInput(
                     title_type=rating_type,
                     trakt_id=trakt_id,
@@ -707,14 +671,6 @@ def create_app() -> FastAPI:
                 ),
                 title=title,
             )
-            saved_rating = services.library.displayed_history_rating(
-                title_type=rating_type,
-                trakt_id=trakt_id,
-                season=season,
-                episode=episode,
-            )
-            if saved_rating != rating:
-                raise RuntimeError("Rating did not appear in history after save")
         except Exception as exc:
             flash = f"Rating failed: {exc}"
         redirect_url = f"/history?type={history_type}&title={quote(title_filter)}&page={page}&flash={quote(flash)}"

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Callable
 
 from trakt_tracker.application.catalog import CatalogService
+from trakt_tracker.application.interactions import InteractionService
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.history_sync import HistorySyncWorkflow
@@ -42,6 +43,7 @@ class ServiceContainer:
     auth: "AuthService"
     cache: "CacheService"
     catalog: "CatalogService"
+    interactions: "InteractionService"
     library: "LibraryService"
     play: "PlayService"
     progress: "ProgressService"
@@ -516,11 +518,13 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         progress,
         NotificationSender(),
     )
+    interactions = InteractionService(library, notifications, progress_service)
     sync = SyncService(db, auth, titles, user_states, history, progress, episode_repo, sync_state, operations, episode_metadata)
     return ServiceContainer(
         auth=auth,
         cache=cache,
         catalog=catalog,
+        interactions=interactions,
         library=library,
         play=play,
         progress=progress_service,
