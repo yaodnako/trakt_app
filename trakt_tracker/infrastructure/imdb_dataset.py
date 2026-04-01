@@ -70,13 +70,13 @@ class IMDbDatasetClient:
 
         if status_callback is not None:
             status_callback("Downloading IMDb ratings...")
-        self._download(IMDb_RATINGS_URL, tmp_ratings_gz)
+        self._download(IMDb_RATINGS_URL, tmp_ratings_gz, label="Downloading IMDb ratings", status_callback=status_callback)
         if status_callback is not None:
             status_callback("Downloading IMDb episode map...")
-        self._download(IMDb_EPISODES_URL, tmp_episodes_gz)
+        self._download(IMDb_EPISODES_URL, tmp_episodes_gz, label="Downloading IMDb episode map", status_callback=status_callback)
         if status_callback is not None:
             status_callback("Downloading IMDb episode titles...")
-        self._download(IMDb_BASICS_URL, tmp_basics_gz)
+        self._download(IMDb_BASICS_URL, tmp_basics_gz, label="Downloading IMDb episode titles", status_callback=status_callback)
 
         if status_callback is not None:
             status_callback("Building local index...")
@@ -221,13 +221,23 @@ class IMDbDatasetClient:
         finally:
             conn.close()
 
-    def _download(self, url: str, destination: Path) -> None:
+    def _download(self, url: str, destination: Path, *, label: str, status_callback=None) -> None:
         with self._client.stream("GET", url) as response:
             response.raise_for_status()
+            total_bytes = int(response.headers.get("Content-Length", "0") or "0")
+            written = 0
+            last_reported_percent = -1
             with destination.open("wb") as handle:
                 for chunk in response.iter_bytes():
                     if chunk:
                         handle.write(chunk)
+                        written += len(chunk)
+                        if status_callback is None or total_bytes <= 0:
+                            continue
+                        percent = min(100, int((written / total_bytes) * 100))
+                        if percent >= last_reported_percent + 5 or percent == 100:
+                            last_reported_percent = percent
+                            status_callback(f"{label}... {percent}%")
 
     def _has_required_schema(self) -> bool:
         if not self._db_path.exists():

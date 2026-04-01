@@ -327,6 +327,10 @@
                         if (typeof event.seq === "number") {
                             lastDebugSeq = Math.max(lastDebugSeq, event.seq);
                         }
+                        const source = String(event && event.source ? event.source : "");
+                        if (source.startsWith("IMDb sync")) {
+                            continue;
+                        }
                         if (event && event.message) {
                             pushFlashToast(event.message, 3200);
                         }

@@ -44,7 +44,7 @@
 {% endif %}
 
 {% if results %}
-<section class="card-grid">
+<section class="search-results-grid">
     {% for item in results %}
     <article class="result-card">
         <div class="poster-shell">
@@ -64,6 +64,14 @@
     </article>
     {% endfor %}
 </section>
+<div class="pager">
+    {% if page > 1 %}
+    <a class="button ghost" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page - 1 }}">Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a class="button" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page + 1 }}">Next</a>
+    {% endif %}
+</div>
 {% elif query and not error_message %}
 <section class="empty-state">
     <h3>No matches</h3>

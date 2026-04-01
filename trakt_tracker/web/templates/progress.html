@@ -83,13 +83,17 @@
                 data-play-use-year-filter="{{ '1' if use_year_filter else '0' }}"
                 data-play-min-year="{{ min_year or '' }}"
                 {% endif %}
-            >&#9654;</a>
+            >
+                <img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true">
+            </a>
             <form method="post" action="/progress/{{ item.trakt_id }}/watch" class="js-watch-form" data-play-prompt-key="{% if item.next_episode %}{{ item.trakt_id }}:{{ item.next_episode.season }}:{{ item.next_episode.number }}{% endif %}">
                 <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
                 <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
                 <input type="hidden" name="min_year" value="{{ min_year or '' }}">
                 <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
-                <button type="submit" class="icon-button" title="Mark watched" {% if not item.next_episode or item.is_dropped %}disabled{% endif %}>&#10003;</button>
+                <button type="submit" class="icon-button" title="Mark watched" {% if not item.next_episode or item.is_dropped %}disabled{% endif %}>
+                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
+                </button>
             </form>
             <form
                 method="post"
@@ -105,7 +109,9 @@
                     type="submit"
                     class="icon-button drop-toggle {% if item.is_dropped %}undrop{% else %}drop{% endif %}"
                     title="{% if item.is_dropped %}Undrop{% else %}Drop{% endif %}"
-                >&#8854;</button>
+                >
+                    <img class="icon-glyph icon-glyph-drop" src="{{ request.url_for('static', path='drop.svg' if item.is_dropped else 'drop_red.svg') }}" alt="" aria-hidden="true">
+                </button>
             </form>
         </div>
     </div>

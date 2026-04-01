@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import quote
 
 from fastapi import Request
@@ -61,7 +62,7 @@ def register_history_routes(app, *, render) -> None:
     async def history_auto_sync(request: Request) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
         try:
-            changed = services.sync.maybe_refresh_history()
+            changed = await asyncio.to_thread(services.sync.maybe_refresh_history)
         except Exception as exc:
             return JSONResponse({"changed": False, "error": str(exc), "message": f"History auto-sync failed: {exc}"})
         return JSONResponse(

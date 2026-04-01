@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
@@ -13,14 +15,17 @@ from trakt_tracker.web.viewmodels import (
     sort_search_results,
 )
 
+SEARCH_PAGE_SIZE = 24
 
-def register_catalog_routes(app, *, render, enrich_search_results) -> None:
+
+def register_catalog_routes(app, *, render, enrich_search_results, schedule_search_enrichment) -> None:
     @app.get("/search", response_class=HTMLResponse)
     async def search_page(
         request: Request,
         q: str = "",
         type: str = "all",
         sort: str = "",
+        page: int = 1,
     ) -> HTMLResponse:
         services: ServiceContainer = request.app.state.services
         saved_state = services.catalog.load_last_search_state()
@@ -39,17 +44,13 @@ def register_catalog_routes(app, *, render, enrich_search_results) -> None:
                 if saved_search_matches(saved_state, query, title_type):
                     results = list(saved_state.get("results", []))
                     source_label = "Local cached result set"
+                    if schedule_search_enrichment(request.app, results=results, query=query, title_type=title_type):
+                        source_label += " with background metadata refresh"
                 else:
-                    results = services.catalog.search_titles(query, title_type)
+                    results = await asyncio.to_thread(services.catalog.search_titles, query, title_type)
                     source_label = "Fresh Trakt search"
-                results, enriched = enrich_search_results(
-                    services,
-                    results,
-                    query=query,
-                    title_type=title_type,
-                )
-                if enriched:
-                    source_label += " with metadata enrichment"
+                    if schedule_search_enrichment(request.app, results=results, query=query, title_type=title_type):
+                        source_label += " with background metadata enrichment"
             except Exception as exc:
                 error_message = str(exc)
         elif saved_state:
@@ -57,26 +58,28 @@ def register_catalog_routes(app, *, render, enrich_search_results) -> None:
             query = str(saved_state.get("query", "") or "").strip()
             selected_type = normalize_title_type(saved_state.get("title_type")) or "all"
             source_label = "Last saved search"
-            results, enriched = enrich_search_results(
-                services,
-                results,
-                query=query,
-                title_type=normalize_title_type(saved_state.get("title_type")),
-            )
-            if enriched:
-                source_label += " with metadata enrichment"
+            saved_title_type = normalize_title_type(saved_state.get("title_type"))
+            if schedule_search_enrichment(request.app, results=results, query=query, title_type=saved_title_type):
+                source_label += " with background metadata refresh"
 
         results = sort_search_results(results, sort_mode)
+        current_page = max(1, page)
+        offset = (current_page - 1) * SEARCH_PAGE_SIZE
+        paged_results = results[offset:offset + SEARCH_PAGE_SIZE + 1]
+        has_next = len(paged_results) > SEARCH_PAGE_SIZE
+        paged_results = paged_results[:SEARCH_PAGE_SIZE]
         return render(
             request,
             "search.html",
             {
                 "page_title": "Search",
+                "page": current_page,
+                "has_next": has_next,
                 "query": query,
                 "search_type": selected_type,
                 "sort_mode": sort_mode or DEFAULT_SEARCH_SORT_MODE,
                 "sort_modes": SEARCH_SORT_MODES,
-                "results": results,
+                "results": paged_results,
                 "search_history": services.catalog.search_history(),
                 "source_label": source_label,
                 "error_message": error_message,
@@ -100,7 +103,7 @@ def register_catalog_routes(app, *, render, enrich_search_results) -> None:
             )
 
         try:
-            title_item = services.catalog.get_title_details(trakt_id, normalized_type)
+            title_item = await asyncio.to_thread(services.catalog.get_title_details, trakt_id, normalized_type)
             return render(
                 request,
                 "details.html",

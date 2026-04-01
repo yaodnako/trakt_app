@@ -53,6 +53,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request, flash: str = "") -> HTMLResponse:
         config = request.app.state.services.auth.config
+        bg_tasks = request.app.state.bg_tasks
         return render(
             request,
             "settings.html",
@@ -60,6 +61,8 @@ def register_system_routes(app, *, render, template_filters) -> None:
                 "page_title": "Settings",
                 "flash": flash,
                 "config": config,
+                "imdb_sync_running": bg_tasks.is_running("imdb_manual_sync") or bg_tasks.is_running("imdb_auto_sync"),
+                "imdb_sync_status": request.app.state.services.sync.imdb_dataset_status(),
             },
         )
 
@@ -99,6 +102,52 @@ def register_system_routes(app, *, render, template_filters) -> None:
         ConfigStore().save(config)
         template_filters.utc_offset = config.utc_offset
         return RedirectResponse(url="/settings?flash=Settings+saved.", status_code=303)
+
+    @app.post("/settings/imdb-sync")
+    async def settings_imdb_sync(request: Request) -> RedirectResponse:
+        services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
+        started = bg_tasks.start(
+            "imdb_manual_sync",
+            source="IMDb sync (manual)",
+            operations=services.operations,
+            fn=lambda: services.sync.sync_imdb_dataset(
+                force=True,
+                status_callback=lambda message: services.operations.publish("IMDb sync", message),
+            ),
+        )
+        flash = "IMDb sync started." if started else "IMDb sync is already running."
+        return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
+
+    @app.get("/settings/imdb-sync-status")
+    async def settings_imdb_sync_status(request: Request, after: int = 0) -> JSONResponse:
+        services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
+        raw_events = [
+            event
+            for event in services.operations.list_after(after)
+            if str(event.get("source", "")).startswith("IMDb sync")
+        ]
+        latest_progress = ""
+        recent_events: list[dict] = []
+        seen_messages: set[str] = set()
+        for event in raw_events:
+            message = str(event.get("message", "") or "")
+            if "%" in message:
+                latest_progress = message
+                continue
+            if message in seen_messages:
+                continue
+            seen_messages.add(message)
+            recent_events.append(event)
+        return JSONResponse(
+            {
+                "running": bg_tasks.is_running("imdb_manual_sync") or bg_tasks.is_running("imdb_auto_sync"),
+                "status": services.sync.imdb_dataset_status(),
+                "progress_message": latest_progress,
+                "events": recent_events[-6:],
+            }
+        )
 
     @app.get("/notifications/poll")
     async def notifications_poll(request: Request) -> JSONResponse:

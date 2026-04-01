@@ -1675,10 +1675,10 @@ class MainWindow(QMainWindow):
         form.addRow("Kinopoisk API Key", inline_row(self.kinopoisk_api_key_edit))
         form.addRow("Playback", inline_row(self.embedded_player_checkbox))
         form.addRow("UTC offset", inline_row(self.utc_offset_edit))
-        form.addRow("IMDb Dataset", inline_row(self.imdb_status_label, sync_imdb_btn, clear_imdb_btn))
+        form.addRow("IMDb Dataset", inline_row(self.imdb_status_label, clear_imdb_btn))
         form.addRow("IMDb Auto-sync (hours)", inline_row(self.imdb_auto_sync_interval_edit))
         form.addRow("Cache TTL (hours)", inline_row(self.cache_ttl_edit, clear_trakt_cache_btn))
-        form.addRow("Polling interval (minutes)", inline_row(self.poll_interval_edit, self.notifications_checkbox, self.debug_mode_checkbox))
+        form.addRow("Polling interval (minutes)", inline_row(self.poll_interval_edit, sync_imdb_btn, self.notifications_checkbox, self.debug_mode_checkbox))
 
         save_row = QHBoxLayout()
         save_btn = QPushButton("Save settings")

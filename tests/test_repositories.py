@@ -5,6 +5,8 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import text
+
 from trakt_tracker.domain import EpisodeSummary, ProgressSnapshot
 from trakt_tracker.persistence.database import Database
 from trakt_tracker.persistence.repositories import HistoryRepository, NotificationRepository, ProgressRepository
@@ -101,6 +103,13 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(log.notify_count, 2)
         self.assertIsNotNone(log.seen_at)
         self.assertNotIn(70, unseen_ids)
+
+    def test_database_uses_wal_mode_for_concurrent_reads(self) -> None:
+        with self.db.session() as session:
+            journal_mode = session.execute(text("PRAGMA journal_mode")).scalar()
+            busy_timeout = session.execute(text("PRAGMA busy_timeout")).scalar()
+        self.assertEqual(str(journal_mode).lower(), "wal")
+        self.assertGreaterEqual(int(busy_timeout), 15000)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock, Thread
@@ -94,6 +95,10 @@ class _BackgroundTaskManager:
         Thread(target=runner, daemon=True).start()
         return True
 
+    def is_running(self, key: str) -> bool:
+        with self._lock:
+            return key in self._running
+
 
 def _build_services_with_profiling() -> ServiceContainer:
     profile_path = get_app_data_dir() / "web_startup.log"
@@ -157,6 +162,29 @@ def _enrich_search_results(
     return enriched_results, True
 
 
+def _schedule_search_enrichment(app, *, results: list, query: str, title_type: str | None) -> bool:
+    if not results or not _results_need_enrichment(results):
+        return False
+    services: ServiceContainer = app.state.services
+    bg_tasks = app.state.bg_tasks
+    key = f"search_enrichment:{title_type or 'all'}:{query.strip().casefold()}"
+
+    def run_enrichment() -> None:
+        _enrich_search_results(
+            services,
+            list(results),
+            query=query,
+            title_type=title_type,
+        )
+
+    return bg_tasks.start(
+        key,
+        source="Search enrichment",
+        operations=services.operations,
+        fn=run_enrichment,
+    )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Trakt Tracker Web Prototype")
     app.state.services = _build_services_with_profiling()
@@ -202,7 +230,10 @@ def create_app() -> FastAPI:
                         "imdb_auto_sync",
                         source="IMDb sync (auto)",
                         operations=services.operations,
-                        fn=lambda: services.sync.maybe_sync_imdb_dataset(interval_hours),
+                        fn=lambda: services.sync.maybe_sync_imdb_dataset(
+                            interval_hours,
+                            status_callback=lambda message: services.operations.publish("IMDb sync", message),
+                        ),
                     )
 
     def render(request: Request, template_name: str, context: dict, status_code: int = 200) -> HTMLResponse:
@@ -246,7 +277,7 @@ def create_app() -> FastAPI:
     register_system_routes(app, render=render, template_filters=_TemplateFilters)
     register_progress_routes(app, render=render, progress_redirect=progress_redirect)
     register_history_routes(app, render=render)
-    register_catalog_routes(app, render=render, enrich_search_results=_enrich_search_results)
+    register_catalog_routes(app, render=render, enrich_search_results=_enrich_search_results, schedule_search_enrichment=_schedule_search_enrichment)
     return app
 
 

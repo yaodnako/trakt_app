@@ -5,7 +5,7 @@
     <div class="section-head">
         <h2>Settings</h2>
     </div>
-    <form method="post" action="/settings" class="settings-form">
+    <form method="post" action="/settings" class="settings-form" id="settings-form">
         <label>
             <span>Client ID</span>
             <input type="text" name="client_id" value="{{ config.client_id }}">
@@ -38,10 +38,40 @@
             <span>Polling interval (minutes)</span>
             <input type="number" name="poll_interval_minutes" min="5" max="240" value="{{ config.poll_interval_minutes }}">
         </label>
-        <label>
-            <span>IMDb auto-sync (hours)</span>
-            <input type="number" name="imdb_auto_sync_interval_hours" min="1" max="168" value="{{ config.imdb_auto_sync_interval_hours }}">
-        </label>
+        <div class="settings-row settings-sync-row">
+            <label class="settings-inline-field">
+                <span>IMDb auto-sync (hours)</span>
+                <input type="number" name="imdb_auto_sync_interval_hours" min="1" max="168" value="{{ config.imdb_auto_sync_interval_hours }}">
+            </label>
+            <button
+                type="submit"
+                class="button settings-sync-button"
+                formaction="/settings/imdb-sync"
+                formmethod="post"
+                formnovalidate
+                data-imdb-sync-button
+            >Sync IMDb</button>
+            <div class="settings-sync-meta">
+                <span>Last updated</span>
+                <strong data-imdb-current-status>{{ imdb_sync_status }}</strong>
+            </div>
+        </div>
+        <section
+            class="settings-sync-status {% if not imdb_sync_running %}is-hidden{% endif %}"
+            data-imdb-status
+            data-after="0"
+        >
+            <div class="settings-sync-head">
+                <strong>IMDb sync status</strong>
+                <span class="settings-sync-pill {% if imdb_sync_running %}is-running{% endif %}" data-imdb-running>
+                    {% if imdb_sync_running %}Running{% else %}Idle{% endif %}
+                </span>
+            </div>
+            <div class="settings-sync-progress" data-imdb-progress></div>
+            <div class="settings-sync-log" data-imdb-log>
+                <div class="settings-sync-log-line">Preparing sync status...</div>
+            </div>
+        </section>
         <label>
             <span>UTC offset</span>
             <input type="text" name="utc_offset" value="{{ config.utc_offset }}" placeholder="+03:00">
@@ -63,4 +93,110 @@
         </div>
     </form>
 </section>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(() => {
+    const root = document.querySelector("[data-imdb-status]");
+    if (!root || !window.fetch) {
+        return;
+    }
+    const runningNode = root.querySelector("[data-imdb-running]");
+    const statusNode = root.querySelector("[data-imdb-current-status]");
+    const progressNode = root.querySelector("[data-imdb-progress]");
+    const logNode = root.querySelector("[data-imdb-log]");
+    const syncButton = document.querySelector("[data-imdb-sync-button]");
+    let after = Number(root.dataset.after || "0");
+    let keepVisibleUntil = root.classList.contains("is-hidden") ? 0 : Date.now() + 15000;
+    let lastProgressMessage = "";
+    let recentMessages = [];
+
+    function renderLog() {
+        if (!logNode) {
+            return;
+        }
+        logNode.replaceChildren();
+        if (!recentMessages.length) {
+            const line = document.createElement("div");
+            line.className = "settings-sync-log-line";
+            line.textContent = "Waiting for sync activity.";
+            logNode.appendChild(line);
+            return;
+        }
+        for (const message of recentMessages) {
+            const line = document.createElement("div");
+            line.className = "settings-sync-log-line";
+            line.textContent = message;
+            logNode.appendChild(line);
+        }
+    }
+
+    function rememberMessage(message) {
+        if (!message) {
+            return;
+        }
+        recentMessages = [message, ...recentMessages.filter((item) => item !== message)].slice(0, 4);
+        renderLog();
+    }
+
+    function setPanelVisible(visible) {
+        root.classList.toggle("is-hidden", !visible);
+    }
+
+    async function pollStatus() {
+        try {
+            const response = await fetch(`/settings/imdb-sync-status?after=${after}`, {
+                headers: {"Accept": "application/json"},
+                cache: "no-store",
+            });
+            if (!response.ok) {
+                return;
+            }
+            const payload = await response.json();
+            if (statusNode && payload.status) {
+                statusNode.textContent = payload.status;
+            }
+            if (runningNode) {
+                runningNode.textContent = payload.running ? "Running" : "Idle";
+                runningNode.classList.toggle("is-running", Boolean(payload.running));
+            }
+            if (progressNode) {
+                const message = payload.progress_message || "";
+                progressNode.textContent = message;
+                progressNode.classList.toggle("is-hidden", !message);
+            }
+            if (payload.running) {
+                keepVisibleUntil = Date.now() + 15000;
+            }
+            if (Array.isArray(payload.events)) {
+                for (const event of payload.events) {
+                    if (typeof event.seq === "number") {
+                        after = Math.max(after, event.seq);
+                    }
+                    rememberMessage(event.message || "");
+                    keepVisibleUntil = Date.now() + 15000;
+                }
+            }
+            if (payload.progress_message && payload.progress_message !== lastProgressMessage) {
+                lastProgressMessage = payload.progress_message;
+                keepVisibleUntil = Date.now() + 15000;
+            }
+            setPanelVisible(Boolean(payload.running) || Date.now() < keepVisibleUntil);
+        } catch (_error) {
+        }
+    }
+
+    if (syncButton) {
+        syncButton.addEventListener("click", () => {
+            keepVisibleUntil = Date.now() + 15000;
+            setPanelVisible(true);
+        });
+    }
+
+    renderLog();
+    pollStatus();
+    window.setInterval(pollStatus, 1200);
+})();
+</script>
 {% endblock %}

@@ -178,6 +178,7 @@ a {
 .settings-form {
     display: grid;
     gap: 14px;
+    max-width: 780px;
 }
 
 .settings-form label {
@@ -201,6 +202,120 @@ a {
     justify-content: flex-start;
 }
 
+.settings-inline-actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.settings-inline-actions > span {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.settings-row {
+    display: grid;
+    gap: 12px;
+}
+
+.settings-sync-row {
+    grid-template-columns: minmax(0, 180px) auto minmax(0, 220px);
+    align-items: end;
+    justify-content: start;
+    column-gap: 12px;
+}
+
+.settings-inline-field {
+    width: 180px;
+}
+
+.settings-inline-field input {
+    width: 100%;
+}
+
+.settings-sync-button {
+    white-space: nowrap;
+    width: auto;
+    min-width: 132px;
+    justify-self: start;
+}
+
+.settings-sync-meta {
+    display: grid;
+    gap: 4px;
+    align-self: center;
+}
+
+.settings-sync-meta span {
+    color: var(--muted);
+    font-size: 0.84rem;
+}
+
+.settings-sync-meta strong {
+    color: var(--text);
+    font-size: 0.98rem;
+}
+
+.settings-sync-status {
+    display: grid;
+    gap: 10px;
+    padding: 14px 16px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.55);
+}
+
+.settings-sync-status.is-hidden {
+    display: none;
+}
+
+.settings-sync-progress {
+    color: var(--accent-strong);
+    font-size: 0.92rem;
+    font-weight: 700;
+}
+
+.settings-sync-progress.is-hidden {
+    display: none;
+}
+
+.settings-sync-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.settings-sync-pill {
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: rgba(120, 120, 120, 0.14);
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.settings-sync-pill.is-running {
+    background: rgba(13, 107, 97, 0.14);
+    color: var(--accent-strong);
+}
+
+.settings-sync-current {
+    margin: 0;
+    color: var(--muted);
+}
+
+.settings-sync-log {
+    display: grid;
+    gap: 6px;
+}
+
+.settings-sync-log-line {
+    color: var(--text);
+    font-size: 0.92rem;
+}
+
 label {
     display: grid;
     gap: 8px;
@@ -210,7 +325,7 @@ label {
 
 input,
 select {
-    width: 100%;
+    width: min(100%, 620px);
     padding: 12px 14px;
     border-radius: 14px;
     border: 1px solid var(--line);
@@ -353,6 +468,13 @@ tbody tr:hover {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: 18px;
+}
+
+.search-results-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 280px));
+    gap: 18px;
+    justify-content: start;
 }
 
 .progress-grid {
@@ -668,8 +790,8 @@ tbody tr:hover {
 }
 
 .icon-button {
-    width: 34px;
-    height: 30px;
+    width: 42px;
+    height: 36px;
     display: inline-grid;
     place-items: center;
     border-radius: 10px;
@@ -682,6 +804,8 @@ tbody tr:hover {
     box-sizing: border-box;
     vertical-align: middle;
     flex: 0 0 auto;
+    padding: 0;
+    line-height: 1;
 }
 
 .icon-button:hover {
@@ -691,6 +815,29 @@ tbody tr:hover {
 .icon-button:disabled {
     opacity: 0.45;
     cursor: default;
+}
+
+.icon-button > img {
+    width: 20px;
+    height: 20px;
+    display: block;
+    object-fit: contain;
+    pointer-events: none;
+}
+
+.icon-glyph-play {
+    width: 18px;
+    height: 18px;
+}
+
+.icon-glyph-check {
+    width: 15px;
+    height: 15px;
+}
+
+.icon-glyph-drop {
+    width: 18px;
+    height: 18px;
 }
 
 .drop-toggle.drop {
@@ -710,6 +857,7 @@ tbody tr:hover {
 
 .result-card {
     overflow: hidden;
+    max-width: 280px;
 }
 
 .result-body {
@@ -728,6 +876,7 @@ tbody tr:hover {
     width: 100%;
     height: 100%;
     object-fit: cover;
+    display: block;
 }
 
 .poster-large {
@@ -827,6 +976,14 @@ tbody tr:hover {
     .filter-grid,
     .stats-grid {
         grid-template-columns: 1fr;
+    }
+
+    .settings-sync-row {
+        grid-template-columns: 1fr;
+    }
+
+    .settings-inline-field {
+        width: 100%;
     }
 
     .progress-card {
