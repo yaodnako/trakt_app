@@ -30,8 +30,9 @@
 - search state / search history / title-details orchestration уже вынесены из `LibraryService`
 - history/rating write-side и history read facade уже отделены от прежнего `LibraryService`
 - watch/seen/rating/drop action flow больше не размазан напрямую между desktop/web
+- IMDb dataset теперь может обновляться в фоне по настраиваемому interval и в desktop, и в web
 - `MainWindow` всё ещё перегружен
-- `web/app.py` всё ещё перегружен
+- web routes уже частично разрезаны по screen-level modules, `web/app.py` стал тоньше
 - `Debug mode` ещё не до конца унифицирован
 - refresh policy для episode details/ratings всё ещё можно упростить и сделать яснее
 

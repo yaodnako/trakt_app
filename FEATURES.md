@@ -66,3 +66,11 @@
 - более чистый и единый debug UX
 - further simplification of sync/update paths
 - further simplification of desktop/web orchestration layers
+
+## Settings
+
+Поддерживается:
+
+- cache TTL
+- notifications polling interval
+- IMDb auto-sync interval

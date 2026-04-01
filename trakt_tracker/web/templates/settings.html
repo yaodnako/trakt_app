@@ -39,6 +39,10 @@
             <input type="number" name="poll_interval_minutes" min="5" max="240" value="{{ config.poll_interval_minutes }}">
         </label>
         <label>
+            <span>IMDb auto-sync (hours)</span>
+            <input type="number" name="imdb_auto_sync_interval_hours" min="1" max="168" value="{{ config.imdb_auto_sync_interval_hours }}">
+        </label>
+        <label>
             <span>UTC offset</span>
             <input type="text" name="utc_offset" value="{{ config.utc_offset }}" placeholder="+03:00">
         </label>

@@ -32,6 +32,7 @@ class AppConfig:
     omdb_api_key: str = ""
     cache_ttl_hours: int = 24
     poll_interval_minutes: int = 30
+    imdb_auto_sync_interval_hours: int = 3
     notifications_enabled: bool = True
     debug_mode: bool = False
     utc_offset: str = "+03:00"

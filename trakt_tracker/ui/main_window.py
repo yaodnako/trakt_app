@@ -1129,14 +1129,18 @@ class IMDbDatasetSyncWorker(QThread):
     sync_failed = Signal(str)
     status_changed = Signal(str)
 
-    def __init__(self, services: ServiceContainer, force: bool = False) -> None:
+    def __init__(self, services: ServiceContainer, force: bool = False, interval_hours: int | None = None) -> None:
         super().__init__()
         self.services = services
         self.force = force
+        self.interval_hours = interval_hours
 
     def run(self) -> None:
         try:
-            changed = self.services.sync.sync_imdb_dataset(force=self.force, status_callback=self.status_changed.emit)
+            if self.interval_hours is None:
+                changed = self.services.sync.sync_imdb_dataset(force=self.force, status_callback=self.status_changed.emit)
+            else:
+                changed = self.services.sync.maybe_sync_imdb_dataset(self.interval_hours, status_callback=self.status_changed.emit)
         except Exception as exc:
             self.sync_failed.emit(str(exc))
             return
@@ -1180,20 +1184,25 @@ class HistoryAutoSyncWorker(QThread):
 
 
 class HistorySyncWorker(QThread):
-    sync_completed = Signal()
+    sync_completed = Signal(bool)
     sync_failed = Signal(str)
 
-    def __init__(self, services: ServiceContainer) -> None:
+    def __init__(self, services: ServiceContainer, *, maybe_only: bool = False) -> None:
         super().__init__()
         self.services = services
+        self.maybe_only = maybe_only
 
     def run(self) -> None:
         try:
-            self.services.sync.refresh_history()
+            if self.maybe_only:
+                changed = bool(self.services.sync.maybe_refresh_history())
+            else:
+                self.services.sync.refresh_history()
+                changed = True
         except Exception as exc:
             self.sync_failed.emit(str(exc))
             return
-        self.sync_completed.emit()
+        self.sync_completed.emit(changed)
 
 
 class MainWindow(QMainWindow):
@@ -1362,11 +1371,14 @@ class MainWindow(QMainWindow):
         self.cache_ttl_edit.setRange(1, 168)
         self.poll_interval_edit = QSpinBox()
         self.poll_interval_edit.setRange(5, 240)
+        self.imdb_auto_sync_interval_edit = QSpinBox()
+        self.imdb_auto_sync_interval_edit.setRange(1, 168)
         self.utc_offset_edit = QLineEdit()
         self.notifications_checkbox = QCheckBox("Enable Windows notifications")
         self.debug_mode_checkbox = QCheckBox("Enable debug toasts")
         self.imdb_status_label = QLabel()
         self._imdb_sync_worker: IMDbDatasetSyncWorker | None = None
+        self._imdb_sync_background = False
 
         self._build_progress_tab()
         self._build_history_tab()
@@ -1572,7 +1584,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         row = QHBoxLayout()
         sync_btn = QPushButton("Sync")
-        sync_btn.clicked.connect(self._sync_and_refresh_history)
+        sync_btn.clicked.connect(self._start_manual_history_sync)
         row.addWidget(sync_btn)
         row.addWidget(self.history_type)
         row.addWidget(self.history_title_filter, 1)
@@ -1664,6 +1676,7 @@ class MainWindow(QMainWindow):
         form.addRow("Playback", inline_row(self.embedded_player_checkbox))
         form.addRow("UTC offset", inline_row(self.utc_offset_edit))
         form.addRow("IMDb Dataset", inline_row(self.imdb_status_label, sync_imdb_btn, clear_imdb_btn))
+        form.addRow("IMDb Auto-sync (hours)", inline_row(self.imdb_auto_sync_interval_edit))
         form.addRow("Cache TTL (hours)", inline_row(self.cache_ttl_edit, clear_trakt_cache_btn))
         form.addRow("Polling interval (minutes)", inline_row(self.poll_interval_edit, self.notifications_checkbox, self.debug_mode_checkbox))
 
@@ -1706,6 +1719,7 @@ class MainWindow(QMainWindow):
         self.progress_min_year_spin.blockSignals(False)
         self.cache_ttl_edit.setValue(config.cache_ttl_hours)
         self.poll_interval_edit.setValue(config.poll_interval_minutes)
+        self.imdb_auto_sync_interval_edit.setValue(config.imdb_auto_sync_interval_hours)
         self.notifications_checkbox.setChecked(config.notifications_enabled)
         self.debug_mode_checkbox.setChecked(config.debug_mode)
         self.imdb_status_label.setText(self.services.sync.imdb_dataset_status())
@@ -1761,6 +1775,7 @@ class MainWindow(QMainWindow):
         )
         config.cache_ttl_hours = self.cache_ttl_edit.value()
         config.poll_interval_minutes = self.poll_interval_edit.value()
+        config.imdb_auto_sync_interval_hours = self.imdb_auto_sync_interval_edit.value()
         config.notifications_enabled = self.notifications_checkbox.isChecked()
         config.debug_mode = self.debug_mode_checkbox.isChecked()
         config.open_in_embedded_player = self.embedded_player_checkbox.isChecked()
@@ -2524,16 +2539,24 @@ class MainWindow(QMainWindow):
             return self._sort_history_sort_key_number(row.get("display_imdb_rating"))
         return 0
 
-    def _sync_and_refresh_history(self) -> None:
-        self._debug_toast("History sync: checking Trakt updates…")
-        try:
-            self.services.sync.refresh_history()
-        except Exception as exc:
-            QMessageBox.critical(self, "History sync failed", str(exc))
-            self._debug_toast(f"History sync failed: {exc}")
+    def _start_manual_history_sync(self) -> None:
+        if self._history_manual_sync_worker is not None and self._history_manual_sync_worker.isRunning():
             return
+        self._debug_toast("History sync: checking Trakt updates…")
+        self._history_manual_sync_worker = HistorySyncWorker(self.services, maybe_only=False)
+        self._history_manual_sync_worker.sync_completed.connect(self._on_manual_history_sync_completed)
+        self._history_manual_sync_worker.sync_failed.connect(self._on_manual_history_sync_failed)
+        self._history_manual_sync_worker.start()
+
+    def _on_manual_history_sync_completed(self, _changed: bool) -> None:
+        self._history_manual_sync_worker = None
         self._refresh_history()
         self._debug_toast("History sync completed.")
+
+    def _on_manual_history_sync_failed(self, message: str) -> None:
+        self._history_manual_sync_worker = None
+        QMessageBox.critical(self, "History sync failed", message)
+        self._debug_toast(f"History sync failed: {message}")
 
     def _maybe_auto_sync_history(self) -> None:
         if self._history_sync_worker is not None and self._history_sync_worker.isRunning():
@@ -2559,8 +2582,22 @@ class MainWindow(QMainWindow):
     def _sync_imdb_dataset(self, force: bool = False) -> None:
         if self._imdb_sync_worker is not None and self._imdb_sync_worker.isRunning():
             return
+        self._imdb_sync_background = False
         self.imdb_status_label.setText("syncing...")
         self._imdb_sync_worker = IMDbDatasetSyncWorker(self.services, force=force)
+        self._imdb_sync_worker.status_changed.connect(self._on_imdb_sync_status_changed)
+        self._imdb_sync_worker.sync_completed.connect(self._on_imdb_sync_completed)
+        self._imdb_sync_worker.sync_failed.connect(self._on_imdb_sync_failed)
+        self._imdb_sync_worker.start()
+
+    def _maybe_background_imdb_sync(self) -> None:
+        if self._imdb_sync_worker is not None and self._imdb_sync_worker.isRunning():
+            return
+        interval_hours = max(1, int(self.services.auth.config.imdb_auto_sync_interval_hours or 1))
+        if not self.services.sync.should_auto_sync_imdb_dataset(interval_hours):
+            return
+        self._imdb_sync_background = True
+        self._imdb_sync_worker = IMDbDatasetSyncWorker(self.services, interval_hours=interval_hours)
         self._imdb_sync_worker.status_changed.connect(self._on_imdb_sync_status_changed)
         self._imdb_sync_worker.sync_completed.connect(self._on_imdb_sync_completed)
         self._imdb_sync_worker.sync_failed.connect(self._on_imdb_sync_failed)
@@ -2570,13 +2607,25 @@ class MainWindow(QMainWindow):
         self.imdb_status_label.setText(message)
 
     def _on_imdb_sync_completed(self, _changed: bool) -> None:
+        changed = bool(_changed)
+        background = self._imdb_sync_background
+        self._imdb_sync_worker = None
+        self._imdb_sync_background = False
         self.imdb_status_label.setText(self.services.sync.imdb_dataset_status())
+        if not changed and background:
+            return
         self._refresh_history()
         if self.search_model.total_count() > 0:
             self._start_search_enrichment(list(self.search_model._all_results), self._search_generation)
 
     def _on_imdb_sync_failed(self, message: str) -> None:
+        background = self._imdb_sync_background
+        self._imdb_sync_worker = None
+        self._imdb_sync_background = False
         self.imdb_status_label.setText(self.services.sync.imdb_dataset_status())
+        if background:
+            self._debug_toast(f"IMDb auto-sync failed: {message}")
+            return
         QMessageBox.critical(self, "IMDb sync failed", message)
 
     def _refresh_upcoming(self) -> None:
@@ -2607,7 +2656,8 @@ class MainWindow(QMainWindow):
                     )
             self._refresh_upcoming()
         except Exception:
-            return
+            pass
+        self._maybe_background_imdb_sync()
 
     def _start_timer(self) -> None:
         self._timer.stop()
@@ -2626,6 +2676,8 @@ class MainWindow(QMainWindow):
         if self.services.sync.imdb_dataset_status() == "not synced":
             self._sync_imdb_dataset(force=False)
             self._mark_startup("imdb sync scheduled")
+        else:
+            self._maybe_background_imdb_sync()
         self._finish_startup_profile()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
