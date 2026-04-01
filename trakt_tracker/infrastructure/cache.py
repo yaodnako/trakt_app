@@ -72,6 +72,16 @@ class BinaryCache:
                 continue
         return None
 
+    def get_any_bytes(self, key: str) -> bytes | None:
+        for path in self._candidate_paths(key):
+            if not path.exists():
+                continue
+            try:
+                return path.read_bytes()
+            except OSError:
+                continue
+        return None
+
     def set_bytes(self, key: str, value: bytes, suffix: str = ".img") -> None:
         path = self._path_for_key(key, suffix=suffix)
         path.write_bytes(value)

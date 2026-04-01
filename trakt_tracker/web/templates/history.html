@@ -1,37 +1,26 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="panel panel-hero">
-    <div>
-        <p class="eyebrow">Read-only prototype flow</p>
-        <h2>History</h2>
-        <p class="lede">Fast local history view over the existing SQLite data, with the same Python service layer still in charge.</p>
-    </div>
-    <div class="history-filter-row">
+<section class="panel">
+    <div class="progress-toolbar history-toolbar">
         <form method="post" action="/history/sync" class="history-sync-form">
             <input type="hidden" name="type" value="{{ history_type }}">
             <input type="hidden" name="title_filter" value="{{ history_title_filter }}">
             <input type="hidden" name="page" value="{{ page }}">
             <button type="submit" class="button">Sync</button>
         </form>
-        <form method="get" action="/history" class="filter-grid">
-            <label>
-                <span>Type</span>
-                <select name="type">
-                    <option value="all" {% if history_type == 'all' %}selected{% endif %}>All</option>
-                    <option value="movie" {% if history_type == 'movie' %}selected{% endif %}>Movies</option>
-                    <option value="show" {% if history_type == 'show' %}selected{% endif %}>Shows</option>
-                </select>
-            </label>
-            <label>
-                <span>Title filter</span>
-                <input type="text" name="title" value="{{ history_title_filter }}" list="history-titles" placeholder="Filter known titles">
-                <datalist id="history-titles">
-                    {% for item in history_title_options %}
-                    <option value="{{ item }}">
-                    {% endfor %}
-                </datalist>
-            </label>
+        <form method="get" action="/history" class="history-filter-form">
+            <select name="type" class="history-type-select">
+                <option value="all" {% if history_type == 'all' %}selected{% endif %}>All</option>
+                <option value="movie" {% if history_type == 'movie' %}selected{% endif %}>Movies</option>
+                <option value="show" {% if history_type == 'show' %}selected{% endif %}>Shows</option>
+            </select>
+            <input type="text" name="title" value="{{ history_title_filter }}" list="history-titles" class="history-title-input" placeholder="Filter known titles">
+            <datalist id="history-titles">
+                {% for item in history_title_options %}
+                <option value="{{ item }}">
+                {% endfor %}
+            </datalist>
             <button type="submit" class="button">Apply</button>
         </form>
     </div>
@@ -75,52 +64,65 @@
 
 <section class="panel">
     <div class="section-head">
-        <h3>Recent watch events</h3>
+        <h3>Watch history</h3>
         <p>Page {{ page }}{% if has_next %}, more items available{% endif %}</p>
     </div>
 
-    {% if history_rows %}
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Watched at</th>
-                    <th>Title</th>
-                    <th class="col-center">Episode</th>
-                    <th>Episode title</th>
-                    <th class="col-center">Rating</th>
-                    <th class="col-center">IMDb</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for row in history_rows %}
-                <tr>
-                    <td>{{ row.watched_at|dt }}</td>
-                    <td>
-                        <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}">{{ row.title }}</a>
-                    </td>
-                    <td class="col-center">{{ row.season|episode_label(row.episode) }}</td>
-                    <td>{{ row.episode_title or "" }}</td>
-                    <td class="col-center">
+    {% if history_days %}
+    <section class="history-day-grid">
+        {% for day in history_days %}
+        <article class="history-day-card">
+            <div class="history-day-head">
+                <h4>{{ day.day_label }}</h4>
+                <span>{{ day.count }} watch{{ '' if day.count == 1 else 'es' }}</span>
+            </div>
+            <div class="history-entry-list">
+                {% for row in day.entries %}
+                <article class="history-entry-card">
+                    <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}" class="history-entry-poster">
+                        {% if row.poster_url %}
+                        <img
+                            src="{{ row.poster_url|cached_image_url }}"
+                            alt="{{ row.title }} poster"
+                            loading="lazy"
+                            data-direct-src="{{ row.poster_url }}"
+                            onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+                        >
+                        {% else %}
+                        <div class="poster-fallback">No poster</div>
+                        {% endif %}
+                    </a>
+                    <div class="history-entry-main">
+                        <div class="history-entry-heading">
+                            <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}">{{ row.title }}</a>
+                            {% if row.type == 'show' and row.season is not none and row.episode is not none %}
+                            <span class="history-pill">{{ row.season|episode_label(row.episode) }}</span>
+                            {% endif %}
+                            <span class="history-pill muted">{{ row.type|upper }}</span>
+                        </div>
+                        {% if row.episode_title %}
+                        <p class="history-entry-episode">{{ row.episode_title }}</p>
+                        {% endif %}
+                    </div>
+                    <div class="history-entry-meta">
                         {% if row.display_rating is not none %}
-                        {{ row.display_rating }}/10
+                        <span class="history-chip">{{ row.display_rating }}/10</span>
                         {% else %}
                         <a
-                            class="button ghost"
+                            class="button ghost text-button"
                             href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page }}&rate_trakt_id={{ row.title_trakt_id }}&rate_type={{ row.type }}&rate_season={{ row.season or '' }}&rate_episode={{ row.episode or '' }}&rate_title={{ row.title|urlencode }}"
                         >Rate</a>
                         {% endif %}
-                    </td>
-                    <td class="col-center">
                         {% if row.episode_imdb_rating is not none %}
-                        {{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}
+                        <span class="history-chip ghost">{{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}</span>
                         {% endif %}
-                    </td>
-                </tr>
+                    </div>
+                </article>
                 {% endfor %}
-            </tbody>
-        </table>
-    </div>
+            </div>
+        </article>
+        {% endfor %}
+    </section>
 
     <div class="pager">
         {% if page > 1 %}
