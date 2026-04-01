@@ -1,127 +1,62 @@
 # Trakt Tracker
 
-This is the single entry-point document for a new chat or a new development session.
+Краткая точка входа для нового чата и новой сессии по проекту.
 
-## Start Here
+## Что это сейчас
 
-If you are starting a new chat for this project:
+- `desktop` на `PySide6` остаётся основным рабочим интерфейсом
+- `web` на `FastAPI + Jinja2` развивается как второй UI поверх того же Python core и той же SQLite
+- source of truth:
+  - `Trakt` для history / ratings / progress / calendar
+  - `TMDb` для artwork и части metadata
+  - official `IMDb datasets` для IMDb ratings/votes
 
-1. Read this `README.md` first.
-2. Then open only these files as needed:
-   - `ARCHITECTURE.md`
-     For development rules, architectural boundaries, workflow, and documentation ownership.
-   - `FEATURES.md`
-     For what the app currently does and what is only partial.
-   - `STATE.md`
-     For current technical state, known limitations, and confirmed upstream data gaps.
+## Что читать в новом чате
 
-## Which File To Use
-
-- Use `README.md` for:
-  - setup
-  - launch
-  - first orientation
-- Use `ARCHITECTURE.md` for:
-  - how to work in this repo
-  - where logic should live
-  - when to update docs
-- Use `FEATURES.md` for:
-  - current feature inventory
-  - what should be preserved if migrating stacks
-- Use `STATE.md` for:
-  - current project reality
-  - confirmed provider/data issues
-  - known limitations and cleanup notes
-
-See `ARCHITECTURE.md` for development rules, project structure, and documentation ownership.
-See `FEATURES.md` for current functionality inventory.
-See `STATE.md` for current technical state and known limitations.
-
-Current project direction:
-- keep the existing desktop UI as the working baseline
-- evaluate a web prototype next instead of extending PySide blindly
-- build the web prototype over the existing Python services/repositories and SQLite state
-
-Локальное Windows desktop приложение для учета просмотра фильмов и сериалов через Trakt API.
-
-## Возможности v1
-
-- OAuth-авторизация через Trakt
-- Поиск фильмов и сериалов
-- Карточки тайтлов
-- Оценки `1..10`
-- Добавление просмотров в историю
-- Прогресс сериалов и upcoming эпизоды
-- Локальная история действий
-- Windows toast уведомления
+1. `README.md`
+2. `ARCHITECTURE.md`
+3. `FEATURES.md`
+4. `STATE.md`
 
 ## Запуск
 
-1. Установить зависимости:
+Desktop:
 
 ```powershell
 python -m pip install -e .
-```
-
-2. Запустить приложение:
-
-```powershell
 python -m trakt_tracker.main
 ```
 
-## Web Prototype
-
-Desktop remains the baseline runtime.
-
-The first web prototype is intentionally narrow:
-- `Progress`
-- `History`
-- `Search`
-- title/details page
-
-It reuses the existing Python service layer and the same SQLite database instead of replacing repositories/services.
-`Progress` in the web shell now supports:
-- shared local progress cards
-- `Sync`
-- `Hide Upcoming`
-- `Show Dropped`
-- `Play`
-- `Watched`
-- `Drop` / `Undrop`
-- immediate rating-or-skip flow after marking watched
-
-Install web dependencies:
+Web:
 
 ```powershell
 python -m pip install -e ".[web]"
-```
-
-Run the web prototype:
-
-```powershell
 python -m trakt_tracker.web.main
 ```
 
-Startup timing is written to:
+Батники:
 
-`C:\Users\yaodn\AppData\Local\TraktTracker\web_startup.log`
+- [run_trakt_tracker_web.bat](/D:/CodexProjects/Trakt_app/run_trakt_tracker_web.bat)
+- [restart_trakt_tracker_web.bat](/D:/CodexProjects/Trakt_app/restart_trakt_tracker_web.bat)
 
-Per-request timing is written to:
+## Где проект сейчас по архитектуре
 
-`C:\Users\yaodn\AppData\Local\TraktTracker\web_request_timings.log`
+Уже вынесены отдельные слои:
 
-## Настройка Trakt
+- [sync_policy.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/sync_policy.py)
+- [operations.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/operations.py)
+- [history_sync.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_sync.py)
+- [progress_sync.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/progress_sync.py)
+- [notification_refresh.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/notification_refresh.py)
+- [history_read_model.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_read_model.py)
+- [episode_metadata.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/episode_metadata.py)
+- [trakt_payload_cache.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/trakt_payload_cache.py)
 
-Создайте собственное приложение в Trakt и укажите redirect URI:
+Это уже лучше, чем исходный монолитный `services.py`, но рефактор ещё не завершён.
 
-`http://127.0.0.1:8765/callback`
+## Что важно помнить
 
-## Startup Timing
-
-The app writes the latest startup timing breakdown to:
-
-`C:\Users\yaodn\AppData\Local\TraktTracker\startup.log`
-
-This log shows startup stages and elapsed milliseconds for each stage.
-
-При первом запуске приложение попросит `client_id` и `client_secret`, затем откроет браузер для OAuth.
+- `desktop` и `web` делят одну SQLite и один core
+- sync / ratings / progress всё ещё чувствительные места
+- при вопросах про “почему что-то не обновилось” сначала смотреть `STATE.md`
+- при вопросах про дальнейший рефактор сначала смотреть `ARCHITECTURE.md`

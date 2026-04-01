@@ -9,9 +9,14 @@ from typing import Callable
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.history_sync import HistorySyncWorkflow
+from trakt_tracker.application.history_read_model import HistoryReadModelService
 from trakt_tracker.application.notification_refresh import NotificationRefreshWorkflow
 from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
 from trakt_tracker.application.sync_policy import SyncPolicy
+from trakt_tracker.application.trakt_payload_cache import (
+    load_cached_trakt_history_items,
+    load_cached_trakt_rating_items,
+)
 from trakt_tracker.config import AppConfig, ConfigStore, get_app_data_dir
 from trakt_tracker.domain import DashboardState, EpisodeSummary, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
 from trakt_tracker.infrastructure.keyring_store import TokenStore
@@ -166,6 +171,7 @@ class LibraryService:
         self._tmdb_factory = tmdb_factory
         self._imdb_client = imdb_client
         self._episode_metadata = EpisodeMetadataService(db, episode_repo, imdb_client)
+        self._history_read_model = HistoryReadModelService(db, history, user_states, episode_repo, self._episode_metadata)
 
     def search_titles(self, query: str, title_type: str | None = None) -> list[TitleSummary]:
         self._remember_search_query(query)
@@ -370,98 +376,12 @@ class LibraryService:
         offset: int = 0,
         title_filter: str | None = None,
     ) -> list[dict]:
-        with self._db.session() as session:
-            rows = self._history.list_filtered(
-                session,
-                title_type=title_type,
-                title_filter=title_filter,
-                action="watched",
-            )
-            rows = self._dedupe_history_rows(rows)
-            if offset:
-                rows = rows[offset:]
-            if limit is not None:
-                rows = rows[:limit]
-            ratings = self._user_states.ratings_by_trakt_ids(session, [row.title_trakt_id for row in rows])
-            rated_map = self._history.latest_rated_map(
-                session,
-                title_type=title_type,
-                title_filter=title_filter,
-            )
-            episode_metadata = self._episode_repo.metadata_by_episode_keys(
-                session,
-                [
-                    (row.title_trakt_id, row.season, row.episode)
-                    for row in rows
-                    if row.title_type == "show" and row.season is not None and row.episode is not None
-                ],
-            )
-            cached_episode_imdb = self._episode_metadata.load_cached_episode_imdb_metadata(
-                [
-                    (row.title_trakt_id, row.season, row.episode)
-                    for row in rows
-                    if row.title_type == "show" and row.season is not None and row.episode is not None
-                ]
-            )
-            cached_title_ratings, cached_episode_ratings = self._episode_metadata.load_cached_trakt_rating_maps()
-            return [
-                {
-                    "title_trakt_id": row.title_trakt_id,
-                    "title": row.title,
-                    "type": row.title_type,
-                    "action": row.action,
-                    "watched_at": row.watched_at,
-                    "season": row.season,
-                    "episode": row.episode,
-                    "episode_title": (
-                        (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("title")
-                        if row.season is not None and row.episode is not None
-                        else None
-                    ),
-                    "episode_imdb_rating": (
-                        (
-                            (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_rating")
-                            or (cached_episode_imdb.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_rating")
-                        )
-                        if row.season is not None and row.episode is not None
-                        else None
-                    ),
-                    "episode_imdb_votes": (
-                        (
-                            (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_votes")
-                            or (cached_episode_imdb.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_votes")
-                        )
-                        if row.season is not None and row.episode is not None
-                        else None
-                    ),
-                    "event_rating": row.rating,
-                    "title_rating": ratings.get(row.title_trakt_id),
-                    "display_rating": (
-                        row.rating
-                        or rated_map.get((row.title_trakt_id, row.season, row.episode))
-                        or cached_episode_ratings.get((row.title_trakt_id, row.season, row.episode))
-                        if row.title_type == "show"
-                        else (
-                            row.rating
-                            or rated_map.get((row.title_trakt_id, None, None), ratings.get(row.title_trakt_id))
-                            or cached_title_ratings.get(row.title_trakt_id)
-                        )
-                    ),
-                }
-                for row in rows
-            ]
-
-    @staticmethod
-    def _dedupe_history_rows(rows: list) -> list:
-        seen: set[tuple[str, int, int | None, int | None]] = set()
-        deduped: list = []
-        for row in rows:
-            key = (row.title_type, row.title_trakt_id, row.season, row.episode)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(row)
-        return deduped
+        return self._history_read_model.history(
+            title_type=title_type,
+            limit=limit,
+            offset=offset,
+            title_filter=title_filter,
+        )
 
     def history_titles(self, title_type: str | None = None) -> list[str]:
         with self._db.session() as session:
@@ -615,6 +535,7 @@ class SyncService:
         episode_metadata: EpisodeMetadataService,
     ) -> None:
         self._imdb_client = IMDbDatasetClient()
+        self._episode_metadata = episode_metadata
         self._workflow = HistorySyncWorkflow(
             db,
             auth_service,
@@ -643,10 +564,10 @@ class SyncService:
 
     def sync_imdb_dataset(self, force: bool = False, status_callback=None) -> bool:
         changed = self._imdb_client.sync(force=force, status_callback=status_callback)
-        self._backfill_episode_imdb_ids_from_payloads(
-            self._load_cached_trakt_history_items() + self._load_cached_trakt_rating_items()
+        self._episode_metadata.backfill_episode_imdb_ids_from_payloads(
+            load_cached_trakt_history_items() + load_cached_trakt_rating_items()
         )
-        self._enrich_episode_imdb_ratings()
+        self._episode_metadata.enrich_episode_imdb_ratings()
         return changed
 
     def clear_imdb_dataset(self) -> None:
@@ -654,22 +575,6 @@ class SyncService:
 
     def imdb_dataset_status(self) -> str:
         return self._imdb_client.last_updated_text()
-
-    def _sync_history_and_ratings(self, history_items: list[dict], ratings: list[dict]) -> None:
-        show_ids: set[int] = set()
-        with self._db.session() as session:
-            for item in history_items:
-                imported = self._import_history_item(session, item)
-                if imported is not None and imported["title_type"] == "show":
-                    show_ids.add(imported["trakt_id"])
-            self._history.delete_trakt_rated(session)
-            for item in ratings:
-                self._import_rating_item(session, item)
-            self._sync_state.set_value(session, "initial_import_at", datetime.now(tz=UTC).isoformat())
-        for trakt_id in show_ids:
-            self.refresh_show(trakt_id)
-        self._backfill_episode_imdb_ids_from_payloads(history_items + ratings)
-        self._enrich_episode_imdb_ratings()
 
     def repair_legacy_episode_history(self) -> bool:
         return self._workflow.repair_legacy_episode_history()
@@ -679,377 +584,6 @@ class SyncService:
 
     def dashboard_state(self) -> DashboardState:
         return self._workflow.dashboard_state()
-
-    def _import_history_item(self, session, item: dict) -> dict | None:
-        raw_type = item.get("type")
-        season = None
-        episode_number = None
-        if raw_type == "episode":
-            episode_payload = item.get("episode", {}) or {}
-            show_payload = item.get("show", {}) or {}
-            ids = show_payload.get("ids", {}) if isinstance(show_payload, dict) else {}
-            trakt_id = ids.get("trakt")
-            if not trakt_id:
-                return None
-            title_type = "show"
-            title = TitleSummary(
-                trakt_id=trakt_id,
-                title_type="show",
-                title=show_payload.get("title", ""),
-                year=show_payload.get("year"),
-                overview=show_payload.get("overview", ""),
-                status=show_payload.get("status", ""),
-                slug=ids.get("slug", ""),
-            )
-            season = episode_payload.get("season")
-            episode_number = episode_payload.get("number")
-            episode_ids = episode_payload.get("ids", {}) if isinstance(episode_payload, dict) else {}
-            episode_trakt_id = episode_ids.get("trakt", 0)
-            if season is not None and episode_number is not None:
-                self._episode_repo.upsert_episode(
-                    session,
-                    trakt_id,
-                    EpisodeSummary(
-                        trakt_id=episode_trakt_id,
-                        season=season,
-                        number=episode_number,
-                        title=episode_payload.get("title", ""),
-                        overview=episode_payload.get("overview", ""),
-                        runtime=episode_payload.get("runtime"),
-                        first_aired=(
-                            datetime.fromisoformat(episode_payload["first_aired"].replace("Z", "+00:00"))
-                            if episode_payload.get("first_aired")
-                            else None
-                        ),
-                    ),
-                )
-        else:
-            payload = item.get(raw_type, {})
-            ids = payload.get("ids", {})
-            trakt_id = ids.get("trakt")
-            if not trakt_id:
-                return None
-            title_type = raw_type
-            title = TitleSummary(
-                trakt_id=trakt_id,
-                title_type=title_type,
-                title=payload.get("title", ""),
-                year=payload.get("year"),
-                overview=payload.get("overview", ""),
-                status=payload.get("status", ""),
-                slug=ids.get("slug", ""),
-            )
-        model = self._titles.upsert_title(session, title)
-        state = self._user_states.ensure_state(session, model.id)
-        state.in_history = True
-        state.tracked = title_type == "show"
-        watched_at_raw = item.get("watched_at")
-        watched_at = datetime.fromisoformat(watched_at_raw.replace("Z", "+00:00")) if watched_at_raw else datetime.now(tz=UTC)
-        state.last_watched_at = watched_at
-        self._history.add_event(
-            session,
-            trakt_history_id=item.get("id"),
-            title_trakt_id=trakt_id,
-            title=title.title,
-            title_type=title_type,
-            action="watched",
-            watched_at=watched_at,
-            season=season,
-            episode=episode_number,
-            source="trakt",
-        )
-        return {"trakt_id": trakt_id, "title_type": title_type}
-
-    def _import_rating_item(self, session, item: dict) -> None:
-        raw_type = item.get("type")
-        rating_value = item.get("rating")
-        rated_at_raw = item.get("rated_at")
-        rated_at = datetime.fromisoformat(rated_at_raw.replace("Z", "+00:00")) if rated_at_raw else datetime.now(tz=UTC)
-        if raw_type == "episode":
-            episode_payload = item.get("episode", {}) or {}
-            show_payload = item.get("show", {}) or {}
-            ids = show_payload.get("ids", {}) if isinstance(show_payload, dict) else {}
-            trakt_id = ids.get("trakt")
-            if not trakt_id:
-                return
-            title = TitleSummary(
-                trakt_id=trakt_id,
-                title_type="show",
-                title=show_payload.get("title", ""),
-                year=show_payload.get("year"),
-                overview=show_payload.get("overview", ""),
-                status=show_payload.get("status", ""),
-                slug=ids.get("slug", ""),
-            )
-            self._titles.upsert_title(session, title)
-            season = episode_payload.get("season")
-            episode_number = episode_payload.get("number")
-            episode_ids = episode_payload.get("ids", {}) if isinstance(episode_payload, dict) else {}
-            episode_trakt_id = episode_ids.get("trakt", 0)
-            if season is not None and episode_number is not None:
-                self._episode_repo.upsert_episode(
-                    session,
-                    trakt_id,
-                    EpisodeSummary(
-                        trakt_id=episode_trakt_id,
-                        season=season,
-                        number=episode_number,
-                        title=episode_payload.get("title", ""),
-                        overview=episode_payload.get("overview", ""),
-                        runtime=episode_payload.get("runtime"),
-                        first_aired=(
-                            datetime.fromisoformat(episode_payload["first_aired"].replace("Z", "+00:00"))
-                            if episode_payload.get("first_aired")
-                            else None
-                        ),
-                    ),
-                )
-            self._history.add_event(
-                session,
-                trakt_history_id=None,
-                title_trakt_id=trakt_id,
-                title=title.title,
-                title_type="show",
-                action="rated",
-                watched_at=rated_at,
-                season=season,
-                episode=episode_number,
-                rating=rating_value,
-                source="trakt",
-            )
-            return
-        payload = item.get(raw_type, {})
-        ids = payload.get("ids", {})
-        trakt_id = ids.get("trakt")
-        if not trakt_id:
-            return
-        title = TitleSummary(
-            trakt_id=trakt_id,
-            title_type=raw_type,
-            title=payload.get("title", ""),
-            year=payload.get("year"),
-            overview=payload.get("overview", ""),
-            status=payload.get("status", ""),
-            slug=ids.get("slug", ""),
-        )
-        model = self._titles.upsert_title(session, title)
-        state = self._user_states.ensure_state(session, model.id)
-        state.rating = rating_value
-        self._history.add_event(
-            session,
-            trakt_history_id=None,
-            title_trakt_id=trakt_id,
-            title=title.title,
-            title_type=raw_type,
-            action="rated",
-            watched_at=rated_at,
-            rating=rating_value,
-            source="trakt",
-        )
-
-    @staticmethod
-    def _load_cached_trakt_history_items() -> list[dict]:
-        cache_dir = get_app_data_dir() / "cache" / "trakt"
-        if not cache_dir.exists():
-            return []
-        merged_payload: list[dict] = []
-        seen_keys: set[tuple] = set()
-        for path in cache_dir.glob("*.json"):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            value = payload.get("value")
-            if not isinstance(value, list) or not value:
-                continue
-            first = value[0]
-            if not isinstance(first, dict):
-                continue
-            if "watched_at" not in first or "type" not in first:
-                continue
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                key = (
-                    item.get("id"),
-                    item.get("watched_at"),
-                    item.get("type"),
-                    ((item.get("show") or {}).get("ids") or {}).get("trakt"),
-                    ((item.get("episode") or {}).get("ids") or {}).get("trakt"),
-                    ((item.get("movie") or {}).get("ids") or {}).get("trakt"),
-                )
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                merged_payload.append(item)
-        return merged_payload
-
-    @staticmethod
-    def _load_cached_trakt_rating_items() -> list[dict]:
-        cache_dir = get_app_data_dir() / "cache" / "trakt"
-        if not cache_dir.exists():
-            return []
-        merged_payload: list[dict] = []
-        seen_keys: set[tuple] = set()
-        for path in cache_dir.glob("*.json"):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            value = payload.get("value")
-            if not isinstance(value, list) or not value:
-                continue
-            first = value[0]
-            if not isinstance(first, dict):
-                continue
-            if "rated_at" not in first or "type" not in first or "rating" not in first:
-                continue
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                key = (
-                    item.get("rated_at"),
-                    item.get("type"),
-                    item.get("rating"),
-                    ((item.get("show") or {}).get("ids") or {}).get("trakt"),
-                    ((item.get("episode") or {}).get("ids") or {}).get("trakt"),
-                    ((item.get("movie") or {}).get("ids") or {}).get("trakt"),
-                )
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                merged_payload.append(item)
-        return merged_payload
-
-    @staticmethod
-    def _fetch_all_watch_history(client: TraktClient, page_size: int = 100) -> list[dict]:
-        items: list[dict] = []
-        page = 1
-        while True:
-            batch = client.get_watch_history(limit=page_size, page=page)
-            if not batch:
-                break
-            items.extend(batch)
-            if len(batch) < page_size:
-                break
-            page += 1
-        return items
-
-    @staticmethod
-    def _fetch_all_ratings(client: TraktClient, page_size: int = 100) -> list[dict]:
-        items: list[dict] = []
-        seen_keys: set[tuple] = set()
-        for title_type in ("episode", "show", "movie"):
-            page = 1
-            while True:
-                batch = client.get_ratings(title_type=title_type, limit=page_size, page=page)
-                if not batch:
-                    break
-                for item in batch:
-                    if not isinstance(item, dict):
-                        continue
-                    key = (
-                        item.get("rated_at"),
-                        item.get("type"),
-                        item.get("rating"),
-                        ((item.get("show") or {}).get("ids") or {}).get("trakt"),
-                        ((item.get("episode") or {}).get("ids") or {}).get("trakt"),
-                        ((item.get("movie") or {}).get("ids") or {}).get("trakt"),
-                    )
-                    if key in seen_keys:
-                        continue
-                    seen_keys.add(key)
-                    items.append(item)
-                if len(batch) < page_size:
-                    break
-                page += 1
-        return items
-
-    def _fetch_recent_history_updates(self, client: TraktClient, page_size: int = 100) -> list[dict]:
-        with self._db.session() as session:
-            known_ids = self._history.known_trakt_history_ids(session)
-        if not known_ids:
-            return self._fetch_all_watch_history(client, page_size=page_size)
-        items: list[dict] = []
-        page = 1
-        while True:
-            batch = client.get_watch_history(limit=page_size, page=page)
-            if not batch:
-                break
-            unseen = [item for item in batch if item.get("id") not in known_ids]
-            if unseen:
-                items.extend(unseen)
-            if not unseen or len(batch) < page_size:
-                break
-            page += 1
-        return items
-
-    def _current_history_activity_signature(self) -> str:
-        client = self._auth.get_client()
-        payload = client.get_last_activities(use_cache=False)
-        return self._policy.build_history_activity_signature(payload)
-
-    def _enrich_episode_imdb_ratings(self) -> None:
-        if not self._imdb_client.is_ready():
-            return
-        with self._db.session() as session:
-            rows = self._episode_repo.list_all_with_imdb(session)
-            for row in rows:
-                if not row.imdb_id:
-                    continue
-                episode = EpisodeSummary(
-                    trakt_id=row.episode_trakt_id,
-                    season=row.season,
-                    number=row.number,
-                    title=row.title,
-                    imdb_id=row.imdb_id,
-                    imdb_rating=row.imdb_rating,
-                    imdb_votes=row.imdb_votes,
-                    first_aired=row.first_aired,
-                    runtime=row.runtime,
-                    overview=row.overview,
-                )
-                enriched = self._imdb_client.enrich_episode(episode)
-                row.imdb_rating = enriched.imdb_rating
-                row.imdb_votes = enriched.imdb_votes
-
-    def _backfill_episode_imdb_ids_from_cached_payloads(self) -> None:
-        payloads = []
-        payloads.extend(self._load_cached_trakt_history_items())
-        payloads.extend(self._load_cached_trakt_rating_items())
-        self._backfill_episode_imdb_ids_from_payloads(payloads)
-
-    def _backfill_episode_imdb_ids_from_payloads(self, payloads: list[dict]) -> None:
-        if not payloads:
-            return
-        with self._db.session() as session:
-            for item in payloads:
-                if item.get("type") != "episode":
-                    continue
-                show_payload = item.get("show", {}) or {}
-                episode_payload = item.get("episode", {}) or {}
-                show_ids = show_payload.get("ids", {}) if isinstance(show_payload, dict) else {}
-                episode_ids = episode_payload.get("ids", {}) if isinstance(episode_payload, dict) else {}
-                show_trakt_id = show_ids.get("trakt")
-                season = episode_payload.get("season")
-                number = episode_payload.get("number")
-                if not show_trakt_id or season is None or number is None:
-                    continue
-                row = self._episode_repo.find_episode(session, show_trakt_id, season, number)
-                if row is None:
-                    continue
-                imdb_id = str(episode_ids.get("imdb", "") or "")
-                if not imdb_id:
-                    show_imdb_id = str(show_ids.get("imdb", "") or "")
-                    if show_imdb_id:
-                        imdb_id = self._imdb_client.lookup_episode_imdb_id(show_imdb_id, int(season), int(number))
-                        if not imdb_id:
-                            imdb_id = self._imdb_client.lookup_episode_imdb_id_by_title(
-                                show_imdb_id,
-                                str(episode_payload.get("title", "") or ""),
-                            )
-                if imdb_id and not row.imdb_id:
-                    row.imdb_id = imdb_id
 
 
 def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
