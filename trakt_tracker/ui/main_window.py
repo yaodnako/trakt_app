@@ -404,7 +404,7 @@ class TitleDetailsDialog(QDialog):
         self._render()
 
     def _render(self) -> None:
-        title = self.services.library.get_title_details(self.title_info.trakt_id, self.title_info.title_type)
+        title = self.services.catalog.get_title_details(self.title_info.trakt_id, self.title_info.title_type)
         text = [
             f"{title.title} ({title.year or 'n/a'})",
             f"Type: {title.title_type}",
@@ -417,7 +417,7 @@ class TitleDetailsDialog(QDialog):
     def _rate(self) -> None:
         dialog = RatingDialog(self.title_info.title, self)
         if dialog.exec():
-            self.services.library.set_rating(
+            self.services.interactions.save_rating(
                 RatingInput(
                     title_type=self.title_info.title_type,
                     trakt_id=self.title_info.trakt_id,
@@ -430,7 +430,7 @@ class TitleDetailsDialog(QDialog):
     def _history(self) -> None:
         dialog = HistoryDialog(self.title_info, self)
         if dialog.exec():
-            self.services.library.add_history_item(dialog.to_input())
+            self.services.interactions.add_history_item(dialog.to_input())
             QMessageBox.information(self, "Saved", "History item saved.")
 
     def _refresh_progress(self) -> None:
@@ -1096,7 +1096,7 @@ class SearchEnrichmentWorker(QThread):
             if self.isInterruptionRequested():
                 return
             try:
-                enriched = self.services.library.enrich_title_with_tmdb(title)
+                enriched = self.services.catalog.enrich_title_with_tmdb(title)
             except Exception:
                 continue
             if self.isInterruptionRequested():
@@ -1117,7 +1117,7 @@ class SearchFetchWorker(QThread):
 
     def run(self) -> None:
         try:
-            results = self.services.library.search_titles(self.query, self.title_type)
+            results = self.services.catalog.search_titles(self.query, self.title_type)
         except Exception as exc:
             self.search_failed.emit(self.generation, str(exc))
             return
@@ -1709,7 +1709,7 @@ class MainWindow(QMainWindow):
         self.notifications_checkbox.setChecked(config.notifications_enabled)
         self.debug_mode_checkbox.setChecked(config.debug_mode)
         self.imdb_status_label.setText(self.services.sync.imdb_dataset_status())
-        sort_mode = self.services.library.get_search_sort_mode()
+        sort_mode = self.services.catalog.get_search_sort_mode()
         index = self.search_sort.findText(sort_mode)
         self.search_sort.blockSignals(True)
         self.search_sort.setCurrentIndex(index if index >= 0 else 0)
@@ -1717,7 +1717,7 @@ class MainWindow(QMainWindow):
 
     def _reload_search_history(self) -> None:
         current = self.search_input.currentText().strip()
-        history = self.services.library.search_history()
+        history = self.services.catalog.search_history()
         self.search_input.blockSignals(True)
         self.search_input.clear()
         for item in history:
@@ -1729,12 +1729,12 @@ class MainWindow(QMainWindow):
         self.search_input.blockSignals(False)
 
     def _restore_last_search(self) -> None:
-        state = self.services.library.load_last_search_state()
+        state = self.services.catalog.load_last_search_state()
         if not state:
             return
         query = state.get("query", "").strip()
         title_type = state.get("title_type", "all")
-        sort_mode = self.services.library.get_search_sort_mode() or state.get("sort_mode", "IMDb votes")
+        sort_mode = self.services.catalog.get_search_sort_mode() or state.get("sort_mode", "IMDb votes")
         results = state.get("results", [])
         if query:
             self.search_input.setCurrentText(query)
@@ -1803,7 +1803,7 @@ class MainWindow(QMainWindow):
             title_type = None
         self._reload_search_history()
         self.search_input.setCurrentText(query)
-        state = self.services.library.load_last_search_state()
+        state = self.services.catalog.load_last_search_state()
         if (
             state
             and state.get("query", "").strip() == query
@@ -1829,7 +1829,7 @@ class MainWindow(QMainWindow):
             self._search()
 
     def _on_search_sort_changed(self, mode: str) -> None:
-        self.services.library.set_search_sort_mode(mode)
+        self.services.catalog.set_search_sort_mode(mode)
         current_results = list(self.search_model._all_results)
         if current_results:
             self.search_model.replace_results(self._sort_search_results(current_results))
@@ -1941,7 +1941,7 @@ class MainWindow(QMainWindow):
         if not query:
             return
         title_type = self.search_type.currentText()
-        self.services.library.save_last_search_state(
+        self.services.catalog.save_last_search_state(
             query,
             None if title_type == "all" else title_type,
             list(self.search_model._all_results),
@@ -2053,7 +2053,7 @@ class MainWindow(QMainWindow):
             return
         dialog = RatingDialog(title.title, self)
         if dialog.exec():
-            self.services.library.set_rating(
+            self.services.interactions.save_rating(
                 RatingInput(title_type=title.title_type, trakt_id=title.trakt_id, rating=dialog.rating.value()),
                 title=title.title,
             )
@@ -2065,7 +2065,7 @@ class MainWindow(QMainWindow):
             return
         dialog = HistoryDialog(title, self)
         if dialog.exec():
-            self.services.library.add_history_item(dialog.to_input())
+            self.services.interactions.add_history_item(dialog.to_input())
             if title.title_type == "show":
                 self.services.progress.refresh_show_progress(title.trakt_id)
             self.refresh_all()
@@ -2243,77 +2243,43 @@ class MainWindow(QMainWindow):
         current = next((item for item in self._progress_items if item.trakt_id == trakt_id), None)
         if current is None or current.next_episode is None:
             return
-        episode = current.next_episode
         try:
-            self.services.notifications.mark_episode_seen(
-                show_trakt_id=current.trakt_id,
-                show_title=current.title,
-                episode=episode,
-            )
-            self.services.library.add_history_item(
-                HistoryItemInput(
-                    title_type="show",
-                    trakt_id=current.trakt_id,
-                    watched_at=datetime.now(),
-                    season=episode.season,
-                    episode=episode.number,
-                    title=current.title,
-                )
-            )
+            action = self.services.interactions.mark_progress_episode_watched(current, watched_at=datetime.now())
         except Exception as exc:
             QMessageBox.critical(self, "Mark watched failed", str(exc))
             return
 
-        dialog = RatingDialog(f"{current.title} S{episode.season:02d}E{episode.number:02d}", self)
+        dialog = RatingDialog(f"{action.title} S{action.season:02d}E{action.episode:02d}", self)
         if dialog.exec() and not dialog.skipped:
             try:
-                expected_rating = dialog.rating.value()
-                self.services.library.set_rating(
+                self.services.interactions.save_rating(
                     RatingInput(
                         title_type="show",
-                        trakt_id=current.trakt_id,
-                        rating=expected_rating,
-                        season=episode.season,
-                        episode=episode.number,
+                        trakt_id=action.trakt_id,
+                        rating=dialog.rating.value(),
+                        season=action.season,
+                        episode=action.episode,
                     ),
-                    title=current.title,
+                    title=action.title,
                 )
-                saved_rating = self.services.library.displayed_history_rating(
-                    title_type="show",
-                    trakt_id=current.trakt_id,
-                    season=episode.season,
-                    episode=episode.number,
-                )
-                if saved_rating != expected_rating:
-                    raise RuntimeError("Rating did not appear in history after save")
             except Exception as exc:
                 QMessageBox.critical(self, "Rating failed", str(exc))
                 return
         self._dismiss_play_watch_prompt(trakt_id)
         self._refresh_history()
-        self._sync_progress(force=True, focus_trakt_id=current.trakt_id)
-        self._debug_toast(f"Marked watched: {current.title} S{episode.season:02d}E{episode.number:02d}")
+        self._sync_progress(force=True, focus_trakt_id=action.trakt_id)
+        self._debug_toast(f"Marked watched: {action.title} S{action.season:02d}E{action.episode:02d}")
 
     def _mark_progress_episode_seen(self, trakt_id: int) -> None:
         current = next((item for item in self._progress_items if item.trakt_id == trakt_id), None)
         if current is None or current.next_episode is None:
             return
-        episode = current.next_episode
-        if episode.first_aired is None:
+        try:
+            action = self.services.interactions.mark_progress_episode_seen(current, now=datetime.now(tz=UTC))
+        except Exception:
             return
-        now = datetime.now(tz=UTC)
-        release_at = episode.first_aired
-        if release_at.tzinfo is None:
-            release_at = release_at.replace(tzinfo=UTC)
-        if release_at > now:
-            return
-        self.services.notifications.mark_episode_seen(
-            show_trakt_id=current.trakt_id,
-            show_title=current.title,
-            episode=episode,
-        )
-        self._refresh_progress(focus_trakt_id=current.trakt_id)
-        self._debug_toast(f"Marked seen: {current.title} S{episode.season:02d}E{episode.number:02d}")
+        self._refresh_progress(focus_trakt_id=action.trakt_id)
+        self._debug_toast(f"Marked seen: {action.title} S{action.season:02d}E{action.episode:02d}")
 
     def _toggle_progress_drop(self, trakt_id: int) -> None:
         current = next((item for item in self._progress_items if item.trakt_id == trakt_id), None)
@@ -2331,9 +2297,9 @@ class MainWindow(QMainWindow):
                 return
         try:
             if current.is_dropped:
-                self.services.progress.undrop_show(trakt_id)
+                self.services.interactions.set_progress_dropped(trakt_id, dropped=False)
             else:
-                self.services.progress.drop_show(trakt_id)
+                self.services.interactions.set_progress_dropped(trakt_id, dropped=True)
         except Exception as exc:
             QMessageBox.critical(self, "Drop failed", str(exc))
             return
@@ -2387,7 +2353,7 @@ class MainWindow(QMainWindow):
             self.history_list.setUpdatesEnabled(True)
             return
 
-        rows = self.services.library.history(title_type=title_type, title_filter=normalized_title_filter)
+        rows = self.services.history.history(title_type=title_type, title_filter=normalized_title_filter)
         self._history_rows_cache = self._sort_history_rows(rows)
         self._history_loaded_count = 0
         self._history_has_more = False
@@ -2455,25 +2421,16 @@ class MainWindow(QMainWindow):
         if not dialog.exec() or dialog.skipped:
             return
         try:
-            expected_rating = dialog.rating.value()
-            self.services.library.set_rating(
+            self.services.interactions.save_rating(
                 RatingInput(
                     title_type=row["type"],
                     trakt_id=row["title_trakt_id"],
-                    rating=expected_rating,
+                    rating=dialog.rating.value(),
                     season=row["season"],
                     episode=row["episode"],
                 ),
                 title=row["title"],
             )
-            saved_rating = self.services.library.displayed_history_rating(
-                title_type=row["type"],
-                trakt_id=row["title_trakt_id"],
-                season=row["season"],
-                episode=row["episode"],
-            )
-            if saved_rating != expected_rating:
-                raise RuntimeError("Rating did not appear in history after save")
         except Exception as exc:
             QMessageBox.critical(self, "Rating failed", str(exc))
             return
@@ -2485,7 +2442,7 @@ class MainWindow(QMainWindow):
 
     def _populate_history_title_filter(self, title_type: str | None) -> None:
         current_text = self.history_title_filter.currentText().strip()
-        titles = self.services.library.history_titles(title_type=title_type)
+        titles = self.services.history.history_titles(title_type=title_type)
         options = [self._ALL_HISTORY_TITLES, *titles]
         existing = [self.history_title_filter.itemText(index) for index in range(self.history_title_filter.count())]
         if existing == options:
@@ -2524,7 +2481,7 @@ class MainWindow(QMainWindow):
         if not reset and not self._history_has_more:
             return
         offset = 0 if reset else self._history_loaded_count
-        rows = self.services.library.history(
+        rows = self.services.history.history(
             title_type=title_type,
             title_filter=title_filter,
             limit=self._history_batch_size,
