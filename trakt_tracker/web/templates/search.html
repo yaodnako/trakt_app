@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel panel-hero">
+    <div>
+        <p class="eyebrow">Local-first search UX</p>
+        <h2>Search</h2>
+        <p class="lede">Repeated searches reuse the last saved result set first, which matches the desktop behavior but fits a normal web page flow.</p>
+    </div>
+    <form method="get" action="/search" class="filter-grid">
+        <label>
+            <span>Query</span>
+            <input type="text" name="q" value="{{ query }}" placeholder="Search movie or show titles">
+        </label>
+        <label>
+            <span>Type</span>
+            <select name="type">
+                <option value="all" {% if search_type == 'all' %}selected{% endif %}>All</option>
+                <option value="movie" {% if search_type == 'movie' %}selected{% endif %}>Movies</option>
+                <option value="show" {% if search_type == 'show' %}selected{% endif %}>Shows</option>
+            </select>
+        </label>
+        <label>
+            <span>Sort</span>
+            <select name="sort">
+                {% for item in sort_modes %}
+                <option value="{{ item }}" {% if sort_mode == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <button type="submit" class="button">Search</button>
+    </form>
+</section>
+
+{% if error_message %}
+<section class="banner error">{{ error_message }}</section>
+{% endif %}
+
+{% if source_label %}
+<section class="section-head">
+    <h3>Results</h3>
+    <p>{{ source_label }}</p>
+</section>
+{% endif %}
+
+{% if results %}
+<section class="card-grid">
+    {% for item in results %}
+    <article class="result-card">
+        <div class="poster-shell">
+            {% if item.poster_url %}
+            <img src="{{ item.poster_url|cached_image_url }}" alt="{{ item.title }} poster" loading="lazy">
+            {% else %}
+            <div class="poster-fallback">No poster</div>
+            {% endif %}
+        </div>
+        <div class="result-body">
+            <p class="meta">{{ item.title_type|upper }}{% if item.year %} · {{ item.year }}{% endif %}</p>
+            <h3><a href="/titles/{{ item.title_type }}/{{ item.trakt_id }}">{{ item.title }}</a></h3>
+            <p class="ratings">Trakt {{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}</p>
+            <p class="ratings">IMDb {{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}</p>
+            <p class="overview">{{ item.overview or "No overview yet." }}</p>
+        </div>
+    </article>
+    {% endfor %}
+</section>
+{% elif query and not error_message %}
+<section class="empty-state">
+    <h3>No matches</h3>
+    <p>Try a broader title, or switch the type filter back to all.</p>
+</section>
+{% endif %}
+
+{% if search_history %}
+<section class="panel">
+    <div class="section-head">
+        <h3>Recent queries</h3>
+        <p>Reuses the existing saved desktop search history.</p>
+    </div>
+    <div class="chip-row">
+        {% for item in search_history %}
+        <a class="chip" href="/search?q={{ item }}">{{ item }}</a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel panel-hero">
+    <div>
+        <p class="eyebrow">Dedicated details page</p>
+        <h2>Title details</h2>
+        <p class="lede">Desktop uses a dialog; the web prototype promotes this into a real page with its own route and stable navigation target.</p>
+    </div>
+    <a class="button ghost" href="/search">Back to search</a>
+</section>
+
+{% if error_message %}
+<section class="banner error">{{ error_message }}</section>
+{% elif title_item %}
+<section class="detail-layout">
+    <article class="panel poster-panel">
+        <div class="poster-shell poster-large">
+            {% if title_item.poster_url %}
+            <img src="{{ title_item.poster_url|cached_image_url }}" alt="{{ title_item.title }} poster">
+            {% else %}
+            <div class="poster-fallback">No poster</div>
+            {% endif %}
+        </div>
+    </article>
+
+    <article class="panel">
+        <p class="meta">{{ title_item.title_type|upper }}{% if title_item.year %} · {{ title_item.year }}{% endif %}</p>
+        <h2>{{ title_item.title }}</h2>
+        <div class="stats-grid">
+            <div>
+                <span>Status</span>
+                <strong>{{ title_item.status or "n/a" }}</strong>
+            </div>
+            <div>
+                <span>Trakt</span>
+                <strong>{{ title_item.trakt_rating|rating_with_votes(title_item.trakt_votes) }}</strong>
+            </div>
+            <div>
+                <span>TMDb</span>
+                <strong>{{ title_item.tmdb_rating|rating_with_votes(title_item.tmdb_votes) }}</strong>
+            </div>
+            <div>
+                <span>IMDb</span>
+                <strong>{{ title_item.imdb_rating|rating_with_votes(title_item.imdb_votes) }}</strong>
+            </div>
+        </div>
+        <div class="detail-copy">
+            <p>{{ title_item.overview or "No overview." }}</p>
+        </div>
+        <div class="chip-row">
+            {% if title_item.slug %}<span class="chip">slug: {{ title_item.slug }}</span>{% endif %}
+            {% if title_item.imdb_id %}<span class="chip">IMDb: {{ title_item.imdb_id }}</span>{% endif %}
+            {% if title_item.tmdb_id %}<span class="chip">TMDb: {{ title_item.tmdb_id }}</span>{% endif %}
+        </div>
+    </article>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trakt-tracker"
+version = "0.1.0"
+description = "Windows desktop Trakt tracker for movies and shows."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27.0",
+  "PySide6>=6.8.0",
+  "SQLAlchemy>=2.0.0",
+  "keyring>=25.0.0",
+]
+
+[project.optional-dependencies]
+web = [
+  "fastapi>=0.115.0",
+  "Jinja2>=3.1.0",
+  "python-multipart>=0.0.9",
+  "uvicorn>=0.32.0",
+]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+trakt-tracker = "trakt_tracker.main:main"
+trakt-tracker-web = "trakt_tracker.web.main:main"
+
+[tool.setuptools.packages.find]
+include = ["trakt_tracker*"]
+
+[tool.setuptools.package-data]
+"trakt_tracker.ui" = ["assets/*.svg"]
+"trakt_tracker.web" = ["templates/*.html", "static/*.css", "static/*.svg"]

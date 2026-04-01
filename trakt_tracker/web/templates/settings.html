@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <div class="section-head">
+        <h2>Settings</h2>
+    </div>
+    <form method="post" action="/settings" class="settings-form">
+        <label>
+            <span>Client ID</span>
+            <input type="text" name="client_id" value="{{ config.client_id }}">
+        </label>
+        <label>
+            <span>Client Secret</span>
+            <input type="password" name="client_secret" value="{{ config.client_secret }}">
+        </label>
+        <label>
+            <span>Redirect URI</span>
+            <input type="text" name="redirect_uri" value="{{ config.redirect_uri }}">
+        </label>
+        <label>
+            <span>TMDb API Key</span>
+            <input type="text" name="tmdb_api_key" value="{{ config.tmdb_api_key }}">
+        </label>
+        <label>
+            <span>TMDb Read Token</span>
+            <input type="password" name="tmdb_read_access_token" value="{{ config.tmdb_read_access_token }}">
+        </label>
+        <label>
+            <span>Kinopoisk API Key</span>
+            <input type="password" name="kinopoisk_api_key" value="{{ config.kinopoisk_api_key }}">
+        </label>
+        <label>
+            <span>Cache TTL (hours)</span>
+            <input type="number" name="cache_ttl_hours" min="1" max="168" value="{{ config.cache_ttl_hours }}">
+        </label>
+        <label>
+            <span>Polling interval (minutes)</span>
+            <input type="number" name="poll_interval_minutes" min="5" max="240" value="{{ config.poll_interval_minutes }}">
+        </label>
+        <label>
+            <span>UTC offset</span>
+            <input type="text" name="utc_offset" value="{{ config.utc_offset }}" placeholder="+03:00">
+        </label>
+        <label class="settings-checkbox">
+            <input type="checkbox" name="notifications_enabled" value="1" {% if config.notifications_enabled %}checked{% endif %}>
+            <span>Enable notifications</span>
+        </label>
+        <label class="settings-checkbox">
+            <input type="checkbox" name="debug_mode" value="1" {% if config.debug_mode %}checked{% endif %}>
+            <span>Enable debug toasts</span>
+        </label>
+        <label class="settings-checkbox">
+            <input type="checkbox" name="open_in_embedded_player" value="1" {% if config.open_in_embedded_player %}checked{% endif %}>
+            <span>Open Kinopoisk in embedded player</span>
+        </label>
+        <div class="settings-actions">
+            <button type="submit" class="button">Save settings</button>
+        </div>
+    </form>
+</section>
+{% endblock %}

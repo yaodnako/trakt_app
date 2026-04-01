@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+
+{% macro render_progress_card(item, is_new=False) %}
+<article class="progress-card{% if is_new %} is-released js-new-card{% endif %}"{% if is_new %} data-seen-form="seen-form-{{ item.trakt_id }}"{% endif %}>
+    <div class="progress-poster">
+        {% if item.poster_url %}
+        <img src="{{ item.poster_url|cached_image_url }}" alt="{{ item.title }} poster" loading="lazy">
+        {% else %}
+        <div class="poster-fallback">No poster</div>
+        {% endif %}
+        {% if is_new %}
+        <div class="release-chip">New</div>
+        {% endif %}
+        {% set skipped_count = item|progress_skipped_count %}
+        {% if skipped_count %}
+        <div class="poster-badge">{{ skipped_count }}</div>
+        {% endif %}
+        {% set chip = item|progress_rating_chip %}
+        {% if chip %}
+        <div class="poster-chip">
+            {% for part in chip.split(' | ') %}
+            {% set source = part.split('|', 1)[0] %}
+            {% set value = part.split('|', 1)[1] %}
+            <span class="poster-chip-part">
+                <img
+                    class="poster-chip-icon"
+                    src="{{ request.url_for('static', path='imdb_icon.png' if source == 'imdb' else 'trakt_logo_bw.svg') }}"
+                    alt="{{ source }}"
+                >
+                <span>{{ value }}</span>
+            </span>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+    <div class="progress-body">
+        <h3>{{ item.title }}</h3>
+        <div class="progress-copy">
+        {% if is_new %}
+        <form method="post" action="/progress/{{ item.trakt_id }}/seen" id="seen-form-{{ item.trakt_id }}" class="visually-hidden">
+            <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+            <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+            <input type="hidden" name="min_year" value="{{ min_year or '' }}">
+            <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+        </form>
+        <p class="meta">{{ item.completed }}/{{ item|progress_effective_aired }} watched ({{ '%.1f'|format(item|progress_effective_percent) }}%){% if item.status %} | {{ item.status }}{% endif %}</p>
+        {% if item.next_episode %}
+        <p class="progress-next">
+            Next: {{ item.next_episode.season|episode_label(item.next_episode.number) }} {{ item.next_episode.title }}<br>
+            Airs: {{ item.next_episode.first_aired|dt if item.next_episode.first_aired else 'unknown' }}
+        </p>
+        {% else %}
+        <p class="progress-next">No next episode queued.</p>
+        {% endif %}
+        {% else %}
+        <p class="meta">{{ item.completed }}/{{ item|progress_effective_aired }} watched ({{ '%.1f'|format(item|progress_effective_percent) }}%){% if item.status %} | {{ item.status }}{% endif %}</p>
+        {% if item.next_episode %}
+        <p class="progress-next">
+            Next: {{ item.next_episode.season|episode_label(item.next_episode.number) }} {{ item.next_episode.title }}<br>
+            Airs: {{ item.next_episode.first_aired|dt if item.next_episode.first_aired else 'unknown' }}
+        </p>
+        {% else %}
+        <p class="progress-next">No next episode queued.</p>
+        {% endif %}
+        {% endif %}
+        </div>
+        <div class="progress-actions">
+            <a
+                class="icon-button js-play-link"
+                href="/progress/{{ item.trakt_id }}/play?hide_upcoming={{ '1' if hide_upcoming else '0' }}&show_dropped={{ '1' if show_dropped else '0' }}&use_year_filter={{ '1' if use_year_filter else '0' }}&min_year={{ min_year or '' }}"
+                target="_blank"
+                rel="noreferrer"
+                title="Play"
+                {% if item.next_episode and not item.is_dropped %}
+                data-play-prompt-key="{{ item.trakt_id }}:{{ item.next_episode.season }}:{{ item.next_episode.number }}"
+                data-play-trakt-id="{{ item.trakt_id }}"
+                data-play-title="{{ item.title }}"
+                data-play-season="{{ item.next_episode.season }}"
+                data-play-episode="{{ item.next_episode.number }}"
+                data-play-episode-title="{{ item.next_episode.title }}"
+                data-play-hide-upcoming="{{ '1' if hide_upcoming else '0' }}"
+                data-play-show-dropped="{{ '1' if show_dropped else '0' }}"
+                data-play-use-year-filter="{{ '1' if use_year_filter else '0' }}"
+                data-play-min-year="{{ min_year or '' }}"
+                {% endif %}
+            >&#9654;</a>
+            <form method="post" action="/progress/{{ item.trakt_id }}/watch" class="js-watch-form" data-play-prompt-key="{% if item.next_episode %}{{ item.trakt_id }}:{{ item.next_episode.season }}:{{ item.next_episode.number }}{% endif %}">
+                <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+                <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+                <input type="hidden" name="min_year" value="{{ min_year or '' }}">
+                <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+                <button type="submit" class="icon-button" title="Mark watched" {% if not item.next_episode or item.is_dropped %}disabled{% endif %}>&#10003;</button>
+            </form>
+            <form
+                method="post"
+                action="/progress/{{ item.trakt_id }}/drop-toggle"
+                {% if not item.is_dropped %}onsubmit='return confirm({{ ("Drop " ~ item.title ~ " from Progress?")|tojson }})'{% endif %}
+            >
+                <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+                <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+                <input type="hidden" name="min_year" value="{{ min_year or '' }}">
+                <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+                <input type="hidden" name="is_dropped" value="{{ '1' if item.is_dropped else '0' }}">
+                <button
+                    type="submit"
+                    class="icon-button drop-toggle {% if item.is_dropped %}undrop{% else %}drop{% endif %}"
+                    title="{% if item.is_dropped %}Undrop{% else %}Drop{% endif %}"
+                >&#8854;</button>
+            </form>
+        </div>
+    </div>
+</article>
+{% endmacro %}
+
+{% block content %}
+<section class="panel panel-hero">
+    <div class="progress-toolbar">
+        <form method="post" action="/progress/sync">
+            <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+            <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+            <input type="hidden" name="min_year" value="{{ min_year or '' }}">
+            <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+            <button type="submit" class="button">Sync</button>
+        </form>
+        <label class="toggle-chip">
+            <input type="checkbox" {% if hide_upcoming %}checked{% endif %} onchange="window.location='?hide_upcoming='+(this.checked ? '1' : '0')+'&show_dropped={{ '1' if show_dropped else '0' }}&use_year_filter={{ '1' if use_year_filter else '0' }}&min_year={{ min_year or '' }}'">
+            <span>Hide Upcoming</span>
+        </label>
+        <label class="toggle-chip">
+            <input type="checkbox" {% if show_dropped %}checked{% endif %} onchange="window.location='?show_dropped='+(this.checked ? '1' : '0')+'&hide_upcoming={{ '1' if hide_upcoming else '0' }}&use_year_filter={{ '1' if use_year_filter else '0' }}&min_year={{ min_year or '' }}'">
+            <span>Show Dropped</span>
+        </label>
+        <div class="year-filter-box">
+            <form method="get" action="/progress" id="progress-year-filter-form" class="year-filter-form">
+                <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+                <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+                <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+                <label class="toggle-chip">
+                    <input
+                        type="checkbox"
+                        {% if use_year_filter %}checked{% endif %}
+                        onchange="this.form.elements.use_year_filter.value = this.checked ? '1' : '0'; this.form.submit()"
+                    >
+                    <span>Year Filter</span>
+                </label>
+                <input
+                    type="number"
+                    name="min_year"
+                    class="year-input"
+                    placeholder="Year"
+                    min="1900"
+                    max="3000"
+                    step="1"
+                    value="{{ min_year or '' }}"
+                >
+            </form>
+        </div>
+    </div>
+</section>
+
+{% if rate_trakt_id %}
+<section class="rate-panel">
+    <div class="rate-card panel">
+        <h3>Rate just watched episode</h3>
+        <p class="rate-episode">{{ rate_title }} S{{ '%02d'|format(rate_season or 0) }}E{{ '%02d'|format(rate_episode or 0) }}</p>
+        <form method="post" action="/progress/rate" class="rate-form">
+            <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+            <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+            <input type="hidden" name="min_year" value="{{ min_year or '' }}">
+            <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+            <input type="hidden" name="trakt_id" value="{{ rate_trakt_id }}">
+            <input type="hidden" name="season" value="{{ rate_season }}">
+            <input type="hidden" name="episode" value="{{ rate_episode }}">
+            <input type="hidden" name="title" value="{{ rate_title }}">
+            <label>
+                <span>Rating</span>
+                <select name="rating">
+                    {% for value in range(10, 0, -1) %}
+                    <option value="{{ value }}" {% if value == 8 %}selected{% endif %}>{{ value }}/10</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="rate-actions">
+                <button type="submit" class="button">Save Rating</button>
+                <button type="submit" name="skip_rating" value="1" class="button ghost">Skip</button>
+            </div>
+        </form>
+    </div>
+</section>
+{% endif %}
+
+{% if new_items %}
+<section class="progress-section">
+    <div class="section-head">
+        <h3>New</h3>
+    </div>
+    <section class="progress-grid">
+        {% for item in new_items %}
+        {{ render_progress_card(item, True) }}
+        {% endfor %}
+    </section>
+</section>
+{% endif %}
+
+{% if progress_items %}
+<section class="progress-section">
+    <section class="progress-grid">
+        {% for item in progress_items %}
+        {{ render_progress_card(item, False) }}
+        {% endfor %}
+    </section>
+</section>
+{% elif not new_items %}
+<section class="empty-state panel">
+    <h3>No progress cards</h3>
+    {% if hide_upcoming or show_dropped or use_year_filter %}
+    <p>Current filters hide all cards.</p>
+    <div class="chip-row">
+        <a class="button ghost" href="/progress?hide_upcoming=0&show_dropped=0&use_year_filter=0">Clear filters</a>
+    </div>
+    {% else %}
+    <p>Try syncing, toggling filters, or use the desktop app to import and enrich more watch progress.</p>
+    {% endif %}
+</section>
+{% endif %}
+<script>
+    (() => {
+        if (window.traktDebugMode && window.pushFlashToast) {
+            const syncForm = document.querySelector('form[action="/progress/sync"]');
+            if (syncForm) {
+                syncForm.addEventListener("submit", () => window.pushFlashToast("Progress sync: manual full sync started…", 2600));
+            }
+            document.querySelectorAll('form[action$="/watch"]').forEach((form) => {
+                form.addEventListener("submit", () => window.pushFlashToast("Progress action: mark watched…", 2600));
+            });
+            document.querySelectorAll('form[action$="/seen"]').forEach((form) => {
+                form.addEventListener("submit", () => window.pushFlashToast("Progress action: mark seen…", 2600));
+            });
+            document.querySelectorAll('form[action="/progress/rate"]').forEach((form) => {
+                form.addEventListener("submit", () => window.pushFlashToast("Progress action: save rating…", 2600));
+            });
+            document.querySelectorAll(".js-play-link").forEach((link) => {
+                link.addEventListener("click", () => window.pushFlashToast("Play: resolving target URL…", 2600));
+            });
+        }
+        document.querySelectorAll(".js-new-card").forEach((card) => {
+            card.addEventListener("click", (event) => {
+                if (event.target.closest(".progress-actions")) {
+                    return;
+                }
+                const formId = card.getAttribute("data-seen-form");
+                if (!formId) {
+                    return;
+                }
+                const form = document.getElementById(formId);
+                if (form) {
+                    form.requestSubmit();
+                }
+            });
+        });
+    })();
+</script>
+{% endblock %}

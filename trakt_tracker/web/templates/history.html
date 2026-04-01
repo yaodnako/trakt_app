@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel panel-hero">
+    <div>
+        <p class="eyebrow">Read-only prototype flow</p>
+        <h2>History</h2>
+        <p class="lede">Fast local history view over the existing SQLite data, with the same Python service layer still in charge.</p>
+    </div>
+    <div class="history-filter-row">
+        <form method="post" action="/history/sync" class="history-sync-form">
+            <input type="hidden" name="type" value="{{ history_type }}">
+            <input type="hidden" name="title_filter" value="{{ history_title_filter }}">
+            <input type="hidden" name="page" value="{{ page }}">
+            <button type="submit" class="button">Sync</button>
+        </form>
+        <form method="get" action="/history" class="filter-grid">
+            <label>
+                <span>Type</span>
+                <select name="type">
+                    <option value="all" {% if history_type == 'all' %}selected{% endif %}>All</option>
+                    <option value="movie" {% if history_type == 'movie' %}selected{% endif %}>Movies</option>
+                    <option value="show" {% if history_type == 'show' %}selected{% endif %}>Shows</option>
+                </select>
+            </label>
+            <label>
+                <span>Title filter</span>
+                <input type="text" name="title" value="{{ history_title_filter }}" list="history-titles" placeholder="Filter known titles">
+                <datalist id="history-titles">
+                    {% for item in history_title_options %}
+                    <option value="{{ item }}">
+                    {% endfor %}
+                </datalist>
+            </label>
+            <button type="submit" class="button">Apply</button>
+        </form>
+    </div>
+</section>
+
+{% if rate_trakt_id %}
+<section class="rate-panel">
+    <div class="rate-card panel">
+        <h3>Rate history item</h3>
+        <p class="rate-episode">
+            {{ rate_title }}
+            {% if rate_season and rate_episode %}
+            S{{ '%02d'|format(rate_season) }}E{{ '%02d'|format(rate_episode) }}
+            {% endif %}
+        </p>
+        <form method="post" action="/history/rate" class="rate-form">
+            <input type="hidden" name="type" value="{{ history_type }}">
+            <input type="hidden" name="title_filter" value="{{ history_title_filter }}">
+            <input type="hidden" name="page" value="{{ page }}">
+            <input type="hidden" name="trakt_id" value="{{ rate_trakt_id }}">
+            <input type="hidden" name="rating_type" value="{{ rate_type }}">
+            <input type="hidden" name="season" value="{{ rate_season or '' }}">
+            <input type="hidden" name="episode" value="{{ rate_episode or '' }}">
+            <input type="hidden" name="title_value" value="{{ rate_title }}">
+            <label>
+                <span>Rating</span>
+                <select name="rating">
+                    {% for value in range(10, 0, -1) %}
+                    <option value="{{ value }}" {% if value == 8 %}selected{% endif %}>{{ value }}/10</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="rate-actions">
+                <button type="submit" class="button">Save Rating</button>
+                <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page }}">Cancel</a>
+            </div>
+        </form>
+    </div>
+</section>
+{% endif %}
+
+<section class="panel">
+    <div class="section-head">
+        <h3>Recent watch events</h3>
+        <p>Page {{ page }}{% if has_next %}, more items available{% endif %}</p>
+    </div>
+
+    {% if history_rows %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Watched at</th>
+                    <th>Title</th>
+                    <th class="col-center">Episode</th>
+                    <th>Episode title</th>
+                    <th class="col-center">Rating</th>
+                    <th class="col-center">IMDb</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in history_rows %}
+                <tr>
+                    <td>{{ row.watched_at|dt }}</td>
+                    <td>
+                        <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}">{{ row.title }}</a>
+                    </td>
+                    <td class="col-center">{{ row.season|episode_label(row.episode) }}</td>
+                    <td>{{ row.episode_title or "" }}</td>
+                    <td class="col-center">
+                        {% if row.display_rating is not none %}
+                        {{ row.display_rating }}/10
+                        {% else %}
+                        <a
+                            class="button ghost"
+                            href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page }}&rate_trakt_id={{ row.title_trakt_id }}&rate_type={{ row.type }}&rate_season={{ row.season or '' }}&rate_episode={{ row.episode or '' }}&rate_title={{ row.title|urlencode }}"
+                        >Rate</a>
+                        {% endif %}
+                    </td>
+                    <td class="col-center">
+                        {% if row.episode_imdb_rating is not none %}
+                        {{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="pager">
+        {% if page > 1 %}
+        <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page - 1 }}">Previous</a>
+        {% endif %}
+        {% if has_next %}
+        <a class="button" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page + 1 }}">Next</a>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <h3>No history rows yet</h3>
+        <p>Run sync in the desktop app or adjust the current filters.</p>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(() => {
+    if (!window.fetch) {
+        return;
+    }
+    if (window.traktDebugMode && window.pushFlashToast) {
+        window.pushFlashToast("History auto-sync: checking…", 2400);
+    }
+    fetch("/history/auto-sync", {
+        headers: {"Accept": "application/json"},
+        cache: "no-store",
+    })
+        .then((response) => response.ok ? response.json() : null)
+        .then((payload) => {
+            if (window.traktDebugMode && window.pushFlashToast) {
+                if (payload && payload.error) {
+                    window.pushFlashToast(`History auto-sync failed: ${payload.error}`, 4200);
+                } else if (payload && payload.changed) {
+                    window.pushFlashToast("History auto-sync updated rows.", 2400);
+                } else {
+                    window.pushFlashToast("History auto-sync: no changes.", 2400);
+                }
+            }
+            if (payload && payload.changed) {
+                window.setTimeout(() => window.location.reload(), 350);
+            }
+        })
+        .catch(() => {});
+})();
+</script>
+{% endblock %}
