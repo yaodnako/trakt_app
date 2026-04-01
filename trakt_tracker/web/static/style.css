@@ -163,6 +163,30 @@ a {
     align-items: end;
 }
 
+.history-toolbar {
+    justify-content: flex-start;
+    align-items: center;
+}
+
+.history-filter-form {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    flex: 1 1 auto;
+}
+
+.history-type-select {
+    width: 140px;
+    min-width: 140px;
+}
+
+.history-title-input {
+    flex: 1 1 320px;
+    min-width: 220px;
+    max-width: 420px;
+}
+
 .history-sync-form {
     flex: 0 0 auto;
 }
@@ -439,6 +463,134 @@ select {
 
 .table-wrap {
     overflow-x: auto;
+}
+
+.history-day-grid {
+    display: grid;
+    gap: 14px;
+}
+
+.history-day-card {
+    display: grid;
+    gap: 10px;
+    padding: 14px 14px 12px;
+    border-radius: 18px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.5);
+}
+
+.history-day-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.history-day-head h4 {
+    margin: 0;
+    font-family: var(--font-head);
+    font-size: 1.15rem;
+}
+
+.history-day-head span {
+    color: var(--muted);
+    font-size: 0.92rem;
+}
+
+.history-entry-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: stretch;
+}
+
+.history-entry-card {
+    display: grid;
+    grid-template-columns: 68px minmax(0, 1fr);
+    gap: 10px 12px;
+    align-items: start;
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.7);
+    border: 1px solid rgba(77, 61, 40, 0.1);
+    flex: 0 0 340px;
+    max-width: 340px;
+}
+
+.history-entry-poster {
+    width: 68px;
+    aspect-ratio: 2 / 3;
+    border-radius: 12px;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(180deg, rgba(13, 107, 97, 0.08), rgba(30, 27, 22, 0.03));
+    text-decoration: none;
+}
+
+.history-entry-poster img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.history-entry-main {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    align-self: center;
+}
+
+.history-entry-heading {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.history-entry-heading a {
+    font-weight: 700;
+    text-decoration: none;
+    font-size: 1rem;
+}
+
+.history-entry-episode {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.86rem;
+}
+
+.history-entry-meta {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    grid-column: 2;
+}
+
+.history-pill,
+.history-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--text);
+    font-size: 0.78rem;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.history-pill.muted,
+.history-chip.ghost {
+    color: var(--muted);
+    background: rgba(255, 255, 255, 0.56);
 }
 
 table {
@@ -818,21 +970,21 @@ tbody tr:hover {
 }
 
 .icon-button > img {
-    width: 20px;
-    height: 20px;
     display: block;
     object-fit: contain;
     pointer-events: none;
 }
 
 .icon-glyph-play {
-    width: 18px;
-    height: 18px;
+    width: 27px;
+    height: 27px;
+    transform: translateX(1px);
 }
 
 .icon-glyph-check {
-    width: 15px;
-    height: 15px;
+    width: 13.5px;
+    height: 13.5px;
+    transform: translateY(0.5px);
 }
 
 .icon-glyph-drop {
@@ -967,6 +1119,20 @@ tbody tr:hover {
         align-items: stretch;
     }
 
+    .history-filter-form {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .history-type-select {
+        width: 100%;
+    }
+
+    .history-title-input {
+        width: 100%;
+        max-width: none;
+    }
+
     .topbar {
         display: flex;
         flex-direction: column;
@@ -988,6 +1154,22 @@ tbody tr:hover {
 
     .progress-card {
         grid-template-columns: 1fr;
+    }
+
+    .history-entry-card {
+        grid-template-columns: 72px minmax(0, 1fr);
+        align-items: start;
+        flex: 1 1 100%;
+        max-width: none;
+        width: 100%;
+    }
+
+    .history-entry-poster {
+        width: 72px;
+    }
+
+    .history-entry-meta {
+        grid-column: 1 / -1;
     }
 
     .progress-poster {

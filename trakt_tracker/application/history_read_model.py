@@ -2,10 +2,11 @@ from __future__ import annotations
 
 
 class HistoryReadModelService:
-    def __init__(self, db, history_repo, user_states, episode_repo, episode_metadata) -> None:
+    def __init__(self, db, history_repo, user_states, titles_repo, episode_repo, episode_metadata) -> None:
         self._db = db
         self._history = history_repo
         self._user_states = user_states
+        self._titles = titles_repo
         self._episode_repo = episode_repo
         self._episode_metadata = episode_metadata
 
@@ -29,6 +30,10 @@ class HistoryReadModelService:
                 rows = rows[offset:]
             if limit is not None:
                 rows = rows[:limit]
+            title_models = {
+                row.title_trakt_id: self._titles.get_title(session, row.title_trakt_id)
+                for row in rows
+            }
             ratings = self._user_states.ratings_by_trakt_ids(session, [row.title_trakt_id for row in rows])
             rated_map = self._history.latest_rated_map(
                 session,
@@ -55,6 +60,7 @@ class HistoryReadModelService:
                 {
                     "title_trakt_id": row.title_trakt_id,
                     "title": row.title,
+                    "poster_url": (title_models.get(row.title_trakt_id).poster_url if title_models.get(row.title_trakt_id) is not None else ""),
                     "type": row.title_type,
                     "action": row.action,
                     "watched_at": row.watched_at,

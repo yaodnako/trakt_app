@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+from datetime import UTC
 from urllib.parse import quote
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from trakt_tracker.application.services import ServiceContainer
+from trakt_tracker.config import timezone_from_utc_offset
 from trakt_tracker.domain import RatingInput
 from trakt_tracker.web.viewmodels import HISTORY_PAGE_SIZE, normalize_title_type
 
@@ -37,6 +40,7 @@ def register_history_routes(app, *, render) -> None:
         )
         has_next = len(rows) > HISTORY_PAGE_SIZE
         rows = rows[:HISTORY_PAGE_SIZE]
+        grouped_days = _group_history_rows(rows, services.auth.config.utc_offset)
         title_options = services.history.history_titles(title_type=title_type)
         return render(
             request,
@@ -44,6 +48,7 @@ def register_history_routes(app, *, render) -> None:
             {
                 "page_title": "History",
                 "history_rows": rows,
+                "history_days": grouped_days,
                 "history_type": title_type or "all",
                 "history_title_filter": title.strip(),
                 "history_title_options": title_options,
@@ -128,3 +133,20 @@ def register_history_routes(app, *, render) -> None:
             flash = f"Rating failed: {exc}"
         redirect_url = f"/history?type={history_type}&title={quote(title_filter)}&page={page}&flash={quote(flash)}"
         return RedirectResponse(url=redirect_url, status_code=303)
+
+
+def _group_history_rows(rows: list[dict], utc_offset: str) -> list[dict]:
+    tz = timezone_from_utc_offset(utc_offset)
+    groups: OrderedDict[str, dict] = OrderedDict()
+    for row in rows:
+        watched_at = row.get("watched_at")
+        if watched_at is None:
+            day_label = "Unknown date"
+        else:
+            normalized = watched_at if watched_at.tzinfo is not None else watched_at.replace(tzinfo=UTC)
+            local_dt = normalized.astimezone(tz)
+            day_label = local_dt.strftime("%d.%m.%Y")
+        group = groups.setdefault(day_label, {"day_label": day_label, "count": 0, "entries": []})
+        group["count"] += 1
+        group["entries"].append(row)
+    return list(groups.values())

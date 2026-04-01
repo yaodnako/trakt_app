@@ -364,7 +364,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     cache = CacheService()
     imdb_client = IMDbDatasetClient(cache_ttl_hours=config_store.load().cache_ttl_hours)
     episode_metadata = EpisodeMetadataService(db, episode_repo, imdb_client)
-    history_read_model = HistoryReadModelService(db, history, user_states, episode_repo, episode_metadata)
+    history_read_model = HistoryReadModelService(db, history, user_states, titles, episode_repo, episode_metadata)
     catalog = CatalogService(db, auth, titles, user_states, sync_state, tmdb_factory, imdb_client)
     history_service = HistoryService(db, auth, titles, user_states, history, episode_repo, history_read_model)
     play = PlayService(auth)

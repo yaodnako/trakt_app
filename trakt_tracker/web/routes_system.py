@@ -31,6 +31,9 @@ def register_system_routes(app, *, render, template_filters) -> None:
         media_type, _ = mimetypes.guess_type(target_url)
         if payload is not None:
             return Response(content=payload, media_type=media_type or "image/jpeg")
+        stale_payload = cache.get_any_bytes(target_url)
+        if stale_payload is not None:
+            return Response(content=stale_payload, media_type=media_type or "image/jpeg")
         try:
             upstream_request = UrlRequest(
                 target_url,
