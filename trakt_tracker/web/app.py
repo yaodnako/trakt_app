@@ -175,11 +175,11 @@ def _enrich_search_results(
     enriched_results = []
     for item in results:
         try:
-            enriched_results.append(services.library.enrich_title_with_tmdb(item))
+            enriched_results.append(services.catalog.enrich_title_with_tmdb(item))
         except Exception:
             enriched_results.append(item)
     if query:
-        services.library.save_last_search_state(query, title_type, enriched_results)
+        services.catalog.save_last_search_state(query, title_type, enriched_results)
     return enriched_results, True
 
 
@@ -787,11 +787,11 @@ def create_app() -> FastAPI:
         sort: str = "",
     ) -> HTMLResponse:
         services: ServiceContainer = request.app.state.services
-        saved_state = services.library.load_last_search_state()
+        saved_state = services.catalog.load_last_search_state()
         title_type = normalize_title_type(type)
         query = q.strip()
-        sort_mode = normalize_search_sort_mode(sort, services.library.get_search_sort_mode())
-        services.library.set_search_sort_mode(sort_mode)
+        sort_mode = normalize_search_sort_mode(sort, services.catalog.get_search_sort_mode())
+        services.catalog.set_search_sort_mode(sort_mode)
 
         results = []
         source_label = ""
@@ -804,7 +804,7 @@ def create_app() -> FastAPI:
                     results = list(saved_state.get("results", []))
                     source_label = "Local cached result set"
                 else:
-                    results = services.library.search_titles(query, title_type)
+                    results = services.catalog.search_titles(query, title_type)
                     source_label = "Fresh Trakt search"
                 results, enriched = _enrich_search_results(
                     services,
@@ -841,7 +841,7 @@ def create_app() -> FastAPI:
                 "sort_mode": sort_mode or DEFAULT_SEARCH_SORT_MODE,
                 "sort_modes": SEARCH_SORT_MODES,
                 "results": results,
-                "search_history": services.library.search_history(),
+                "search_history": services.catalog.search_history(),
                 "source_label": source_label,
                 "error_message": error_message,
             },
@@ -864,7 +864,7 @@ def create_app() -> FastAPI:
             )
 
         try:
-            title_item = services.library.get_title_details(trakt_id, normalized_type)
+            title_item = services.catalog.get_title_details(trakt_id, normalized_type)
             return render(
                 request,
                 "details.html",

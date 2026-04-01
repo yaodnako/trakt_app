@@ -1,31 +1,28 @@
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Callable
 
+from trakt_tracker.application.catalog import CatalogService
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.history_sync import HistorySyncWorkflow
 from trakt_tracker.application.history_read_model import HistoryReadModelService
 from trakt_tracker.application.notification_refresh import NotificationRefreshWorkflow
 from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
-from trakt_tracker.application.sync_policy import SyncPolicy
 from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_history_items,
     load_cached_trakt_rating_items,
 )
-from trakt_tracker.config import AppConfig, ConfigStore, get_app_data_dir
+from trakt_tracker.config import AppConfig, ConfigStore
 from trakt_tracker.domain import DashboardState, EpisodeSummary, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
 from trakt_tracker.infrastructure.keyring_store import TokenStore
-from trakt_tracker.infrastructure.notifications import NotificationMessage, NotificationSender
+from trakt_tracker.infrastructure.notifications import NotificationSender
 from trakt_tracker.infrastructure.cache import BinaryCache, ProviderCache
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 from trakt_tracker.infrastructure.kinopoisk import KinopoiskClient
 from trakt_tracker.infrastructure.tmdb import TMDbClient
-from trakt_tracker.infrastructure.url_utils import normalize_external_url
 from trakt_tracker.infrastructure.trakt.client import TraktClient
 from trakt_tracker.infrastructure.trakt.oauth import OAuthCallbackServer, build_authorization_url, open_authorization_url
 from trakt_tracker.persistence.database import Database
@@ -44,6 +41,7 @@ from trakt_tracker.persistence.repositories import (
 class ServiceContainer:
     auth: "AuthService"
     cache: "CacheService"
+    catalog: "CatalogService"
     library: "LibraryService"
     play: "PlayService"
     progress: "ProgressService"
@@ -156,108 +154,16 @@ class LibraryService:
         titles: TitleRepository,
         user_states: UserStateRepository,
         history: HistoryRepository,
-        sync_state: SyncStateRepository,
         episode_repo: EpisodeRepository,
-        tmdb_factory: Callable[[AppConfig], TMDbClient],
-        imdb_client: IMDbDatasetClient,
+        history_read_model: HistoryReadModelService,
     ) -> None:
         self._db = db
         self._auth = auth_service
         self._titles = titles
         self._user_states = user_states
         self._history = history
-        self._sync_state = sync_state
         self._episode_repo = episode_repo
-        self._tmdb_factory = tmdb_factory
-        self._imdb_client = imdb_client
-        self._episode_metadata = EpisodeMetadataService(db, episode_repo, imdb_client)
-        self._history_read_model = HistoryReadModelService(db, history, user_states, episode_repo, self._episode_metadata)
-
-    def search_titles(self, query: str, title_type: str | None = None) -> list[TitleSummary]:
-        self._remember_search_query(query)
-        client = self._auth.get_client()
-        results = client.search_titles(query, title_type)
-        self.save_last_search_state(query, title_type, results)
-        with self._db.session() as session:
-            for title in results:
-                self._titles.upsert_title(session, title)
-        return results
-
-    def enrich_title_with_tmdb(self, title: TitleSummary) -> TitleSummary:
-        tmdb = self._tmdb_factory(self._auth.config)
-        enriched = title
-        if tmdb.is_configured():
-            enriched = tmdb.enrich_title(enriched)
-        enriched = self._imdb_client.enrich_title(enriched)
-        with self._db.session() as session:
-            self._titles.upsert_title(session, enriched)
-        return enriched
-
-    def imdb_dataset_status(self) -> str:
-        return self._imdb_client.last_updated_text()
-
-    def save_last_search_state(self, query: str, title_type: str | None, results: list[TitleSummary]) -> None:
-        payload = {
-            "query": query,
-            "title_type": title_type or "all",
-            "sort_mode": self.get_search_sort_mode(),
-            "results": [asdict(item) for item in results],
-        }
-        with self._db.session() as session:
-            self._sync_state.set_value(session, "last_search_state", json.dumps(payload, ensure_ascii=False))
-
-    def load_last_search_state(self) -> dict | None:
-        with self._db.session() as session:
-            raw = self._sync_state.get_value(session, "last_search_state", "")
-        if not raw:
-            return None
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        results_raw = payload.get("results", [])
-        if not isinstance(results_raw, list):
-            results_raw = []
-        results: list[TitleSummary] = []
-        for item in results_raw:
-            if not isinstance(item, dict):
-                continue
-            try:
-                title = TitleSummary(**item)
-            except TypeError:
-                continue
-            title.poster_url = normalize_external_url(title.poster_url)
-            results.append(title)
-        return {
-            "query": str(payload.get("query", "") or ""),
-            "title_type": str(payload.get("title_type", "all") or "all"),
-            "sort_mode": str(payload.get("sort_mode", "IMDb votes") or "IMDb votes"),
-            "results": results,
-        }
-
-    def search_history(self) -> list[str]:
-        with self._db.session() as session:
-            raw = self._sync_state.get_value(session, "search_history", "[]")
-        try:
-            items = json.loads(raw)
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(items, list):
-            return []
-        return [item for item in items if isinstance(item, str) and item.strip()]
-
-    def get_title_details(self, trakt_id: int, title_type: str) -> TitleSummary:
-        client = self._auth.get_client()
-        title = client.get_title_details(trakt_id, title_type)
-        tmdb = self._tmdb_factory(self._auth.config)
-        if tmdb.is_configured():
-            title = tmdb.enrich_title(title)
-        with self._db.session() as session:
-            model = self._titles.upsert_title(session, title)
-            self._user_states.ensure_state(session, model.id)
-        return title
+        self._history_read_model = history_read_model
 
     def add_history_item(self, item: HistoryItemInput) -> None:
         client = self._auth.get_client()
@@ -403,30 +309,6 @@ class LibraryService:
                 continue
             return row.get("display_rating")
         return None
-
-    def _remember_search_query(self, query: str) -> None:
-        query = query.strip()
-        if not query:
-            return
-        with self._db.session() as session:
-            raw = self._sync_state.get_value(session, "search_history", "[]")
-            try:
-                items = json.loads(raw)
-            except json.JSONDecodeError:
-                items = []
-            if not isinstance(items, list):
-                items = []
-            deduped = [item for item in items if isinstance(item, str) and item.strip() and item != query]
-            deduped.insert(0, query)
-            self._sync_state.set_value(session, "search_history", json.dumps(deduped[:15], ensure_ascii=False))
-
-    def get_search_sort_mode(self) -> str:
-        with self._db.session() as session:
-            return self._sync_state.get_value(session, "search_sort_mode", "IMDb votes")
-
-    def set_search_sort_mode(self, mode: str) -> None:
-        with self._db.session() as session:
-            self._sync_state.set_value(session, "search_sort_mode", mode)
 
 
 class ProgressService:
@@ -620,7 +502,9 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     cache = CacheService()
     imdb_client = IMDbDatasetClient(cache_ttl_hours=config_store.load().cache_ttl_hours)
     episode_metadata = EpisodeMetadataService(db, episode_repo, imdb_client)
-    library = LibraryService(db, auth, titles, user_states, history, sync_state, episode_repo, tmdb_factory, imdb_client)
+    history_read_model = HistoryReadModelService(db, history, user_states, episode_repo, episode_metadata)
+    catalog = CatalogService(db, auth, titles, user_states, sync_state, tmdb_factory, imdb_client)
+    library = LibraryService(db, auth, titles, user_states, history, episode_repo, history_read_model)
     play = PlayService(auth)
     progress_service = ProgressService(db, auth, progress, episode_repo, titles, user_states, sync_state, tmdb_factory, imdb_client, operations, episode_metadata)
     notifications = NotificationService(
@@ -636,6 +520,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     return ServiceContainer(
         auth=auth,
         cache=cache,
+        catalog=catalog,
         library=library,
         play=play,
         progress=progress_service,

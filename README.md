@@ -15,8 +15,8 @@
 
 1. `README.md`
 2. `ARCHITECTURE.md`
-3. `FEATURES.md`
-4. `STATE.md`
+3. `STATE.md`
+4. `FEATURES.md`
 
 ## Запуск
 
@@ -48,6 +48,7 @@ python -m trakt_tracker.web.main
 - [history_sync.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_sync.py)
 - [progress_sync.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/progress_sync.py)
 - [notification_refresh.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/notification_refresh.py)
+- [catalog.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/catalog.py)
 - [history_read_model.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_read_model.py)
 - [episode_metadata.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/episode_metadata.py)
 - [trakt_payload_cache.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/trakt_payload_cache.py)

@@ -14,6 +14,7 @@
 - `Progress` и `History` опираются на более явную policy/update схему
 - уведомления ограничены текущим `next episode`, а не любым левым calendar special
 - вынесены:
+  - `CatalogService`
   - `HistorySyncWorkflow`
   - `ProgressSyncWorkflow`
   - `NotificationRefreshWorkflow`
@@ -24,7 +25,8 @@
 
 ## Что ещё не доведено
 
-- `LibraryService` всё ещё перегружен
+- search state / search history / title-details orchestration уже вынесены из `LibraryService`
+- `LibraryService` стал меньше, но history/rating write-side ещё не идеально отделён
 - `MainWindow` всё ещё перегружен
 - `web/app.py` всё ещё перегружен
 - `Debug mode` ещё не до конца унифицирован

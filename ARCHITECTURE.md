@@ -30,6 +30,7 @@
 - [history_sync.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_sync.py)
 - [progress_sync.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/progress_sync.py)
 - [notification_refresh.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/notification_refresh.py)
+- [catalog.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/catalog.py)
 - [history_read_model.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_read_model.py)
 - [episode_metadata.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/episode_metadata.py)
 - [trakt_payload_cache.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/trakt_payload_cache.py)
@@ -37,7 +38,7 @@
 ## Что ещё остаётся тяжёлым
 
 - [services.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/services.py)
-  Всё ещё держит слишком много use-case логики
+  Уже стал меньше, но ещё держит history/rating write-side orchestration
 - [main_window.py](/D:/CodexProjects/Trakt_app/trakt_tracker/ui/main_window.py)
   Всё ещё слишком большой orchestration class
 - [app.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/app.py)
@@ -54,16 +55,13 @@
 
 ## Порядок дальнейшего рефактора
 
-1. Упростить `LibraryService`
-   Вынести search state / search history / title-details orchestration
-
-2. Разрезать UI orchestration
+1. Разрезать UI orchestration
    Сначала desktop, потом web
 
-3. Упростить `Debug mode`
+2. Упростить `Debug mode`
    Один поток operation events, меньше локальных UI-hints
 
-4. Только потом делать performance pass
+3. Только потом делать performance pass
    Не оптимизировать поверх ещё не до конца очищенной структуры
 
 ## Важная политика sync

@@ -404,7 +404,7 @@ class TitleDetailsDialog(QDialog):
         self._render()
 
     def _render(self) -> None:
-        title = self.services.library.get_title_details(self.title_info.trakt_id, self.title_info.title_type)
+        title = self.services.catalog.get_title_details(self.title_info.trakt_id, self.title_info.title_type)
         text = [
             f"{title.title} ({title.year or 'n/a'})",
             f"Type: {title.title_type}",
@@ -1096,7 +1096,7 @@ class SearchEnrichmentWorker(QThread):
             if self.isInterruptionRequested():
                 return
             try:
-                enriched = self.services.library.enrich_title_with_tmdb(title)
+                enriched = self.services.catalog.enrich_title_with_tmdb(title)
             except Exception:
                 continue
             if self.isInterruptionRequested():
@@ -1117,7 +1117,7 @@ class SearchFetchWorker(QThread):
 
     def run(self) -> None:
         try:
-            results = self.services.library.search_titles(self.query, self.title_type)
+            results = self.services.catalog.search_titles(self.query, self.title_type)
         except Exception as exc:
             self.search_failed.emit(self.generation, str(exc))
             return
@@ -1709,7 +1709,7 @@ class MainWindow(QMainWindow):
         self.notifications_checkbox.setChecked(config.notifications_enabled)
         self.debug_mode_checkbox.setChecked(config.debug_mode)
         self.imdb_status_label.setText(self.services.sync.imdb_dataset_status())
-        sort_mode = self.services.library.get_search_sort_mode()
+        sort_mode = self.services.catalog.get_search_sort_mode()
         index = self.search_sort.findText(sort_mode)
         self.search_sort.blockSignals(True)
         self.search_sort.setCurrentIndex(index if index >= 0 else 0)
@@ -1717,7 +1717,7 @@ class MainWindow(QMainWindow):
 
     def _reload_search_history(self) -> None:
         current = self.search_input.currentText().strip()
-        history = self.services.library.search_history()
+        history = self.services.catalog.search_history()
         self.search_input.blockSignals(True)
         self.search_input.clear()
         for item in history:
@@ -1729,12 +1729,12 @@ class MainWindow(QMainWindow):
         self.search_input.blockSignals(False)
 
     def _restore_last_search(self) -> None:
-        state = self.services.library.load_last_search_state()
+        state = self.services.catalog.load_last_search_state()
         if not state:
             return
         query = state.get("query", "").strip()
         title_type = state.get("title_type", "all")
-        sort_mode = self.services.library.get_search_sort_mode() or state.get("sort_mode", "IMDb votes")
+        sort_mode = self.services.catalog.get_search_sort_mode() or state.get("sort_mode", "IMDb votes")
         results = state.get("results", [])
         if query:
             self.search_input.setCurrentText(query)
@@ -1803,7 +1803,7 @@ class MainWindow(QMainWindow):
             title_type = None
         self._reload_search_history()
         self.search_input.setCurrentText(query)
-        state = self.services.library.load_last_search_state()
+        state = self.services.catalog.load_last_search_state()
         if (
             state
             and state.get("query", "").strip() == query
@@ -1829,7 +1829,7 @@ class MainWindow(QMainWindow):
             self._search()
 
     def _on_search_sort_changed(self, mode: str) -> None:
-        self.services.library.set_search_sort_mode(mode)
+        self.services.catalog.set_search_sort_mode(mode)
         current_results = list(self.search_model._all_results)
         if current_results:
             self.search_model.replace_results(self._sort_search_results(current_results))
@@ -1941,7 +1941,7 @@ class MainWindow(QMainWindow):
         if not query:
             return
         title_type = self.search_type.currentText()
-        self.services.library.save_last_search_state(
+        self.services.catalog.save_last_search_state(
             query,
             None if title_type == "all" else title_type,
             list(self.search_model._all_results),
