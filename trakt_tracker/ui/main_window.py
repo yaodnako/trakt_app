@@ -2353,7 +2353,7 @@ class MainWindow(QMainWindow):
             self.history_list.setUpdatesEnabled(True)
             return
 
-        rows = self.services.library.history(title_type=title_type, title_filter=normalized_title_filter)
+        rows = self.services.history.history(title_type=title_type, title_filter=normalized_title_filter)
         self._history_rows_cache = self._sort_history_rows(rows)
         self._history_loaded_count = 0
         self._history_has_more = False
@@ -2442,7 +2442,7 @@ class MainWindow(QMainWindow):
 
     def _populate_history_title_filter(self, title_type: str | None) -> None:
         current_text = self.history_title_filter.currentText().strip()
-        titles = self.services.library.history_titles(title_type=title_type)
+        titles = self.services.history.history_titles(title_type=title_type)
         options = [self._ALL_HISTORY_TITLES, *titles]
         existing = [self.history_title_filter.itemText(index) for index in range(self.history_title_filter.count())]
         if existing == options:
@@ -2481,7 +2481,7 @@ class MainWindow(QMainWindow):
         if not reset and not self._history_has_more:
             return
         offset = 0 if reset else self._history_loaded_count
-        rows = self.services.library.history(
+        rows = self.services.history.history(
             title_type=title_type,
             title_filter=title_filter,
             limit=self._history_batch_size,

@@ -31,6 +31,7 @@
 - [progress_sync.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/progress_sync.py)
 - [notification_refresh.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/notification_refresh.py)
 - [catalog.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/catalog.py)
+- [history.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history.py)
 - [interactions.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/interactions.py)
 - [history_read_model.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_read_model.py)
 - [episode_metadata.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/episode_metadata.py)
@@ -39,7 +40,7 @@
 ## Что ещё остаётся тяжёлым
 
 - [services.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/services.py)
-  Уже стал меньше, но ещё держит history/rating write-side orchestration
+  Уже стал thin composition root без крупной предметной логики
 - [main_window.py](/D:/CodexProjects/Trakt_app/trakt_tracker/ui/main_window.py)
   Всё ещё слишком большой orchestration class
 - [app.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/app.py)

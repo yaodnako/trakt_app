@@ -15,17 +15,17 @@ class EpisodeActionResult:
 
 
 class InteractionService:
-    def __init__(self, library_service, notification_service, progress_service) -> None:
-        self._library = library_service
+    def __init__(self, history_service, notification_service, progress_service) -> None:
+        self._history = history_service
         self._notifications = notification_service
         self._progress = progress_service
 
     def add_history_item(self, item: HistoryItemInput) -> None:
-        self._library.add_history_item(item)
+        self._history.add_history_item(item)
 
     def save_rating(self, item: RatingInput, *, title: str = "") -> None:
-        self._library.set_rating(item, title=title)
-        saved_rating = self._library.displayed_history_rating(
+        self._history.set_rating(item, title=title)
+        saved_rating = self._history.displayed_history_rating(
             title_type=item.title_type,
             trakt_id=item.trakt_id,
             season=item.season,

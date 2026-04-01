@@ -15,6 +15,7 @@
 - уведомления ограничены текущим `next episode`, а не любым левым calendar special
 - вынесены:
   - `CatalogService`
+  - `HistoryService`
   - `InteractionService`
   - `HistorySyncWorkflow`
   - `ProgressSyncWorkflow`
@@ -27,7 +28,7 @@
 ## Что ещё не доведено
 
 - search state / search history / title-details orchestration уже вынесены из `LibraryService`
-- `LibraryService` стал меньше, но history/rating write-side ещё не идеально отделён
+- history/rating write-side и history read facade уже отделены от прежнего `LibraryService`
 - watch/seen/rating/drop action flow больше не размазан напрямую между desktop/web
 - `MainWindow` всё ещё перегружен
 - `web/app.py` всё ещё перегружен

@@ -576,7 +576,7 @@ def create_app() -> FastAPI:
         title_type = normalize_title_type(type)
         current_page = max(1, page)
         title_filter = title.strip() or None
-        rows = services.library.history(
+        rows = services.history.history(
             title_type=title_type,
             title_filter=title_filter,
             limit=HISTORY_PAGE_SIZE + 1,
@@ -584,7 +584,7 @@ def create_app() -> FastAPI:
         )
         has_next = len(rows) > HISTORY_PAGE_SIZE
         rows = rows[:HISTORY_PAGE_SIZE]
-        title_options = services.library.history_titles(title_type=title_type)
+        title_options = services.history.history_titles(title_type=title_type)
         return render(
             request,
             "history.html",
