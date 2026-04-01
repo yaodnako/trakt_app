@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
@@ -11,8 +11,27 @@ from .models import Base
 
 class Database:
     def __init__(self, path: Path) -> None:
-        self._engine = create_engine(f"sqlite:///{path}", future=True)
+        self._engine = create_engine(
+            f"sqlite:///{path}",
+            future=True,
+            connect_args={"timeout": 15, "check_same_thread": False},
+        )
+        event.listen(self._engine, "connect", self._configure_sqlite_connection)
         self._session_factory = sessionmaker(bind=self._engine, expire_on_commit=False, class_=Session)
+
+    @staticmethod
+    def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            except Exception:
+                pass
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=15000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self._engine)

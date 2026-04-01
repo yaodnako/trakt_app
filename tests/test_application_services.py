@@ -11,6 +11,8 @@ from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.history import HistoryService
 from trakt_tracker.application.history_read_model import HistoryReadModelService
 from trakt_tracker.application.interactions import InteractionService
+from trakt_tracker.application.services import build_services
+from trakt_tracker.config import AppConfig, ConfigStore
 from trakt_tracker.domain import EpisodeSummary, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
 from trakt_tracker.persistence.database import Database
 from trakt_tracker.persistence.repositories import EpisodeRepository, HistoryRepository, SyncStateRepository, TitleRepository, UserStateRepository
@@ -258,6 +260,24 @@ class ApplicationServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "aired yet"):
             service.mark_progress_episode_seen(snapshot, now=datetime.now(tz=UTC))
+
+    def test_sync_service_auto_imdb_interval_defaults_to_three_hours(self) -> None:
+        self.assertEqual(AppConfig().imdb_auto_sync_interval_hours, 3)
+
+    def test_sync_service_auto_imdb_sync_runs_once_per_interval(self) -> None:
+        config_store = ConfigStore(Path(self.tmpdir.name) / "config.json")
+        services = build_services(config_store, self.db)
+        sync_calls: list[bool] = []
+
+        services.sync._imdb_client.sync = lambda force=False, status_callback=None: sync_calls.append(force) or True
+        services.sync._episode_metadata.backfill_episode_imdb_ids_from_payloads = lambda payloads: None
+        services.sync._episode_metadata.enrich_episode_imdb_ratings = lambda: None
+
+        self.assertTrue(services.sync.should_auto_sync_imdb_dataset(3))
+        self.assertTrue(services.sync.maybe_sync_imdb_dataset(3))
+        self.assertFalse(services.sync.should_auto_sync_imdb_dataset(3))
+        self.assertFalse(services.sync.maybe_sync_imdb_dataset(3))
+        self.assertEqual(sync_calls, [False])
 
 
 if __name__ == "__main__":

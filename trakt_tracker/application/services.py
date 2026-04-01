@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from trakt_tracker.application.catalog import CatalogService
@@ -17,6 +17,7 @@ from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_history_items,
     load_cached_trakt_rating_items,
 )
+from trakt_tracker.application.sync_policy import SyncPolicy
 from trakt_tracker.config import AppConfig, ConfigStore
 from trakt_tracker.domain import DashboardState, EpisodeSummary, ProgressSnapshot
 from trakt_tracker.infrastructure.keyring_store import TokenStore
@@ -240,6 +241,8 @@ class NotificationService:
 
 
 class SyncService:
+    IMDB_AUTO_SYNC_KEY = "imdb_last_auto_sync_at"
+
     def __init__(
         self,
         db: Database,
@@ -253,6 +256,8 @@ class SyncService:
         operations: OperationLog,
         episode_metadata: EpisodeMetadataService,
     ) -> None:
+        self._db = db
+        self._sync_state = sync_state
         self._imdb_client = IMDbDatasetClient()
         self._episode_metadata = episode_metadata
         self._workflow = HistorySyncWorkflow(
@@ -288,6 +293,26 @@ class SyncService:
         )
         self._episode_metadata.enrich_episode_imdb_ratings()
         return changed
+
+    def should_auto_sync_imdb_dataset(self, interval_hours: int) -> bool:
+        interval = max(1, int(interval_hours or 1))
+        with self._db.session() as session:
+            raw = self._sync_state.get_value(session, self.IMDB_AUTO_SYNC_KEY, "")
+        last_sync_at = SyncPolicy.parse_timestamp(raw)
+        if last_sync_at is None:
+            return True
+        return datetime.now(tz=UTC) - last_sync_at >= timedelta(hours=interval)
+
+    def maybe_sync_imdb_dataset(self, interval_hours: int, status_callback=None) -> bool:
+        interval = max(1, int(interval_hours or 1))
+        now = datetime.now(tz=UTC)
+        with self._db.session() as session:
+            raw = self._sync_state.get_value(session, self.IMDB_AUTO_SYNC_KEY, "")
+            last_sync_at = SyncPolicy.parse_timestamp(raw)
+            if last_sync_at is not None and now - last_sync_at < timedelta(hours=interval):
+                return False
+            self._sync_state.set_value(session, self.IMDB_AUTO_SYNC_KEY, now.isoformat())
+        return self.sync_imdb_dataset(force=False, status_callback=status_callback)
 
     def clear_imdb_dataset(self) -> None:
         self._imdb_client.clear()

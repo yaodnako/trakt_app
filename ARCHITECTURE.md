@@ -36,6 +36,10 @@
 - [history_read_model.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_read_model.py)
 - [episode_metadata.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/episode_metadata.py)
 - [trakt_payload_cache.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/trakt_payload_cache.py)
+- [routes_progress.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_progress.py)
+- [routes_history.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_history.py)
+- [routes_catalog.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_catalog.py)
+- [routes_system.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_system.py)
 
 ## Что ещё остаётся тяжёлым
 
@@ -44,7 +48,7 @@
 - [main_window.py](/D:/CodexProjects/Trakt_app/trakt_tracker/ui/main_window.py)
   Всё ещё слишком большой orchestration class
 - [app.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/app.py)
-  Всё ещё толстый web shell
+  Уже стал thin composition root; web orchestration частично разрезана по route modules
 
 ## Правила дальнейшей работы
 
@@ -58,7 +62,7 @@
 ## Порядок дальнейшего рефактора
 
 1. Разрезать UI orchestration
-   Сначала desktop, потом web
+   Дальше основной фокус на desktop, потому что web shell уже частично разрезан
 
 2. Упростить `Debug mode`
    Один поток operation events, меньше локальных UI-hints
