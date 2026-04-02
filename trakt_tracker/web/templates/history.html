@@ -128,6 +128,17 @@
                         {% endif %}
                     </a>
                     <div class="history-entry-main">
+                        {% if row.episode_still_url %}
+                        <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}" class="history-entry-still">
+                            <img
+                                src="{{ row.episode_still_url|cached_image_url }}"
+                                alt="{{ row.episode_title or (row.season|episode_label(row.episode)) }}"
+                                loading="lazy"
+                                data-direct-src="{{ row.episode_still_url }}"
+                                onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+                            >
+                        </a>
+                        {% endif %}
                         <div class="history-entry-heading">
                             <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}">{{ row.title }}</a>
                         </div>

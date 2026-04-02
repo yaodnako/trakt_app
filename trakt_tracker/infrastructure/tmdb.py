@@ -9,7 +9,8 @@ from trakt_tracker.infrastructure.cache import ProviderCache
 
 
 TMDB_API_URL = "https://api.themoviedb.org/3"
-TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
+TMDB_POSTER_IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
+TMDB_STILL_IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
 
 
 class TMDbClient:
@@ -47,7 +48,7 @@ class TMDbClient:
             return title
         poster_path = payload.get("poster_path")
         if isinstance(poster_path, str) and poster_path:
-            title.poster_url = f"{TMDB_IMAGE_BASE}{poster_path}"
+            title.poster_url = f"{TMDB_POSTER_IMAGE_BASE}{poster_path}"
         vote_average = payload.get("vote_average")
         if vote_average is not None:
             try:
@@ -66,6 +67,20 @@ class TMDbClient:
             if isinstance(imdb_id, str) and imdb_id:
                 title.imdb_id = imdb_id
         return title
+
+    def get_episode_still_url(self, show_tmdb_id: int, season: int, episode: int) -> str:
+        if not self.is_configured() or not show_tmdb_id:
+            return ""
+        payload = self._request_optional(
+            "GET",
+            f"/tv/{show_tmdb_id}/season/{season}/episode/{episode}",
+        )
+        if not isinstance(payload, dict):
+            return ""
+        still_path = payload.get("still_path")
+        if isinstance(still_path, str) and still_path:
+            return f"{TMDB_STILL_IMAGE_BASE}{still_path}"
+        return ""
 
     def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> Any:
         headers = {

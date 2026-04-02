@@ -1,19 +1,31 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Callable
 
 from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_history_items,
     load_cached_trakt_rating_items,
 )
+from trakt_tracker.config import AppConfig
 from trakt_tracker.domain import EpisodeSummary
+from trakt_tracker.infrastructure.tmdb import TMDbClient
 
 
 class EpisodeMetadataService:
-    def __init__(self, db, episode_repo, imdb_client) -> None:
+    def __init__(
+        self,
+        db,
+        episode_repo,
+        imdb_client,
+        auth_service=None,
+        tmdb_factory: Callable[[AppConfig], TMDbClient] | None = None,
+    ) -> None:
         self._db = db
         self._episode_repo = episode_repo
         self._imdb_client = imdb_client
+        self._auth = auth_service
+        self._tmdb_factory = tmdb_factory
 
     def load_cached_trakt_rating_maps(self) -> tuple[dict[int, int], dict[tuple[int, int, int], int]]:
         title_ratings: dict[int, tuple[datetime, int]] = {}
@@ -190,8 +202,53 @@ class EpisodeMetadataService:
             )
             row.imdb_rating = enriched.imdb_rating
             row.imdb_votes = enriched.imdb_votes
+        progress.next_episode.still_url = row.still_url or ""
         progress.next_episode.imdb_rating = row.imdb_rating
         progress.next_episode.imdb_votes = row.imdb_votes
+
+    def can_enrich_episode_stills(self) -> bool:
+        if self._auth is None or self._tmdb_factory is None:
+            return False
+        return self._tmdb_factory(self._auth.config).is_configured()
+
+    def enrich_episode_stills(self, keys: list[tuple[int, int, int]]) -> bool:
+        if not keys or not self.can_enrich_episode_stills():
+            return False
+        unique_keys = list(dict.fromkeys(keys))
+        with self._db.session() as session:
+            metadata = self._episode_repo.metadata_by_episode_keys(session, unique_keys)
+        missing_by_show: dict[int, list[tuple[int, int]]] = {}
+        for show_trakt_id, season, episode in unique_keys:
+            if (metadata.get((show_trakt_id, season, episode)) or {}).get("still_url"):
+                continue
+            missing_by_show.setdefault(show_trakt_id, []).append((season, episode))
+        if not missing_by_show:
+            return False
+        client = self._auth.get_client()
+        tmdb = self._tmdb_factory(self._auth.config)
+        show_tmdb_ids = {
+            show_trakt_id: self._load_show_tmdb_id(client, show_trakt_id)
+            for show_trakt_id in missing_by_show
+        }
+        changed = False
+        with self._db.session() as session:
+            for show_trakt_id, episodes in missing_by_show.items():
+                show_tmdb_id = show_tmdb_ids.get(show_trakt_id)
+                if not show_tmdb_id:
+                    continue
+                for season, episode in episodes:
+                    try:
+                        still_url = tmdb.get_episode_still_url(show_tmdb_id, season, episode)
+                    except Exception:
+                        continue
+                    if not still_url:
+                        continue
+                    row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
+                    if row is None or row.still_url == still_url:
+                        continue
+                    row.still_url = still_url
+                    changed = True
+        return changed
 
     @staticmethod
     def should_refresh_next_episode_details(next_episode: EpisodeSummary, cached_row) -> bool:
@@ -208,3 +265,11 @@ class EpisodeMetadataService:
         if not cached_row.imdb_id:
             return True
         return False
+
+    @staticmethod
+    def _load_show_tmdb_id(client, show_trakt_id: int) -> int | None:
+        try:
+            title = client.get_title_details(show_trakt_id, "show")
+        except Exception:
+            return None
+        return title.tmdb_id

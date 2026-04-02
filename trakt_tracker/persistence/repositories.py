@@ -362,6 +362,7 @@ class ProgressRepository:
                     season=row.next_episode_season or 0,
                     number=row.next_episode_number or 0,
                     title=row.next_episode_title,
+                    still_url=next_episode_row.still_url if next_episode_row is not None else "",
                     trakt_rating=next_episode_row.trakt_rating if next_episode_row is not None else None,
                     trakt_votes=next_episode_row.trakt_votes if next_episode_row is not None else None,
                     imdb_id=next_episode_row.imdb_id if next_episode_row is not None else "",
@@ -444,6 +445,7 @@ class EpisodeRepository:
                     season=episode.season,
                     number=episode.number,
                     title=episode.title,
+                    still_url=episode.still_url,
                     imdb_id=episode.imdb_id,
                     imdb_rating=episode.imdb_rating,
                     imdb_votes=episode.imdb_votes,
@@ -500,6 +502,7 @@ class EpisodeRepository:
             session.add(row)
         row.episode_trakt_id = episode.trakt_id
         row.title = episode.title or ""
+        row.still_url = episode.still_url or ""
         row.trakt_rating = episode.trakt_rating
         row.trakt_votes = episode.trakt_votes
         row.imdb_id = episode.imdb_id or ""
@@ -547,6 +550,7 @@ class EpisodeRepository:
         for row in session.scalars(stmt):
             result[(row.show_trakt_id, row.season, row.number)] = {
                 "title": row.title,
+                "still_url": row.still_url,
                 "trakt_rating": row.trakt_rating,
                 "trakt_votes": row.trakt_votes,
                 "imdb_id": row.imdb_id,

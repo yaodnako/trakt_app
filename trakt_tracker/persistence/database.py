@@ -39,6 +39,7 @@ class Database:
 
     def _apply_migrations(self) -> None:
         statements = [
+            "ALTER TABLE episodes_cache ADD COLUMN still_url VARCHAR(512) DEFAULT ''",
             "ALTER TABLE episodes_cache ADD COLUMN imdb_id VARCHAR(32) DEFAULT ''",
             "ALTER TABLE episodes_cache ADD COLUMN imdb_rating FLOAT",
             "ALTER TABLE episodes_cache ADD COLUMN imdb_votes INTEGER",

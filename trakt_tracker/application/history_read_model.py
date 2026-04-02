@@ -71,6 +71,11 @@ class HistoryReadModelService:
                         if row.season is not None and row.episode is not None
                         else None
                     ),
+                    "episode_still_url": (
+                        (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("still_url")
+                        if row.season is not None and row.episode is not None
+                        else ""
+                    ),
                     "episode_trakt_rating": (
                         (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("trakt_rating")
                         if row.season is not None and row.episode is not None

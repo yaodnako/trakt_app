@@ -55,6 +55,7 @@ class EpisodeCache(Base):
     season: Mapped[int] = mapped_column(Integer)
     number: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(255), default="")
+    still_url: Mapped[str] = mapped_column(String(512), default="")
     trakt_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     trakt_votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     imdb_id: Mapped[str] = mapped_column(String(32), default="")

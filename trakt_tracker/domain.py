@@ -34,6 +34,7 @@ class EpisodeSummary:
     season: int
     number: int
     title: str
+    still_url: str = ""
     trakt_rating: float | None = None
     trakt_votes: int | None = None
     imdb_id: str = ""
