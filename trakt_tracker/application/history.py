@@ -168,3 +168,51 @@ class HistoryService:
                 continue
             return row.get("display_rating")
         return None
+
+    def has_missing_visible_episode_details(self, rows: list[dict]) -> bool:
+        episode_keys = [
+            (int(row["title_trakt_id"]), int(row["season"]), int(row["episode"]))
+            for row in rows
+            if row.get("type") == "show" and row.get("season") is not None and row.get("episode") is not None
+        ]
+        if not episode_keys:
+            return False
+        with self._db.session() as session:
+            metadata = self._episode_repo.metadata_by_episode_keys(session, episode_keys)
+        for key in dict.fromkeys(episode_keys):
+            item = metadata.get(key) or {}
+            if item.get("trakt_rating") is None or item.get("trakt_votes") is None:
+                return True
+        return False
+
+    def enrich_visible_episode_details(self, rows: list[dict]) -> bool:
+        episode_keys = [
+            (int(row["title_trakt_id"]), int(row["season"]), int(row["episode"]))
+            for row in rows
+            if row.get("type") == "show" and row.get("season") is not None and row.get("episode") is not None
+        ]
+        if not episode_keys:
+            return False
+        with self._db.session() as session:
+            metadata = self._episode_repo.metadata_by_episode_keys(session, episode_keys)
+        missing_keys = [
+            key
+            for key in dict.fromkeys(episode_keys)
+            if (metadata.get(key) or {}).get("trakt_rating") is None or (metadata.get(key) or {}).get("trakt_votes") is None
+        ]
+        if not missing_keys:
+            return False
+        client = self._auth.get_client()
+        changed = False
+        with self._db.session() as session:
+            for show_trakt_id, season, episode in missing_keys:
+                details = client.get_episode_details(show_trakt_id, season, episode)
+                if details is None:
+                    continue
+                existing = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
+                previous_rating = existing.trakt_rating if existing is not None else None
+                previous_votes = existing.trakt_votes if existing is not None else None
+                self._episode_repo.upsert_episode(session, show_trakt_id, details)
+                if details.trakt_rating != previous_rating or details.trakt_votes != previous_votes:
+                    changed = True
+        return changed

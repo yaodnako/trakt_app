@@ -507,7 +507,7 @@ select {
 
 .history-entry-card {
     display: grid;
-    grid-template-columns: 68px minmax(0, 1fr);
+    grid-template-columns: 136px minmax(0, 1fr);
     gap: 10px 12px;
     align-items: start;
     padding: 10px 12px;
@@ -519,7 +519,8 @@ select {
 }
 
 .history-entry-poster {
-    width: 68px;
+    position: relative;
+    width: 136px;
     aspect-ratio: 2 / 3;
     border-radius: 12px;
     overflow: hidden;
@@ -529,7 +530,29 @@ select {
     text-decoration: none;
 }
 
-.history-entry-poster img {
+.history-rating-badge {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    min-height: 24px;
+    padding: 4px 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: rgba(55, 65, 81, 0.92);
+    color: #fff;
+    font-size: 0.74rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.history-poster-chip {
+    bottom: 6px;
+    padding: 5px 8px;
+}
+
+.history-entry-poster > img {
     width: 100%;
     height: 100%;
     object-fit: cover;
@@ -537,16 +560,18 @@ select {
 }
 
 .history-entry-main {
-    display: grid;
+    display: flex;
+    flex-direction: column;
     gap: 4px;
     min-width: 0;
-    align-self: center;
+    align-self: stretch;
+    justify-content: flex-start;
 }
 
 .history-entry-heading {
     display: flex;
     gap: 8px;
-    align-items: center;
+    align-items: start;
     flex-wrap: wrap;
 }
 
@@ -554,6 +579,13 @@ select {
     font-weight: 700;
     text-decoration: none;
     font-size: 1rem;
+}
+
+.history-entry-subhead {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
 }
 
 .history-entry-episode {
@@ -568,7 +600,7 @@ select {
     align-items: center;
     flex-wrap: wrap;
     justify-content: flex-start;
-    grid-column: 2;
+    margin-top: auto;
 }
 
 .history-pill,
@@ -637,16 +669,21 @@ tbody tr:hover {
 
 .progress-card {
     display: grid;
-    grid-template-columns: 162px minmax(0, 1fr);
-    gap: 12px;
+    gap: 10px;
     padding: 14px;
-    align-items: stretch;
     max-width: 460px;
     backdrop-filter: blur(14px);
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
+}
+
+.progress-main {
+    display: grid;
+    grid-template-columns: 162px minmax(0, 1fr);
+    gap: 12px;
+    align-items: stretch;
 }
 
 .progress-card.is-released {
@@ -669,23 +706,10 @@ tbody tr:hover {
     background: linear-gradient(180deg, rgba(13, 107, 97, 0.08), rgba(30, 27, 22, 0.03));
 }
 
-.release-chip {
-    position: absolute;
-    left: 8px;
-    top: 8px;
-    padding: 4px 9px;
-    border-radius: 999px;
-    background: rgba(223, 246, 231, 0.98);
-    color: #0f6a4d;
-    border: 1px solid #7cc8a1;
-    font-size: 0.73rem;
-    font-weight: 700;
-}
-
 .progress-poster > img {
     width: 100%;
     height: 100%;
-    object-fit: contain;
+    object-fit: cover;
     object-position: center;
     background: transparent;
 }
@@ -696,43 +720,47 @@ tbody tr:hover {
     right: 8px;
     min-width: 26px;
     height: 26px;
-    padding: 0 7px;
-    display: grid;
-    place-items: center;
+    padding: 0 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border-radius: 10px;
     background: #dc2626;
     color: #fff;
     font-weight: 700;
+    font-size: 0.92rem;
+    line-height: 1;
 }
 
 .poster-chip {
     position: absolute;
-    left: 8px;
+    left: 50%;
     bottom: 8px;
-    padding: 6px 8px;
-    border-radius: 14px;
+    padding: 5px 8px;
+    border-radius: 16px;
     background: rgba(55, 65, 81, 0.9);
     color: #fff;
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     display: grid;
-    gap: 4px;
+    gap: 3px;
     justify-items: start;
-    width: auto;
+    width: max-content;
     max-width: calc(100% - 16px);
+    transform: translateX(-50%);
 }
 
 .poster-chip-part {
     display: grid;
     grid-template-columns: auto 1fr;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
     line-height: 1.05;
     min-width: 0;
 }
 
 .poster-chip-icon {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     display: block;
     flex: 0 0 auto;
     object-fit: contain;
@@ -743,7 +771,7 @@ tbody tr:hover {
     color: #fff;
     font-weight: 700;
     white-space: nowrap;
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     align-self: center;
 }
 
@@ -865,6 +893,10 @@ tbody tr:hover {
     padding-inline: 12px;
     font-size: 0.8rem;
     font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
 }
 
 .card-open-button {
@@ -914,9 +946,20 @@ tbody tr:hover {
     display: flex;
     flex: 1 1 auto;
     flex-direction: column;
-    justify-content: space-around;
+    justify-content: flex-start;
     gap: 12px;
-    padding-block: 6px;
+    padding-top: 0;
+    padding-bottom: 6px;
+}
+
+.progress-head {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.progress-topline {
+    display: block;
 }
 
 .progress-body h3 {
@@ -925,20 +968,55 @@ tbody tr:hover {
     line-height: 1.15;
 }
 
-.progress-body .meta,
-.progress-next {
+.progress-status {
+    margin: 0;
+    color: var(--muted);
     font-size: 0.86rem;
-    line-height: 1.35;
+    line-height: 1.2;
+}
+
+.progress-episode-block {
+    display: grid;
+    gap: 4px;
+}
+
+.progress-episode-code {
+    margin: 0;
+    color: #1d4ed8;
+    font-size: 0.9rem;
+    font-weight: 600;
+    line-height: 1;
 }
 
 .progress-next {
     color: #1d4ed8;
-    font-weight: 600;
+    font-weight: 500;
     margin: 0;
+    font-size: 0.95rem;
+    line-height: 1.25;
 }
 
 .progress-body .meta {
     margin: 0;
+    color: var(--muted);
+    font-size: 0.86rem;
+    line-height: 1.35;
+}
+
+.progress-air-date {
+    margin: 0;
+    color: #1d4ed8;
+    font-size: 0.94rem;
+    font-weight: 500;
+    line-height: 1;
+}
+
+.progress-air-date-top {
+    margin: 0 0 3px;
+    position: relative;
+    top: -2px;
+    width: auto;
+    flex: initial;
 }
 
 .icon-button {
@@ -1153,11 +1231,15 @@ tbody tr:hover {
     }
 
     .progress-card {
+        max-width: none;
+    }
+
+    .progress-main {
         grid-template-columns: 1fr;
     }
 
     .history-entry-card {
-        grid-template-columns: 72px minmax(0, 1fr);
+        grid-template-columns: 136px minmax(0, 1fr);
         align-items: start;
         flex: 1 1 100%;
         max-width: none;
@@ -1165,7 +1247,7 @@ tbody tr:hover {
     }
 
     .history-entry-poster {
-        width: 72px;
+        width: 136px;
     }
 
     .history-entry-meta {
@@ -1175,6 +1257,10 @@ tbody tr:hover {
     .progress-poster {
         width: min(220px, 100%);
         justify-self: start;
+    }
+
+    .progress-body {
+        min-height: auto;
     }
 
     .brand {

@@ -71,6 +71,16 @@ class HistoryReadModelService:
                         if row.season is not None and row.episode is not None
                         else None
                     ),
+                    "episode_trakt_rating": (
+                        (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("trakt_rating")
+                        if row.season is not None and row.episode is not None
+                        else None
+                    ),
+                    "episode_trakt_votes": (
+                        (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("trakt_votes")
+                        if row.season is not None and row.episode is not None
+                        else None
+                    ),
                     "episode_imdb_rating": (
                         (
                             (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_rating")

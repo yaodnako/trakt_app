@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 from trakt_tracker.application.services import ServiceContainer
 from trakt_tracker.config import ConfigStore, format_local_datetime, normalize_utc_offset
 from trakt_tracker.domain import HistoryItemInput, RatingInput, TitleSummary
+from trakt_tracker.formatting import format_compact_votes, format_progress_percent, format_rating_with_votes
 from trakt_tracker.infrastructure.cache import BinaryCache
 from trakt_tracker.startup_profile import StartupProfiler
 
@@ -59,22 +60,11 @@ def _scale_px(value: int) -> int:
 
 
 def _format_compact_votes(value: int | None) -> str:
-    if value is None:
-        return ""
-    if value < 1_000:
-        return str(value)
-    if value < 1_000_000:
-        return f"{value / 1_000:.2f}".rstrip("0").rstrip(".") + "k"
-    return f"{value / 1_000_000:.2f}".rstrip("0").rstrip(".") + "m"
+    return format_compact_votes(value)
 
 
 def _format_rating_with_votes(rating: float | None, votes: int | None) -> str:
-    if rating is None:
-        return "n/a"
-    compact_votes = _format_compact_votes(votes)
-    if compact_votes:
-        return f"{rating:.1f} ({compact_votes})"
-    return f"{rating:.1f}"
+    return format_rating_with_votes(rating, votes)
 
 
 def _format_app_datetime(value: datetime | None, utc_offset: str) -> str:
@@ -440,7 +430,7 @@ class TitleDetailsDialog(QDialog):
         lines = [
             self.summary.toPlainText(),
             "",
-            f"Progress: {progress.completed}/{progress.aired} ({progress.percent_completed:.1f}%)",
+            f"Progress: {progress.completed}/{progress.aired} ({format_progress_percent(progress.percent_completed)})",
         ]
         if progress.last_episode:
             lines.append(
@@ -566,10 +556,7 @@ class ProgressPosterWidget(QWidget):
             painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, self._badge_text)
         if self._rating_parts:
             chip_height = 42 if len(self._rating_parts) > 1 else 28
-            chip_rect = QRect(12, rect.bottom() - (chip_height + 12), rect.width() - 24, chip_height)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(55, 65, 81, 230))
-            painter.drawRoundedRect(chip_rect, 14, 14)
             icon_height = 16
             gap = 6
             font = painter.font()
@@ -578,10 +565,17 @@ class ProgressPosterWidget(QWidget):
             painter.setFont(font)
             metrics = painter.fontMetrics()
             rendered_parts: list[tuple[QPixmap, str]] = []
+            row_widths: list[int] = []
             for source, text in self._rating_parts:
                 icon_name = "imdb_icon.png" if source == "imdb" else "trakt_logo_bw.svg"
                 icon = QIcon(_ui_asset_path(icon_name)).pixmap(QSize(icon_height, icon_height))
                 rendered_parts.append((icon, text))
+                row_widths.append(icon.width() + gap + metrics.horizontalAdvance(text))
+
+            chip_width = min(rect.width() - 24, max(row_widths, default=0) + 24)
+            chip_rect = QRect((rect.width() - chip_width) // 2, rect.bottom() - (chip_height + 12), chip_width, chip_height)
+            painter.setBrush(QColor(55, 65, 81, 230))
+            painter.drawRoundedRect(chip_rect, 14, 14)
 
             row_height = chip_rect.height() // max(1, len(rendered_parts))
             for index, (icon, text) in enumerate(rendered_parts):
@@ -634,30 +628,35 @@ class ProgressCard(QWidget):
         title_label.setObjectName("progressTitle")
         title_label.setWordWrap(True)
 
-        meta_bits = [f"{progress.completed}/{_effective_progress_aired(progress)} watched ({_effective_progress_percent(progress):.1f}%)"]
-        if progress.status:
-            meta_bits.append(progress.status)
-        meta_label = QLabel(" | ".join(meta_bits))
+        status_label = QLabel(progress.status or "")
+        status_label.setVisible(bool(progress.status))
+        status_label.setObjectName("progressStatus")
+        status_label.setWordWrap(True)
+
+        meta_label = QLabel(f"{progress.completed}/{_effective_progress_aired(progress)} ({format_progress_percent(_effective_progress_percent(progress))})")
         meta_label.setObjectName("progressMeta")
         meta_label.setWordWrap(True)
 
-        release_label = QLabel("New")
-        release_label.setVisible(is_recent_release)
-        release_label.setObjectName("progressRelease")
-
         next_episode = progress.next_episode
-        next_lines = []
+        episode_code_label = QLabel("")
+        episode_code_label.setObjectName("progressEpisodeCode")
+        episode_code_label.setVisible(next_episode is not None)
+        episode_code_label.setWordWrap(False)
+
+        next_title_label = QLabel("")
+        next_title_label.setObjectName("progressNext")
+        next_title_label.setWordWrap(True)
+
+        air_label = QLabel("")
+        air_label.setObjectName("progressAirDate")
+        air_label.setWordWrap(True)
         if next_episode is not None:
-            next_lines.append(f"Next: S{next_episode.season:02d}E{next_episode.number:02d} {next_episode.title}")
-            next_lines.append(
-                f"Airs: {_format_app_datetime(next_episode.first_aired, utc_offset)}"
-                if next_episode.first_aired else "Airs: unknown"
-            )
+            episode_code_label.setText(f"S{next_episode.season:02d}E{next_episode.number:02d}")
+            next_title_label.setText(next_episode.title)
+            air_label.setText(_format_app_datetime(next_episode.first_aired, utc_offset) if next_episode.first_aired else "unknown")
         else:
-            next_lines.append("No next episode queued.")
-        next_label = QLabel("\n".join(next_lines))
-        next_label.setObjectName("progressNext")
-        next_label.setWordWrap(True)
+            next_title_label.setText("No next episode queued.")
+            air_label.setText("unknown")
 
         button_size = QSize(48, 42)
 
@@ -699,11 +698,22 @@ class ProgressCard(QWidget):
         button_row.addWidget(drop_btn)
         button_row.addStretch()
 
+        head_col = QVBoxLayout()
+        head_col.setSpacing(2)
+        head_col.addWidget(title_label)
+        head_col.addWidget(status_label)
+
+        episode_col = QVBoxLayout()
+        episode_col.setSpacing(4)
+        episode_col.addWidget(episode_code_label)
+        episode_col.addWidget(next_title_label)
+
         text_col = QVBoxLayout()
-        text_col.addWidget(title_label)
-        text_col.addWidget(release_label, 0, Qt.AlignmentFlag.AlignLeft)
+        text_col.setSpacing(16)
+        text_col.addWidget(air_label)
+        text_col.addLayout(head_col)
+        text_col.addLayout(episode_col)
         text_col.addWidget(meta_label)
-        text_col.addWidget(next_label)
         text_col.addStretch()
         text_col.addLayout(button_row)
 
@@ -729,16 +739,11 @@ class ProgressCard(QWidget):
                 border: none;
                 padding: 0;
             }}
-            QLabel#progressRelease {{
-                background: #dff6e7;
-                color: #0f6a4d;
-                border: 1px solid #7cc8a1;
-                border-radius: 14px;
-                padding: 5px 12px;
-                font-size: 15px;
-                font-weight: 700;
+            QLabel#progressStatus {{
+                color: #6a6256;
+                font-size: 16px;
             }}
-            QLabel#progressMeta, QLabel#progressNext {{
+            QLabel#progressMeta, QLabel#progressNext, QLabel#progressEpisodeCode, QLabel#progressAirDate, QLabel#progressStatus {{
                 background: transparent;
                 border: none;
                 padding: 0;
@@ -747,10 +752,20 @@ class ProgressCard(QWidget):
                 color: #6a6256;
                 font-size: 18px;
             }}
+            QLabel#progressEpisodeCode {{
+                color: #1d4ed8;
+                font-size: 17px;
+                font-weight: 600;
+            }}
             QLabel#progressNext {{
                 color: #1d4ed8;
                 font-size: 18px;
-                font-weight: 600;
+                font-weight: 500;
+            }}
+            QLabel#progressAirDate {{
+                color: #1d4ed8;
+                font-size: 14px;
+                font-weight: 500;
             }}
             QToolButton#progressAction {{
                 background: rgba(255, 255, 255, 0.9);
@@ -1205,6 +1220,24 @@ class HistorySyncWorker(QThread):
         self.sync_completed.emit(changed)
 
 
+class HistoryEpisodeEnrichmentWorker(QThread):
+    enrich_completed = Signal(bool)
+    enrich_failed = Signal(str)
+
+    def __init__(self, services: ServiceContainer, rows: list[dict]) -> None:
+        super().__init__()
+        self.services = services
+        self.rows = rows
+
+    def run(self) -> None:
+        try:
+            changed = self.services.history.enrich_visible_episode_details(self.rows)
+        except Exception as exc:
+            self.enrich_failed.emit(str(exc))
+            return
+        self.enrich_completed.emit(bool(changed))
+
+
 class MainWindow(QMainWindow):
     _ALL_HISTORY_TITLES = "All titles"
 
@@ -1354,6 +1387,7 @@ class MainWindow(QMainWindow):
         self._history_sort_column = 0
         self._history_sort_order = Qt.SortOrder.DescendingOrder
         self._history_manual_sync_worker: HistorySyncWorker | None = None
+        self._history_enrichment_worker: HistoryEpisodeEnrichmentWorker | None = None
         header.sortIndicatorChanged.connect(self._on_history_sort_changed)
         self.history_list.verticalScrollBar().valueChanged.connect(self._maybe_fetch_more_history_rows)
         self.history_type.currentTextChanged.connect(self._on_history_filter_changed)
@@ -2366,6 +2400,7 @@ class MainWindow(QMainWindow):
             self._load_next_history_page(title_type, normalized_title_filter, reset=True)
             self.history_list.horizontalHeader().setSortIndicator(self._history_sort_column, self._history_sort_order)
             self.history_list.setUpdatesEnabled(True)
+            self._schedule_history_episode_enrichment()
             return
 
         rows = self.services.history.history(title_type=title_type, title_filter=normalized_title_filter)
@@ -2377,6 +2412,7 @@ class MainWindow(QMainWindow):
         self._append_history_rows(min(self._history_batch_size, len(self._history_rows_cache)))
         self.history_list.horizontalHeader().setSortIndicator(self._history_sort_column, self._history_sort_order)
         self.history_list.setUpdatesEnabled(True)
+        self._schedule_history_episode_enrichment()
 
     def _append_history_rows(self, target_count: int) -> None:
         if target_count <= self._history_loaded_count:
@@ -2510,6 +2546,26 @@ class MainWindow(QMainWindow):
             self._history_rows_cache.extend(rows)
         self._history_has_more = len(rows) == self._history_batch_size
         self._append_history_rows(len(self._history_rows_cache))
+        self._schedule_history_episode_enrichment()
+
+    def _schedule_history_episode_enrichment(self) -> None:
+        if self._history_enrichment_worker is not None and self._history_enrichment_worker.isRunning():
+            return
+        visible_rows = list(self._history_rows_cache[: self._history_loaded_count or self._history_batch_size])
+        if not visible_rows:
+            return
+        self._history_enrichment_worker = HistoryEpisodeEnrichmentWorker(self.services, visible_rows)
+        self._history_enrichment_worker.enrich_completed.connect(self._on_history_episode_enrichment_completed)
+        self._history_enrichment_worker.enrich_failed.connect(self._on_history_episode_enrichment_failed)
+        self._history_enrichment_worker.start()
+
+    def _on_history_episode_enrichment_completed(self, changed: bool) -> None:
+        self._history_enrichment_worker = None
+        if changed:
+            self._refresh_history()
+
+    def _on_history_episode_enrichment_failed(self, _message: str) -> None:
+        self._history_enrichment_worker = None
 
     def _sort_history_rows(self, rows: list[dict]) -> list[dict]:
         reverse = self._history_sort_order == Qt.SortOrder.DescendingOrder

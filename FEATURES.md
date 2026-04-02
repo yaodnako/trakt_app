@@ -46,7 +46,10 @@
 Поддерживается:
 
 - watch rows
+- grouped-by-day cards in web
+- title posters in web history cards
 - episode rating display
+- Trakt episode aggregate rating in web history cards via lazy enrichment
 - IMDb rating/votes
 - filters
 - sync

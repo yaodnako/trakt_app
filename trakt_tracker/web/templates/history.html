@@ -91,30 +91,61 @@
                         {% else %}
                         <div class="poster-fallback">No poster</div>
                         {% endif %}
+                        {% if row.display_rating is not none %}
+                        <div class="history-rating-badge">{{ row.display_rating }} ★</div>
+                        {% endif %}
+                        {% if row.type == 'show' and row.season is not none and row.episode is not none %}
+                        <div class="poster-chip history-poster-chip">
+                            <span class="poster-chip-part">
+                                <img
+                                    class="poster-chip-icon"
+                                    src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
+                                    alt="trakt"
+                                >
+                                <span>
+                                    {% if row.episode_trakt_rating is not none %}
+                                    {{ row.episode_trakt_rating|rating_with_votes(row.episode_trakt_votes) }}
+                                    {% else %}
+                                    n/a
+                                    {% endif %}
+                                </span>
+                            </span>
+                            <span class="poster-chip-part">
+                                <img
+                                    class="poster-chip-icon"
+                                    src="{{ request.url_for('static', path='imdb_icon.png') }}"
+                                    alt="imdb"
+                                >
+                                <span>
+                                    {% if row.episode_imdb_rating is not none %}
+                                    {{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}
+                                    {% else %}
+                                    n/a
+                                    {% endif %}
+                                </span>
+                            </span>
+                        </div>
+                        {% endif %}
                     </a>
                     <div class="history-entry-main">
                         <div class="history-entry-heading">
                             <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}">{{ row.title }}</a>
-                            {% if row.type == 'show' and row.season is not none and row.episode is not none %}
-                            <span class="history-pill">{{ row.season|episode_label(row.episode) }}</span>
-                            {% endif %}
-                            <span class="history-pill muted">{{ row.type|upper }}</span>
                         </div>
+                        {% if row.type == 'show' and row.season is not none and row.episode is not none %}
+                        <div class="history-entry-subhead">
+                            <span class="history-pill">{{ row.season|episode_label(row.episode) }}</span>
+                        </div>
+                        {% endif %}
                         {% if row.episode_title %}
                         <p class="history-entry-episode">{{ row.episode_title }}</p>
                         {% endif %}
-                    </div>
-                    <div class="history-entry-meta">
-                        {% if row.display_rating is not none %}
-                        <span class="history-chip">{{ row.display_rating }}/10</span>
-                        {% else %}
+                        {% if row.display_rating is none %}
+                        <div class="history-entry-meta">
                         <a
                             class="button ghost text-button"
                             href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page }}&rate_trakt_id={{ row.title_trakt_id }}&rate_type={{ row.type }}&rate_season={{ row.season or '' }}&rate_episode={{ row.episode or '' }}&rate_title={{ row.title|urlencode }}"
                         >Rate</a>
-                        {% endif %}
-                        {% if row.episode_imdb_rating is not none %}
-                        <span class="history-chip ghost">{{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}</span>
+                        </div>
                         {% endif %}
                     </div>
                 </article>
@@ -147,6 +178,8 @@
     if (!window.fetch) {
         return;
     }
+    const enrichStarted = {{ 'true' if history_enrich_started else 'false' or 'true' if history_title_enrich_started else 'false' }};
+    let enrichSeq = {{ history_enrich_initial_seq }};
     if (window.traktDebugMode && window.pushFlashToast) {
         window.pushFlashToast("History auto-sync: checking…", 2400);
     }
@@ -170,6 +203,50 @@
             }
         })
         .catch(() => {});
+
+    if (!enrichStarted) {
+        return;
+    }
+
+    let enrichAttempts = 0;
+    const enrichTimer = window.setInterval(async () => {
+        enrichAttempts += 1;
+        try {
+            const response = await fetch(`/debug/events?after=${enrichSeq}`, {
+                headers: {"Accept": "application/json"},
+                cache: "no-store",
+            });
+            if (!response.ok) {
+                if (enrichAttempts > 20) {
+                    window.clearInterval(enrichTimer);
+                }
+                return;
+            }
+            const payload = await response.json();
+            const events = Array.isArray(payload.events) ? payload.events : [];
+            for (const event of events) {
+                if (typeof event.seq === "number") {
+                    enrichSeq = Math.max(enrichSeq, event.seq);
+                }
+                if ((event.source === "History episode enrich" || event.source === "History title enrich") && String(event.message || "").includes("completed.")) {
+                    window.clearInterval(enrichTimer);
+                    window.location.reload();
+                    return;
+                }
+                if ((event.source === "History episode enrich" || event.source === "History title enrich") && String(event.message || "").includes("failed:")) {
+                    window.clearInterval(enrichTimer);
+                    return;
+                }
+            }
+            if (enrichAttempts > 20) {
+                window.clearInterval(enrichTimer);
+            }
+        } catch (_error) {
+            if (enrichAttempts > 20) {
+                window.clearInterval(enrichTimer);
+            }
+        }
+    }, 1200);
 })();
 </script>
 {% endblock %}

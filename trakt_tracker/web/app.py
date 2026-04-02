@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 from trakt_tracker.application.services import ServiceContainer, build_services
 from trakt_tracker.config import ConfigStore, format_local_datetime, get_app_data_dir
+from trakt_tracker.formatting import format_compact_votes, format_rating_with_votes
 from trakt_tracker.infrastructure.cache import BinaryCache
 from trakt_tracker.persistence.database import Database
 from trakt_tracker.startup_profile import StartupProfiler
@@ -36,22 +37,11 @@ class _TemplateFilters:
 
     @staticmethod
     def format_compact_votes(value: int | None) -> str:
-        if value is None:
-            return ""
-        if value < 1_000:
-            return str(value)
-        if value < 1_000_000:
-            return f"{value / 1_000:.2f}".rstrip("0").rstrip(".") + "k"
-        return f"{value / 1_000_000:.2f}".rstrip("0").rstrip(".") + "m"
+        return format_compact_votes(value)
 
     @staticmethod
     def format_rating_with_votes(rating: float | None, votes: int | None) -> str:
-        if rating is None:
-            return "n/a"
-        compact_votes = _TemplateFilters.format_compact_votes(votes)
-        if compact_votes:
-            return f"{rating:.1f} ({compact_votes})"
-        return f"{rating:.1f}"
+        return format_rating_with_votes(rating, votes)
 
     @staticmethod
     def format_dt(value) -> str:

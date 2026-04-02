@@ -113,6 +113,24 @@ class CatalogService:
             self._user_states.ensure_state(session, model.id)
         return title
 
+    def enrich_visible_titles(self, rows: list[dict]) -> bool:
+        title_items = [
+            (int(row["title_trakt_id"]), str(row["type"]))
+            for row in rows
+            if row.get("title_trakt_id") and row.get("type") in {"movie", "show"} and not row.get("poster_url")
+        ]
+        if not title_items:
+            return False
+        changed = False
+        for trakt_id, title_type in dict.fromkeys(title_items):
+            try:
+                title = self.get_title_details(trakt_id, title_type)
+            except Exception:
+                continue
+            if title.poster_url:
+                changed = True
+        return changed
+
     def get_search_sort_mode(self) -> str:
         with self._db.session() as session:
             return self._sync_state.get_value(session, "search_sort_mode", "IMDb votes")

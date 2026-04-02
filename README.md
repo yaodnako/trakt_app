@@ -4,8 +4,8 @@
 
 ## Что это сейчас
 
-- `desktop` на `PySide6` остаётся основным рабочим интерфейсом
-- `web` на `FastAPI + Jinja2` развивается как второй UI поверх того же Python core и той же SQLite
+- `web` на `FastAPI + Jinja2` теперь основной рабочий интерфейс
+- `desktop` на `PySide6` остаётся вторым UI поверх того же Python core и той же SQLite
 - source of truth:
   - `Trakt` для history / ratings / progress / calendar
   - `TMDb` для artwork и части metadata
@@ -39,6 +39,12 @@ python -m trakt_tracker.web.main
 - [run_trakt_tracker_web.bat](/D:/CodexProjects/Trakt_app/run_trakt_tracker_web.bat)
 - [restart_trakt_tracker_web.bat](/D:/CodexProjects/Trakt_app/restart_trakt_tracker_web.bat)
 
+Visual checks:
+
+- [capture_web_ui.bat](/D:/CodexProjects/Trakt_app/capture_web_ui.bat)
+- [tools/capture_web_screens.py](/D:/CodexProjects/Trakt_app/tools/capture_web_screens.py)
+- screenshots go to [generated/ui_checks](/D:/CodexProjects/Trakt_app/generated/ui_checks)
+
 ## Где проект сейчас по архитектуре
 
 Уже вынесены отдельные слои:
@@ -63,3 +69,4 @@ python -m trakt_tracker.web.main
 - sync / ratings / progress всё ещё чувствительные места
 - при вопросах про “почему что-то не обновилось” сначала смотреть `STATE.md`
 - при вопросах про дальнейший рефактор сначала смотреть `ARCHITECTURE.md`
+- для web UI-проверок использовать локальные screenshots через `capture_web_ui.bat`

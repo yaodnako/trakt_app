@@ -19,10 +19,14 @@ class TitleRepository:
         model.title = title.title
         model.title_type = title.title_type
         model.year = title.year
-        model.overview = title.overview
-        model.poster_url = title.poster_url
-        model.status = title.status
-        model.slug = title.slug
+        if title.overview:
+            model.overview = title.overview
+        if title.poster_url:
+            model.poster_url = title.poster_url
+        if title.status:
+            model.status = title.status
+        if title.slug:
+            model.slug = title.slug
         session.flush()
         return model
 
@@ -543,6 +547,8 @@ class EpisodeRepository:
         for row in session.scalars(stmt):
             result[(row.show_trakt_id, row.season, row.number)] = {
                 "title": row.title,
+                "trakt_rating": row.trakt_rating,
+                "trakt_votes": row.trakt_votes,
                 "imdb_id": row.imdb_id,
                 "imdb_rating": row.imdb_rating,
                 "imdb_votes": row.imdb_votes,

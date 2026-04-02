@@ -40,6 +40,21 @@ def register_history_routes(app, *, render) -> None:
         )
         has_next = len(rows) > HISTORY_PAGE_SIZE
         rows = rows[:HISTORY_PAGE_SIZE]
+        enrich_initial_seq = services.operations.current_seq()
+        enrich_started = False
+        if services.history.has_missing_visible_episode_details(rows):
+            enrich_started = request.app.state.bg_tasks.start(
+                f"history_enrich:{title_type or 'all'}:{title_filter or ''}:{current_page}",
+                source="History episode enrich",
+                operations=services.operations,
+                fn=lambda rows_snapshot=list(rows): services.history.enrich_visible_episode_details(rows_snapshot),
+            )
+        title_enrich_started = request.app.state.bg_tasks.start(
+            f"history_title_enrich:{title_type or 'all'}:{title_filter or ''}:{current_page}",
+            source="History title enrich",
+            operations=services.operations,
+            fn=lambda rows_snapshot=list(rows): services.catalog.enrich_visible_titles(rows_snapshot),
+        )
         grouped_days = _group_history_rows(rows, services.auth.config.utc_offset)
         title_options = services.history.history_titles(title_type=title_type)
         return render(
@@ -59,6 +74,9 @@ def register_history_routes(app, *, render) -> None:
                 "rate_season": rate_season,
                 "rate_episode": rate_episode,
                 "rate_title": rate_title,
+                "history_enrich_started": enrich_started,
+                "history_title_enrich_started": title_enrich_started,
+                "history_enrich_initial_seq": enrich_initial_seq,
                 "flash": flash,
             },
         )

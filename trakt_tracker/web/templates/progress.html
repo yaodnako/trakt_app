@@ -2,14 +2,12 @@
 
 {% macro render_progress_card(item, is_new=False) %}
 <article class="progress-card{% if is_new %} is-released js-new-card{% endif %}"{% if is_new %} data-seen-form="seen-form-{{ item.trakt_id }}"{% endif %}>
+    <div class="progress-main">
     <div class="progress-poster">
         {% if item.poster_url %}
         <img src="{{ item.poster_url|cached_image_url }}" alt="{{ item.title }} poster" loading="lazy">
         {% else %}
-        <div class="poster-fallback">No poster</div>
-        {% endif %}
-        {% if is_new %}
-        <div class="release-chip">New</div>
+            <div class="poster-fallback">No poster</div>
         {% endif %}
         {% set skipped_count = item|progress_skipped_count %}
         {% if skipped_count %}
@@ -34,8 +32,14 @@
         {% endif %}
     </div>
     <div class="progress-body">
-        <h3>{{ item.title }}</h3>
         <div class="progress-copy">
+        <p class="progress-air-date progress-air-date-top">{{ item.next_episode.first_aired|dt if item.next_episode and item.next_episode.first_aired else 'unknown' }}</p>
+        <div class="progress-head">
+            <h3>{{ item.title }}</h3>
+            {% if item.status %}
+            <p class="progress-status">{{ item.status }}</p>
+            {% endif %}
+        </div>
         {% if is_new %}
         <form method="post" action="/progress/{{ item.trakt_id }}/seen" id="seen-form-{{ item.trakt_id }}" class="visually-hidden">
             <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
@@ -43,26 +47,29 @@
             <input type="hidden" name="min_year" value="{{ min_year or '' }}">
             <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
         </form>
-        <p class="meta">{{ item.completed }}/{{ item|progress_effective_aired }} watched ({{ '%.1f'|format(item|progress_effective_percent) }}%){% if item.status %} | {{ item.status }}{% endif %}</p>
         {% if item.next_episode %}
-        <p class="progress-next">
-            Next: {{ item.next_episode.season|episode_label(item.next_episode.number) }} {{ item.next_episode.title }}<br>
-            Airs: {{ item.next_episode.first_aired|dt if item.next_episode.first_aired else 'unknown' }}
-        </p>
+        <div class="progress-episode-block">
+            <p class="progress-episode-code">{{ item.next_episode.season|episode_label(item.next_episode.number) }}</p>
+            <p class="progress-next">{{ item.next_episode.title }}</p>
+        </div>
         {% else %}
-        <p class="progress-next">No next episode queued.</p>
+        <div class="progress-episode-block">
+            <p class="progress-next">No next episode queued.</p>
+        </div>
         {% endif %}
         {% else %}
-        <p class="meta">{{ item.completed }}/{{ item|progress_effective_aired }} watched ({{ '%.1f'|format(item|progress_effective_percent) }}%){% if item.status %} | {{ item.status }}{% endif %}</p>
         {% if item.next_episode %}
-        <p class="progress-next">
-            Next: {{ item.next_episode.season|episode_label(item.next_episode.number) }} {{ item.next_episode.title }}<br>
-            Airs: {{ item.next_episode.first_aired|dt if item.next_episode.first_aired else 'unknown' }}
-        </p>
+        <div class="progress-episode-block">
+            <p class="progress-episode-code">{{ item.next_episode.season|episode_label(item.next_episode.number) }}</p>
+            <p class="progress-next">{{ item.next_episode.title }}</p>
+        </div>
         {% else %}
-        <p class="progress-next">No next episode queued.</p>
+        <div class="progress-episode-block">
+            <p class="progress-next">No next episode queued.</p>
+        </div>
         {% endif %}
         {% endif %}
+        <p class="meta">{{ item.completed }}/{{ item|progress_effective_aired }} ({{ (item|progress_effective_percent)|round|int }}%)</p>
         </div>
         <div class="progress-actions">
             <a
@@ -114,6 +121,7 @@
                 </button>
             </form>
         </div>
+    </div>
     </div>
 </article>
 {% endmacro %}

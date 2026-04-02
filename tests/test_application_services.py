@@ -37,6 +37,7 @@ class _FakeTraktClient:
         self.searched: list[tuple[str, str | None]] = []
         self.history_items: list[HistoryItemInput] = []
         self.ratings: list[RatingInput] = []
+        self.episode_details_calls: list[tuple[int, int, int]] = []
         self.title_details = TitleSummary(
             trakt_id=11,
             title_type="movie",
@@ -71,6 +72,17 @@ class _FakeTraktClient:
             EpisodeSummary(trakt_id=301, season=1, number=1, title="Pilot"),
             EpisodeSummary(trakt_id=302, season=1, number=2, title="Second"),
         ]
+
+    def get_episode_details(self, show_trakt_id: int, season: int, episode: int) -> EpisodeSummary:
+        self.episode_details_calls.append((show_trakt_id, season, episode))
+        return EpisodeSummary(
+            trakt_id=300 + episode,
+            season=season,
+            number=episode,
+            title=f"Episode {episode}",
+            trakt_rating=7.9,
+            trakt_votes=321,
+        )
 
 
 class _FakeTmdbClient:
@@ -154,6 +166,7 @@ class ApplicationServiceTests(unittest.TestCase):
             self.db,
             self.history_repo,
             self.user_states,
+            self.titles,
             self.episode_repo,
             self.episode_metadata,
         )
@@ -278,6 +291,32 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertFalse(services.sync.should_auto_sync_imdb_dataset(3))
         self.assertFalse(services.sync.maybe_sync_imdb_dataset(3))
         self.assertEqual(sync_calls, [False])
+
+    def test_history_service_enriches_visible_episode_details_only_when_missing(self) -> None:
+        service = HistoryService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            self.episode_repo,
+            self.history_read_model,
+        )
+        with self.db.session() as session:
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=301, season=3, number=4, title="Kill Switch"),
+            )
+        changed = service.enrich_visible_episode_details(
+            [{"title_trakt_id": 138748, "type": "show", "season": 3, "episode": 4}]
+        )
+        self.assertTrue(changed)
+        self.assertEqual(self.trakt_client.episode_details_calls, [(138748, 3, 4)])
+        with self.db.session() as session:
+            row = self.episode_repo.find_episode(session, 138748, 3, 4)
+            self.assertEqual(row.trakt_rating, 7.9)
+            self.assertEqual(row.trakt_votes, 321)
 
 
 if __name__ == "__main__":
