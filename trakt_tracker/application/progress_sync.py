@@ -3,6 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Callable
 
+from trakt_tracker.application.enrich_state import (
+    ENRICH_STATUS_CHECKED_NO_DATA,
+    ENRICH_STATUS_READY,
+)
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.sync_policy import SyncPolicy
@@ -47,6 +51,7 @@ class ProgressSyncWorkflow:
         progress.title = title.title or progress.title
         progress.poster_url = title.poster_url
         progress.status = title.status
+        detailed_episode = None
         if progress.next_episode is not None:
             with self._db.session() as session:
                 cached_next_episode = self._episode_repo.find_episode(
@@ -74,6 +79,19 @@ class ProgressSyncWorkflow:
             self._progress_repo.upsert_progress(session, progress)
             if progress.next_episode is not None:
                 self._episode_repo.upsert_episode(session, trakt_id, progress.next_episode)
+                if detailed_episode is not None:
+                    self._episode_repo.update_trakt_details_enrich_state(
+                        session,
+                        trakt_id,
+                        progress.next_episode.season,
+                        progress.next_episode.number,
+                        status=(
+                            ENRICH_STATUS_READY
+                            if detailed_episode.trakt_rating is not None and detailed_episode.trakt_votes is not None
+                            else ENRICH_STATUS_CHECKED_NO_DATA
+                        ),
+                        details=detailed_episode,
+                    )
             self._episode_metadata.attach_progress_episode_metadata(session, progress, enrich_imdb=True)
         return progress
 

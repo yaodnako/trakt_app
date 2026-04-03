@@ -3,6 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Callable
 
+from trakt_tracker.application.enrich_state import (
+    ENRICH_STATUS_CHECKED_NO_DATA,
+    ENRICH_STATUS_READY,
+    ENRICH_STATUS_RETRYABLE_FAILURE,
+    ENRICH_STATUS_UNKNOWN,
+    should_attempt_enrich,
+)
 from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_history_items,
     load_cached_trakt_rating_items,
@@ -18,12 +25,14 @@ class EpisodeMetadataService:
         db,
         episode_repo,
         imdb_client,
+        titles_repo=None,
         auth_service=None,
         tmdb_factory: Callable[[AppConfig], TMDbClient] | None = None,
     ) -> None:
         self._db = db
         self._episode_repo = episode_repo
         self._imdb_client = imdb_client
+        self._titles = titles_repo
         self._auth = auth_service
         self._tmdb_factory = tmdb_factory
 
@@ -219,35 +228,77 @@ class EpisodeMetadataService:
             metadata = self._episode_repo.metadata_by_episode_keys(session, unique_keys)
         missing_by_show: dict[int, list[tuple[int, int]]] = {}
         for show_trakt_id, season, episode in unique_keys:
-            if (metadata.get((show_trakt_id, season, episode)) or {}).get("still_url"):
+            item = metadata.get((show_trakt_id, season, episode)) or {}
+            if not should_attempt_enrich(
+                item.get("still_status", ENRICH_STATUS_UNKNOWN),
+                has_value=bool(item.get("still_url")),
+            ):
                 continue
             missing_by_show.setdefault(show_trakt_id, []).append((season, episode))
         if not missing_by_show:
             return False
         client = self._auth.get_client()
         tmdb = self._tmdb_factory(self._auth.config)
-        show_tmdb_ids = {
-            show_trakt_id: self._load_show_tmdb_id(client, show_trakt_id)
-            for show_trakt_id in missing_by_show
-        }
         changed = False
         with self._db.session() as session:
             for show_trakt_id, episodes in missing_by_show.items():
-                show_tmdb_id = show_tmdb_ids.get(show_trakt_id)
+                try:
+                    show_tmdb_id = self._load_show_tmdb_id(show_trakt_id, client)
+                except Exception:
+                    for season, episode in episodes:
+                        self._episode_repo.update_still_enrich_state(
+                            session,
+                            show_trakt_id,
+                            season,
+                            episode,
+                            status=ENRICH_STATUS_RETRYABLE_FAILURE,
+                        )
+                    continue
                 if not show_tmdb_id:
+                    for season, episode in episodes:
+                        self._episode_repo.update_still_enrich_state(
+                            session,
+                            show_trakt_id,
+                            season,
+                            episode,
+                            status=ENRICH_STATUS_CHECKED_NO_DATA,
+                        )
                     continue
                 for season, episode in episodes:
                     try:
                         still_url = tmdb.get_episode_still_url(show_tmdb_id, season, episode)
                     except Exception:
-                        continue
-                    if not still_url:
+                        self._episode_repo.update_still_enrich_state(
+                            session,
+                            show_trakt_id,
+                            season,
+                            episode,
+                            status=ENRICH_STATUS_RETRYABLE_FAILURE,
+                        )
                         continue
                     row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
-                    if row is None or row.still_url == still_url:
+                    if row is None:
                         continue
-                    row.still_url = still_url
-                    changed = True
+                    if still_url:
+                        if row.still_url != still_url or row.still_status != ENRICH_STATUS_READY:
+                            self._episode_repo.update_still_enrich_state(
+                                session,
+                                show_trakt_id,
+                                season,
+                                episode,
+                                status=ENRICH_STATUS_READY,
+                                still_url=still_url,
+                            )
+                            changed = True
+                        continue
+                    self._episode_repo.update_still_enrich_state(
+                        session,
+                        show_trakt_id,
+                        season,
+                        episode,
+                        status=ENRICH_STATUS_CHECKED_NO_DATA,
+                        still_url="",
+                    )
         return changed
 
     @staticmethod
@@ -260,16 +311,28 @@ class EpisodeMetadataService:
             return True
         if cached_row.first_aired != next_episode.first_aired:
             return True
+        if getattr(cached_row, "trakt_details_status", ENRICH_STATUS_UNKNOWN) in {
+            ENRICH_STATUS_READY,
+            ENRICH_STATUS_CHECKED_NO_DATA,
+        }:
+            return False
         if cached_row.trakt_rating is None or cached_row.trakt_votes is None:
             return True
         if not cached_row.imdb_id:
             return True
         return False
 
-    @staticmethod
-    def _load_show_tmdb_id(client, show_trakt_id: int) -> int | None:
+    def _load_show_tmdb_id(self, show_trakt_id: int, client) -> int | None:
+        if self._titles is not None:
+            with self._db.session() as session:
+                title_row = self._titles.get_title(session, show_trakt_id)
+                if title_row is not None and getattr(title_row, "tmdb_id", None):
+                    return int(title_row.tmdb_id)
         try:
             title = client.get_title_details(show_trakt_id, "show")
         except Exception:
             return None
+        if self._titles is not None and title.tmdb_id:
+            with self._db.session() as session:
+                self._titles.upsert_title(session, title)
         return title.tmdb_id

@@ -77,87 +77,151 @@
                 <span>{{ day.count }} watch{{ '' if day.count == 1 else 'es' }}</span>
             </div>
             <div class="history-entry-list">
-                {% for row in day.entries %}
-                <article class="history-entry-card">
-                    <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}" class="history-entry-poster">
-                        {% if row.poster_url %}
-                        <img
-                            src="{{ row.poster_url|cached_image_url }}"
-                            alt="{{ row.title }} poster"
-                            loading="lazy"
-                            data-direct-src="{{ row.poster_url }}"
-                            onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
-                        >
-                        {% else %}
-                        <div class="poster-fallback">No poster</div>
+                {% for title_group in day.title_groups %}
+                <article class="history-title-card">
+                    {% set title_filter_url = "/history?type=" ~ title_group.type ~ "&title=" ~ (title_group.title|urlencode) ~ "&page=1" %}
+                    {% set trakt_title_url = "" %}
+                    {% if title_group.title_slug %}
+                        {% if title_group.type == 'show' %}
+                            {% set trakt_title_url = "https://trakt.tv/shows/" ~ title_group.title_slug %}
+                        {% elif title_group.type == 'movie' %}
+                            {% set trakt_title_url = "https://trakt.tv/movies/" ~ title_group.title_slug %}
                         {% endif %}
-                        {% if row.display_rating is not none %}
-                        <div class="history-rating-badge">{{ row.display_rating }} ★</div>
-                        {% endif %}
-                        {% if row.type == 'show' and row.season is not none and row.episode is not none %}
-                        <div class="poster-chip history-poster-chip">
-                            <span class="poster-chip-part">
-                                <img
-                                    class="poster-chip-icon"
-                                    src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
-                                    alt="trakt"
-                                >
-                                <span>
-                                    {% if row.episode_trakt_rating is not none %}
-                                    {{ row.episode_trakt_rating|rating_with_votes(row.episode_trakt_votes) }}
-                                    {% else %}
-                                    n/a
-                                    {% endif %}
-                                </span>
-                            </span>
-                            <span class="poster-chip-part">
-                                <img
-                                    class="poster-chip-icon"
-                                    src="{{ request.url_for('static', path='imdb_icon.png') }}"
-                                    alt="imdb"
-                                >
-                                <span>
-                                    {% if row.episode_imdb_rating is not none %}
-                                    {{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}
-                                    {% else %}
-                                    n/a
-                                    {% endif %}
-                                </span>
-                            </span>
+                    {% endif %}
+                    <div class="history-title-summary">
+                        <div class="history-title-heading">
+                            <a href="{{ title_filter_url }}">{{ title_group.title }}</a>
                         </div>
-                        {% endif %}
-                    </a>
-                    <div class="history-entry-main">
-                        {% if row.episode_still_url %}
-                        <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}" class="history-entry-still">
+                        <a
+                            href="{{ trakt_title_url or ('/titles/' ~ title_group.type ~ '/' ~ title_group.title_trakt_id) }}"
+                            class="history-title-poster"
+                            {% if trakt_title_url %}target="_blank" rel="noreferrer"{% endif %}
+                        >
+                            {% if title_group.poster_url %}
                             <img
-                                src="{{ row.episode_still_url|cached_image_url }}"
-                                alt="{{ row.episode_title or (row.season|episode_label(row.episode)) }}"
+                                src="{{ title_group.poster_url|cached_image_url }}"
+                                alt="{{ title_group.title }} poster"
                                 loading="lazy"
-                                data-direct-src="{{ row.episode_still_url }}"
+                                data-direct-src="{{ title_group.poster_url }}"
                                 onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
                             >
+                            {% else %}
+                            <div class="poster-fallback">No poster</div>
+                            {% endif %}
+                            {% if title_group.title_episode_avg_rating is not none %}
+                            <div class="history-rating-badge">
+                                {{ title_group.title_episode_avg_rating|round(1) }} ★
+                            </div>
+                            {% endif %}
+                            <div class="poster-chip history-poster-chip history-title-chip">
+                                <span class="poster-chip-part">
+                                    <img
+                                        class="poster-chip-icon"
+                                        src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
+                                        alt="trakt"
+                                    >
+                                    <span>
+                                        {% if title_group.title_trakt_rating is not none %}
+                                        {{ title_group.title_trakt_rating|rating_with_votes(title_group.title_trakt_votes) }}
+                                        {% else %}
+                                        n/a
+                                        {% endif %}
+                                    </span>
+                                </span>
+                                <span class="poster-chip-part">
+                                    <img
+                                        class="poster-chip-icon"
+                                        src="{{ request.url_for('static', path='imdb_icon.png') }}"
+                                        alt="imdb"
+                                    >
+                                    <span>
+                                        {% if title_group.title_imdb_rating is not none %}
+                                        {{ title_group.title_imdb_rating|rating_with_votes(title_group.title_imdb_votes) }}
+                                        {% else %}
+                                        n/a
+                                        {% endif %}
+                                    </span>
+                                </span>
+                            </div>
                         </a>
-                        {% endif %}
-                        <div class="history-entry-heading">
-                            <a href="/titles/{{ row.type }}/{{ row.title_trakt_id }}">{{ row.title }}</a>
-                        </div>
-                        {% if row.type == 'show' and row.season is not none and row.episode is not none %}
-                        <div class="history-entry-subhead">
-                            <span class="history-pill">{{ row.season|episode_label(row.episode) }}</span>
-                        </div>
-                        {% endif %}
-                        {% if row.episode_title %}
-                        <p class="history-entry-episode">{{ row.episode_title }}</p>
-                        {% endif %}
-                        {% if row.display_rating is none %}
-                        <div class="history-entry-meta">
-                        <a
-                            class="button ghost text-button"
-                            href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page }}&rate_trakt_id={{ row.title_trakt_id }}&rate_type={{ row.type }}&rate_season={{ row.season or '' }}&rate_episode={{ row.episode or '' }}&rate_title={{ row.title|urlencode }}"
-                        >Rate</a>
-                        </div>
-                        {% endif %}
+                    </div>
+                    <div class="history-episode-grid">
+                        {% for row in title_group.entries %}
+                        <article class="history-episode-card{% if row.type != 'show' %} history-episode-card-compact{% endif %}">
+                            {% set episode_heading = row.episode_title or row.title %}
+                            {% set trakt_episode_url = "" %}
+                            {% if title_group.title_slug and row.type == 'show' and row.season is not none and row.episode is not none %}
+                                {% set trakt_episode_url = "https://trakt.tv/shows/" ~ title_group.title_slug ~ "/seasons/" ~ row.season ~ "/episodes/" ~ row.episode %}
+                            {% endif %}
+                            <div class="history-episode-head">
+                                <p class="history-episode-title{% if episode_heading|length > 24 %} is-long{% endif %}{% if episode_heading|length > 34 %} is-xlong{% endif %}">{{ episode_heading }}</p>
+                            </div>
+                            <div class="history-entry-still-shell">
+                                {% if row.episode_still_url %}
+                                <a
+                                    href="{{ trakt_episode_url or ('/titles/' ~ row.type ~ '/' ~ row.title_trakt_id) }}"
+                                    class="history-entry-still"
+                                    {% if trakt_episode_url %}target="_blank" rel="noreferrer"{% endif %}
+                                >
+                                    <img
+                                        src="{{ row.episode_still_url|cached_image_url }}"
+                                        alt="{{ row.episode_title or (row.season|episode_label(row.episode)) }}"
+                                        loading="lazy"
+                                        data-direct-src="{{ row.episode_still_url }}"
+                                        onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+                                    >
+                                </a>
+                                {% else %}
+                                <div class="history-entry-still history-entry-still-empty">
+                                    <span>No preview</span>
+                                </div>
+                                {% endif %}
+                                {% if row.display_rating is not none %}
+                                <div class="history-rating-badge">{{ row.display_rating }} ★</div>
+                                {% else %}
+                                <a
+                                    class="history-rate-chip"
+                                    href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page }}&rate_trakt_id={{ row.title_trakt_id }}&rate_type={{ row.type }}&rate_season={{ row.season or '' }}&rate_episode={{ row.episode or '' }}&rate_title={{ row.title|urlencode }}"
+                                >Rate</a>
+                                {% endif %}
+                                {% if row.type == 'show' and row.season is not none and row.episode is not none %}
+                                <div class="history-episode-chip">{{ row.season|episode_label(row.episode) }}</div>
+                                {% endif %}
+                            </div>
+                            {% if row.type == 'show' and row.season is not none and row.episode is not none %}
+                            <div class="poster-chip history-episode-ratings">
+                                <span class="poster-chip-part">
+                                    <img
+                                        class="poster-chip-icon"
+                                        src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
+                                        alt="trakt"
+                                    >
+                                    <span>
+                                        {% if row.episode_trakt_rating is not none %}
+                                        {{ row.episode_trakt_rating|rating_with_votes(row.episode_trakt_votes) }}
+                                        {% else %}
+                                        n/a
+                                        {% endif %}
+                                    </span>
+                                </span>
+                                <span class="poster-chip-part">
+                                    <img
+                                        class="poster-chip-icon"
+                                        src="{{ request.url_for('static', path='imdb_icon.png') }}"
+                                        alt="imdb"
+                                    >
+                                    <span>
+                                        {% if row.episode_imdb_rating is not none %}
+                                        {{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}
+                                        {% else %}
+                                        n/a
+                                        {% endif %}
+                                    </span>
+                                </span>
+                            </div>
+                            {% endif %}
+                        </article>
+                        {% endfor %}
                     </div>
                 </article>
                 {% endfor %}
@@ -189,31 +253,57 @@
     if (!window.fetch) {
         return;
     }
-    const enrichStarted = {{ 'true' if history_enrich_started else 'false' or 'true' if history_title_enrich_started else 'false' }};
+    const reloadGuardKey = `history:reload:${window.location.pathname}${window.location.search}`;
+    const shouldAutoSync = {{ 'true' if page == 1 else 'false' }};
+    const episodeEnrichStarted = {{ 'true' if history_enrich_started else 'false' }};
+    const titleEnrichStarted = {{ 'true' if history_title_enrich_started else 'false' }};
+    const enrichStarted = episodeEnrichStarted || titleEnrichStarted;
     let enrichSeq = {{ history_enrich_initial_seq }};
-    if (window.traktDebugMode && window.pushFlashToast) {
+    const canAutoReload = (() => {
+        try {
+            return window.sessionStorage.getItem(reloadGuardKey) != "1";
+        } catch (_error) {
+            return true;
+        }
+    })();
+    if (!enrichStarted) {
+        try {
+            window.sessionStorage.removeItem(reloadGuardKey);
+        } catch (_error) {
+        }
+    }
+
+    const markReloadConsumed = () => {
+        try {
+            window.sessionStorage.setItem(reloadGuardKey, "1");
+        } catch (_error) {
+        }
+    };
+    if (shouldAutoSync && window.traktDebugMode && window.pushFlashToast) {
         window.pushFlashToast("History auto-sync: checking…", 2400);
     }
-    fetch("/history/auto-sync", {
-        headers: {"Accept": "application/json"},
-        cache: "no-store",
-    })
-        .then((response) => response.ok ? response.json() : null)
-        .then((payload) => {
-            if (window.traktDebugMode && window.pushFlashToast) {
-                if (payload && payload.error) {
-                    window.pushFlashToast(`History auto-sync failed: ${payload.error}`, 4200);
-                } else if (payload && payload.changed) {
-                    window.pushFlashToast("History auto-sync updated rows.", 2400);
-                } else {
-                    window.pushFlashToast("History auto-sync: no changes.", 2400);
-                }
-            }
-            if (payload && payload.changed) {
-                window.setTimeout(() => window.location.reload(), 350);
-            }
+    if (shouldAutoSync) {
+        fetch("/history/auto-sync", {
+            headers: {"Accept": "application/json"},
+            cache: "no-store",
         })
-        .catch(() => {});
+            .then((response) => response.ok ? response.json() : null)
+            .then((payload) => {
+                if (window.traktDebugMode && window.pushFlashToast) {
+                    if (payload && payload.error) {
+                        window.pushFlashToast(`History auto-sync failed: ${payload.error}`, 4200);
+                    } else if (payload && payload.changed) {
+                        window.pushFlashToast("History auto-sync updated rows.", 2400);
+                    } else {
+                        window.pushFlashToast("History auto-sync: no changes.", 2400);
+                    }
+                }
+                if (payload && payload.changed) {
+                    window.setTimeout(() => window.location.reload(), 350);
+                }
+            })
+            .catch(() => {});
+    }
 
     if (!enrichStarted) {
         return;
@@ -228,7 +318,7 @@
                 cache: "no-store",
             });
             if (!response.ok) {
-                if (enrichAttempts > 20) {
+                if (enrichAttempts > 75) {
                     window.clearInterval(enrichTimer);
                 }
                 return;
@@ -239,21 +329,36 @@
                 if (typeof event.seq === "number") {
                     enrichSeq = Math.max(enrichSeq, event.seq);
                 }
-                if ((event.source === "History episode enrich" || event.source === "History title enrich") && String(event.message || "").includes("completed.")) {
+                if (episodeEnrichStarted && event.source === "History episode enrich" && String(event.message || "").includes("completed.")) {
                     window.clearInterval(enrichTimer);
-                    window.location.reload();
+                    if (canAutoReload) {
+                        markReloadConsumed();
+                        window.location.reload();
+                    }
                     return;
                 }
-                if ((event.source === "History episode enrich" || event.source === "History title enrich") && String(event.message || "").includes("failed:")) {
+                if (!episodeEnrichStarted && titleEnrichStarted && event.source === "History title enrich" && String(event.message || "").includes("completed.")) {
+                    window.clearInterval(enrichTimer);
+                    if (canAutoReload) {
+                        markReloadConsumed();
+                        window.location.reload();
+                    }
+                    return;
+                }
+                if (episodeEnrichStarted && event.source === "History episode enrich" && String(event.message || "").includes("failed:")) {
+                    window.clearInterval(enrichTimer);
+                    return;
+                }
+                if (!episodeEnrichStarted && titleEnrichStarted && event.source === "History title enrich" && String(event.message || "").includes("failed:")) {
                     window.clearInterval(enrichTimer);
                     return;
                 }
             }
-            if (enrichAttempts > 20) {
+            if (enrichAttempts > 75) {
                 window.clearInterval(enrichTimer);
             }
         } catch (_error) {
-            if (enrichAttempts > 20) {
+            if (enrichAttempts > 75) {
                 window.clearInterval(enrichTimer);
             }
         }

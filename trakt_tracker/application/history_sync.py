@@ -182,6 +182,10 @@ class HistorySyncWorkflow:
                 overview=show_payload.get("overview", ""),
                 status=show_payload.get("status", ""),
                 slug=ids.get("slug", ""),
+                trakt_rating=self._as_float(show_payload.get("rating")),
+                trakt_votes=self._as_int(show_payload.get("votes")),
+                tmdb_id=self._as_int(ids.get("tmdb")),
+                imdb_id=str(ids.get("imdb", "") or ""),
             )
             season = episode_payload.get("season")
             episode_number = episode_payload.get("number")
@@ -196,6 +200,9 @@ class HistorySyncWorkflow:
                         season=season,
                         number=episode_number,
                         title=episode_payload.get("title", ""),
+                        trakt_rating=self._as_float(episode_payload.get("rating")),
+                        trakt_votes=self._as_int(episode_payload.get("votes")),
+                        imdb_id=str(episode_ids.get("imdb", "") or ""),
                         overview=episode_payload.get("overview", ""),
                         runtime=episode_payload.get("runtime"),
                         first_aired=(
@@ -220,6 +227,10 @@ class HistorySyncWorkflow:
                 overview=payload.get("overview", ""),
                 status=payload.get("status", ""),
                 slug=ids.get("slug", ""),
+                trakt_rating=self._as_float(payload.get("rating")),
+                trakt_votes=self._as_int(payload.get("votes")),
+                tmdb_id=self._as_int(ids.get("tmdb")),
+                imdb_id=str(ids.get("imdb", "") or ""),
             )
         model = self._titles.upsert_title(session, title)
         state = self._user_states.ensure_state(session, model.id)
@@ -262,6 +273,10 @@ class HistorySyncWorkflow:
                 overview=show_payload.get("overview", ""),
                 status=show_payload.get("status", ""),
                 slug=ids.get("slug", ""),
+                trakt_rating=self._as_float(show_payload.get("rating")),
+                trakt_votes=self._as_int(show_payload.get("votes")),
+                tmdb_id=self._as_int(ids.get("tmdb")),
+                imdb_id=str(ids.get("imdb", "") or ""),
             )
             self._titles.upsert_title(session, title)
             season = episode_payload.get("season")
@@ -277,6 +292,9 @@ class HistorySyncWorkflow:
                         season=season,
                         number=episode_number,
                         title=episode_payload.get("title", ""),
+                        trakt_rating=self._as_float(episode_payload.get("rating")),
+                        trakt_votes=self._as_int(episode_payload.get("votes")),
+                        imdb_id=str(episode_ids.get("imdb", "") or ""),
                         overview=episode_payload.get("overview", ""),
                         runtime=episode_payload.get("runtime"),
                         first_aired=(
@@ -313,6 +331,10 @@ class HistorySyncWorkflow:
             overview=payload.get("overview", ""),
             status=payload.get("status", ""),
             slug=ids.get("slug", ""),
+            trakt_rating=self._as_float(payload.get("rating")),
+            trakt_votes=self._as_int(payload.get("votes")),
+            tmdb_id=self._as_int(ids.get("tmdb")),
+            imdb_id=str(ids.get("imdb", "") or ""),
         )
         model = self._titles.upsert_title(session, title)
         state = self._user_states.ensure_state(session, model.id)
@@ -396,3 +418,17 @@ class HistorySyncWorkflow:
         client = self._auth.get_client()
         payload = client.get_last_activities(use_cache=False)
         return self._policy.build_history_activity_signature(payload)
+
+    @staticmethod
+    def _as_float(value) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _as_int(value) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None

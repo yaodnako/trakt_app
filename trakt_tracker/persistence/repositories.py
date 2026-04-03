@@ -5,12 +5,19 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, desc, or_, select, tuple_
 from sqlalchemy.orm import Session
 
+from trakt_tracker.application.enrich_state import (
+    ENRICH_STATUS_CHECKED_NO_DATA,
+    ENRICH_STATUS_READY,
+    ENRICH_STATUS_UNKNOWN,
+)
 from trakt_tracker.domain import CalendarEntry, EpisodeSummary, ProgressSnapshot, TitleSummary
 
 from .models import EpisodeCache, HistoryEvent, NotificationLog, SyncState, Title, UserTitleState, WatchProgress
 
 
 class TitleRepository:
+    _UNSET = object()
+
     def upsert_title(self, session: Session, title: TitleSummary) -> Title:
         model = session.scalar(select(Title).where(Title.trakt_id == title.trakt_id))
         if model is None:
@@ -27,11 +34,99 @@ class TitleRepository:
             model.status = title.status
         if title.slug:
             model.slug = title.slug
+        if title.poster_url:
+            model.poster_url = title.poster_url
+            model.poster_status = ENRICH_STATUS_READY
+        if title.trakt_rating is not None:
+            model.trakt_rating = title.trakt_rating
+        if title.trakt_votes is not None:
+            model.trakt_votes = title.trakt_votes
+        if title.tmdb_id is not None:
+            model.tmdb_id = title.tmdb_id
+        if title.tmdb_rating is not None:
+            model.tmdb_rating = title.tmdb_rating
+        if title.tmdb_votes is not None:
+            model.tmdb_votes = title.tmdb_votes
+        if title.imdb_id:
+            model.imdb_id = title.imdb_id
+        if title.imdb_rating is not None:
+            model.imdb_rating = title.imdb_rating
+        if title.imdb_votes is not None:
+            model.imdb_votes = title.imdb_votes
+        if model.poster_url and not model.poster_status:
+            model.poster_status = ENRICH_STATUS_READY
+        if (
+            model.ratings_status == ENRICH_STATUS_UNKNOWN
+            and model.trakt_rating is not None
+            and model.trakt_votes is not None
+        ):
+            model.ratings_status = ENRICH_STATUS_READY
         session.flush()
         return model
 
     def get_title(self, session: Session, trakt_id: int) -> Title | None:
         return session.scalar(select(Title).where(Title.trakt_id == trakt_id))
+
+    def update_poster_enrich_state(
+        self,
+        session: Session,
+        trakt_id: int,
+        *,
+        status: str,
+        poster_url: str | object = _UNSET,
+    ) -> Title | None:
+        model = self.get_title(session, trakt_id)
+        if model is None:
+            return None
+        if poster_url is not self._UNSET:
+            model.poster_url = str(poster_url or "")
+        if model.poster_url:
+            model.poster_status = ENRICH_STATUS_READY
+        else:
+            model.poster_status = status
+        session.flush()
+        return model
+
+    def update_ratings_enrich_state(
+        self,
+        session: Session,
+        trakt_id: int,
+        *,
+        status: str,
+        trakt_rating: float | None | object = _UNSET,
+        trakt_votes: int | None | object = _UNSET,
+        tmdb_id: int | None | object = _UNSET,
+        tmdb_rating: float | None | object = _UNSET,
+        tmdb_votes: int | None | object = _UNSET,
+        imdb_id: str | object = _UNSET,
+        imdb_rating: float | None | object = _UNSET,
+        imdb_votes: int | None | object = _UNSET,
+    ) -> Title | None:
+        model = self.get_title(session, trakt_id)
+        if model is None:
+            return None
+        if trakt_rating is not self._UNSET:
+            model.trakt_rating = trakt_rating
+        if trakt_votes is not self._UNSET:
+            model.trakt_votes = trakt_votes
+        if tmdb_id is not self._UNSET:
+            model.tmdb_id = tmdb_id
+        if tmdb_rating is not self._UNSET:
+            model.tmdb_rating = tmdb_rating
+        if tmdb_votes is not self._UNSET:
+            model.tmdb_votes = tmdb_votes
+        if imdb_id is not self._UNSET:
+            model.imdb_id = str(imdb_id or "")
+        if imdb_rating is not self._UNSET:
+            model.imdb_rating = imdb_rating
+        if imdb_votes is not self._UNSET:
+            model.imdb_votes = imdb_votes
+        if model.trakt_rating is not None and model.trakt_votes is not None:
+            model.ratings_status = ENRICH_STATUS_READY
+        else:
+            model.ratings_status = status
+        session.flush()
+        return model
 
     def list_titles(self, session: Session) -> list[Title]:
         return list(session.scalars(select(Title).order_by(Title.title)))
@@ -435,9 +530,16 @@ class ProgressRepository:
 
 
 class EpisodeRepository:
+    _UNSET = object()
+
     def replace_show_episodes(self, session: Session, show_trakt_id: int, episodes: list[EpisodeSummary]) -> None:
+        existing_rows = {
+            (row.season, row.number): row
+            for row in session.scalars(select(EpisodeCache).where(EpisodeCache.show_trakt_id == show_trakt_id))
+        }
         session.execute(delete(EpisodeCache).where(EpisodeCache.show_trakt_id == show_trakt_id))
         for episode in episodes:
+            existing = existing_rows.get((episode.season, episode.number))
             session.add(
                 EpisodeCache(
                     show_trakt_id=show_trakt_id,
@@ -445,10 +547,36 @@ class EpisodeRepository:
                     season=episode.season,
                     number=episode.number,
                     title=episode.title,
-                    still_url=episode.still_url,
-                    imdb_id=episode.imdb_id,
-                    imdb_rating=episode.imdb_rating,
-                    imdb_votes=episode.imdb_votes,
+                    still_url=episode.still_url or (existing.still_url if existing is not None else ""),
+                    still_missing=(bool(existing.still_missing) if existing is not None and not episode.still_url else False),
+                    trakt_rating=(
+                        episode.trakt_rating if episode.trakt_rating is not None
+                        else (existing.trakt_rating if existing is not None else None)
+                    ),
+                    trakt_votes=(
+                        episode.trakt_votes if episode.trakt_votes is not None
+                        else (existing.trakt_votes if existing is not None else None)
+                    ),
+                    imdb_id=episode.imdb_id or (existing.imdb_id if existing is not None else ""),
+                    imdb_rating=(
+                        episode.imdb_rating if episode.imdb_rating is not None
+                        else (existing.imdb_rating if existing is not None else None)
+                    ),
+                    imdb_votes=(
+                        episode.imdb_votes if episode.imdb_votes is not None
+                        else (existing.imdb_votes if existing is not None else None)
+                    ),
+                    still_status=(
+                        ENRICH_STATUS_READY if episode.still_url
+                        else (existing.still_status if existing is not None else (
+                            ENRICH_STATUS_CHECKED_NO_DATA if getattr(existing, "still_missing", False) else ENRICH_STATUS_UNKNOWN
+                        ))
+                    ),
+                    trakt_details_status=(
+                        ENRICH_STATUS_READY
+                        if episode.trakt_rating is not None and episode.trakt_votes is not None
+                        else (existing.trakt_details_status if existing is not None else ENRICH_STATUS_UNKNOWN)
+                    ),
                     overview=episode.overview,
                     runtime=episode.runtime,
                     first_aired=episode.first_aired,
@@ -502,12 +630,26 @@ class EpisodeRepository:
             session.add(row)
         row.episode_trakt_id = episode.trakt_id
         row.title = episode.title or ""
-        row.still_url = episode.still_url or ""
-        row.trakt_rating = episode.trakt_rating
-        row.trakt_votes = episode.trakt_votes
-        row.imdb_id = episode.imdb_id or ""
-        row.imdb_rating = episode.imdb_rating
-        row.imdb_votes = episode.imdb_votes
+        if episode.still_url:
+            row.still_url = episode.still_url
+            row.still_missing = False
+            row.still_status = ENRICH_STATUS_READY
+        elif not row.still_status:
+            row.still_status = ENRICH_STATUS_CHECKED_NO_DATA if row.still_missing else ENRICH_STATUS_UNKNOWN
+        if episode.trakt_rating is not None:
+            row.trakt_rating = episode.trakt_rating
+        if episode.trakt_votes is not None:
+            row.trakt_votes = episode.trakt_votes
+        if row.trakt_rating is not None and row.trakt_votes is not None:
+            row.trakt_details_status = ENRICH_STATUS_READY
+        elif not row.trakt_details_status:
+            row.trakt_details_status = ENRICH_STATUS_UNKNOWN
+        if episode.imdb_id:
+            row.imdb_id = episode.imdb_id
+        if episode.imdb_rating is not None:
+            row.imdb_rating = episode.imdb_rating
+        if episode.imdb_votes is not None:
+            row.imdb_votes = episode.imdb_votes
         row.overview = episode.overview or ""
         row.runtime = episode.runtime
         row.first_aired = episode.first_aired
@@ -551,13 +693,72 @@ class EpisodeRepository:
             result[(row.show_trakt_id, row.season, row.number)] = {
                 "title": row.title,
                 "still_url": row.still_url,
+                "still_missing": bool(row.still_missing or row.still_status == ENRICH_STATUS_CHECKED_NO_DATA),
+                "still_status": row.still_status or ENRICH_STATUS_UNKNOWN,
                 "trakt_rating": row.trakt_rating,
                 "trakt_votes": row.trakt_votes,
+                "trakt_details_status": row.trakt_details_status or ENRICH_STATUS_UNKNOWN,
                 "imdb_id": row.imdb_id,
                 "imdb_rating": row.imdb_rating,
                 "imdb_votes": row.imdb_votes,
             }
         return result
+
+    def update_still_enrich_state(
+        self,
+        session: Session,
+        show_trakt_id: int,
+        season: int,
+        episode: int,
+        *,
+        status: str,
+        still_url: str | object = _UNSET,
+    ) -> EpisodeCache | None:
+        row = self.find_episode(session, show_trakt_id, season, episode)
+        if row is None:
+            return None
+        if still_url is not self._UNSET:
+            row.still_url = str(still_url or "")
+        row.still_status = ENRICH_STATUS_READY if row.still_url else status
+        row.still_missing = row.still_status == ENRICH_STATUS_CHECKED_NO_DATA
+        session.flush()
+        return row
+
+    def update_trakt_details_enrich_state(
+        self,
+        session: Session,
+        show_trakt_id: int,
+        season: int,
+        episode: int,
+        *,
+        status: str,
+        details: EpisodeSummary | None = None,
+    ) -> EpisodeCache | None:
+        row = self.find_episode(session, show_trakt_id, season, episode)
+        if row is None:
+            return None
+        if details is not None:
+            row.episode_trakt_id = details.trakt_id or row.episode_trakt_id
+            row.title = details.title or row.title
+            row.overview = details.overview or row.overview
+            row.runtime = details.runtime if details.runtime is not None else row.runtime
+            row.first_aired = details.first_aired or row.first_aired
+            if details.trakt_rating is not None:
+                row.trakt_rating = details.trakt_rating
+            if details.trakt_votes is not None:
+                row.trakt_votes = details.trakt_votes
+            if details.imdb_id:
+                row.imdb_id = details.imdb_id
+            if details.imdb_rating is not None:
+                row.imdb_rating = details.imdb_rating
+            if details.imdb_votes is not None:
+                row.imdb_votes = details.imdb_votes
+        if row.trakt_rating is not None and row.trakt_votes is not None:
+            row.trakt_details_status = ENRICH_STATUS_READY
+        else:
+            row.trakt_details_status = status
+        session.flush()
+        return row
 
 
 class NotificationRepository:

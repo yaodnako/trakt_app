@@ -89,6 +89,10 @@ class _BackgroundTaskManager:
         with self._lock:
             return key in self._running
 
+    def has_running_prefix(self, *prefixes: str) -> bool:
+        with self._lock:
+            return any(any(item.startswith(prefix) for prefix in prefixes) for item in self._running)
+
 
 def _build_services_with_profiling() -> ServiceContainer:
     profile_path = get_app_data_dir() / "web_startup.log"

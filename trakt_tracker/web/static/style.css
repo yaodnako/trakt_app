@@ -499,30 +499,47 @@ select {
 }
 
 .history-entry-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    align-items: stretch;
+    display: grid;
+    gap: 12px;
 }
 
-.history-entry-card {
+.history-title-card {
     display: grid;
-    grid-template-columns: 136px minmax(0, 1fr);
-    gap: 10px 12px;
+    grid-template-columns: 198px minmax(0, 1fr);
+    gap: 14px;
     align-items: start;
-    padding: 10px 12px;
-    border-radius: 14px;
+    padding: 12px;
+    border-radius: 16px;
     background: rgba(255, 255, 255, 0.7);
     border: 1px solid rgba(77, 61, 40, 0.1);
-    flex: 0 0 340px;
-    max-width: 340px;
 }
 
-.history-entry-poster {
+.history-title-summary {
+    display: grid;
+    gap: 8px;
+    justify-items: center;
+}
+
+.history-title-heading {
+    width: 198px;
+    max-width: 100%;
+    min-width: 0;
+    text-align: center;
+}
+
+.history-title-heading a {
+    display: block;
+    font-weight: 700;
+    text-decoration: none;
+    font-size: 1.02rem;
+    line-height: 1.15;
+}
+
+.history-title-poster {
     position: relative;
-    width: 136px;
+    width: 198px;
     aspect-ratio: 2 / 3;
-    border-radius: 12px;
+    border-radius: 14px;
     overflow: hidden;
     display: grid;
     place-items: center;
@@ -547,25 +564,63 @@ select {
     line-height: 1;
 }
 
-.history-poster-chip {
-    bottom: 6px;
-    padding: 5px 8px;
+.poster-chip.history-title-chip {
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    padding: 6px 8px;
+    transform: none;
+    width: auto;
+    max-width: none;
 }
 
-.history-entry-poster > img {
+.history-title-poster > img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     display: block;
 }
 
-.history-entry-main {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+.history-episode-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    align-items: start;
+    padding-top: 30px;
+}
+
+.history-episode-card {
+    display: grid;
+    gap: 5px;
     min-width: 0;
-    align-self: stretch;
-    justify-content: flex-start;
+}
+
+.history-episode-card-compact {
+    align-content: start;
+}
+
+.history-episode-head {
+    display: block;
+    min-height: 1.8rem;
+}
+
+.history-episode-title {
+    margin: 0;
+    font-size: clamp(0.82rem, 0.78rem + 0.18vw, 0.98rem);
+    line-height: 1.2;
+    color: var(--text);
+    overflow-wrap: anywhere;
+    text-wrap: balance;
+}
+
+.history-episode-title.is-long {
+    font-size: 0.9rem;
+    line-height: 1.15;
+}
+
+.history-episode-title.is-xlong {
+    font-size: 0.8rem;
+    line-height: 1.1;
 }
 
 .history-entry-still {
@@ -577,6 +632,28 @@ select {
     border: 1px solid rgba(77, 61, 40, 0.12);
     background: linear-gradient(180deg, rgba(13, 107, 97, 0.08), rgba(30, 27, 22, 0.03));
     text-decoration: none;
+    position: relative;
+}
+
+.history-entry-still-shell {
+    position: relative;
+}
+
+.history-episode-chip {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    min-height: 24px;
+    padding: 4px 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: rgba(55, 65, 81, 0.92);
+    color: #fff;
+    font-size: 0.74rem;
+    font-weight: 700;
+    line-height: 1;
 }
 
 .history-entry-still > img {
@@ -586,30 +663,46 @@ select {
     display: block;
 }
 
-.history-entry-heading {
-    display: flex;
-    gap: 8px;
-    align-items: start;
-    flex-wrap: wrap;
-}
-
-.history-entry-heading a {
-    font-weight: 700;
-    text-decoration: none;
-    font-size: 1rem;
-}
-
-.history-entry-subhead {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    flex-wrap: wrap;
-}
-
-.history-entry-episode {
-    margin: 0;
+.history-entry-still-empty {
+    display: grid;
+    place-items: center;
     color: var(--muted);
-    font-size: 0.86rem;
+    font-size: 0.82rem;
+}
+
+.poster-chip.history-episode-ratings {
+    position: static;
+    left: auto;
+    bottom: auto;
+    transform: none;
+    width: auto;
+    max-width: none;
+    justify-self: start;
+    padding: 5px 8px;
+}
+
+.history-rate-chip {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    min-height: 24px;
+    padding: 4px 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: rgba(238, 250, 243, 0.98);
+    border: 1px solid rgba(47, 159, 115, 0.34);
+    color: #1d7b56;
+    font-size: 0.74rem;
+    font-weight: 700;
+    line-height: 1;
+    text-decoration: none;
+    box-shadow: 0 6px 14px rgba(47, 159, 115, 0.14);
+}
+
+.pager {
+    margin-top: 18px;
 }
 
 .history-entry-meta {
@@ -618,7 +711,6 @@ select {
     align-items: center;
     flex-wrap: wrap;
     justify-content: flex-start;
-    margin-top: auto;
 }
 
 .history-pill,
@@ -1256,20 +1348,16 @@ tbody tr:hover {
         grid-template-columns: 1fr;
     }
 
-    .history-entry-card {
-        grid-template-columns: 136px minmax(0, 1fr);
-        align-items: start;
-        flex: 1 1 100%;
-        max-width: none;
-        width: 100%;
+    .history-title-card {
+        grid-template-columns: 1fr;
     }
 
-    .history-entry-poster {
-        width: 136px;
+    .history-title-poster {
+        width: min(220px, 100%);
     }
 
-    .history-entry-meta {
-        grid-column: 1 / -1;
+    .history-episode-grid {
+        grid-template-columns: 1fr;
     }
 
     .progress-poster {

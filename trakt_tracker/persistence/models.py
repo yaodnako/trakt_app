@@ -5,6 +5,8 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from trakt_tracker.application.enrich_state import ENRICH_STATUS_UNKNOWN
+
 
 class Base(DeclarativeBase):
     pass
@@ -22,6 +24,16 @@ class Title(Base):
     overview: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(64), default="")
     poster_url: Mapped[str] = mapped_column(String(512), default="")
+    trakt_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trakt_votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tmdb_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tmdb_votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    imdb_id: Mapped[str] = mapped_column(String(32), default="")
+    imdb_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    imdb_votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    poster_status: Mapped[str] = mapped_column(String(32), default=ENRICH_STATUS_UNKNOWN)
+    ratings_status: Mapped[str] = mapped_column(String(32), default=ENRICH_STATUS_UNKNOWN)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -56,11 +68,14 @@ class EpisodeCache(Base):
     number: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(255), default="")
     still_url: Mapped[str] = mapped_column(String(512), default="")
+    still_missing: Mapped[bool] = mapped_column(Boolean, default=False)
     trakt_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     trakt_votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     imdb_id: Mapped[str] = mapped_column(String(32), default="")
     imdb_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     imdb_votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    still_status: Mapped[str] = mapped_column(String(32), default=ENRICH_STATUS_UNKNOWN)
+    trakt_details_status: Mapped[str] = mapped_column(String(32), default=ENRICH_STATUS_UNKNOWN)
     overview: Mapped[str] = mapped_column(Text, default="")
     runtime: Mapped[int | None] = mapped_column(Integer, nullable=True)
     first_aired: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

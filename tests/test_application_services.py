@@ -7,6 +7,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from trakt_tracker.application.catalog import CatalogService
+from trakt_tracker.application.enrich_state import (
+    ENRICH_STATUS_CHECKED_NO_DATA,
+    ENRICH_STATUS_READY,
+)
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.history import HistoryService
 from trakt_tracker.application.history_read_model import HistoryReadModelService
@@ -205,6 +209,7 @@ class ApplicationServiceTests(unittest.TestCase):
             self.history_repo,
             self.episode_repo,
             self.history_read_model,
+            self.episode_metadata,
         )
 
         watched_at = datetime.now(tz=UTC)
@@ -301,6 +306,7 @@ class ApplicationServiceTests(unittest.TestCase):
             self.history_repo,
             self.episode_repo,
             self.history_read_model,
+            self.episode_metadata,
         )
         with self.db.session() as session:
             self.episode_repo.upsert_episode(
@@ -317,6 +323,31 @@ class ApplicationServiceTests(unittest.TestCase):
             row = self.episode_repo.find_episode(session, 138748, 3, 4)
             self.assertEqual(row.trakt_rating, 7.9)
             self.assertEqual(row.trakt_votes, 321)
+            self.assertEqual(row.trakt_details_status, ENRICH_STATUS_READY)
+
+    def test_history_service_skips_episode_refetch_after_checked_no_data(self) -> None:
+        service = HistoryService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            self.episode_repo,
+            self.history_read_model,
+            self.episode_metadata,
+        )
+        with self.db.session() as session:
+            row = self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=301, season=3, number=4, title="Kill Switch"),
+            )
+            row.trakt_details_status = ENRICH_STATUS_CHECKED_NO_DATA
+        changed = service.enrich_visible_episode_details(
+            [{"title_trakt_id": 138748, "type": "show", "season": 3, "episode": 4}]
+        )
+        self.assertFalse(changed)
+        self.assertEqual(self.trakt_client.episode_details_calls, [])
 
 
 if __name__ == "__main__":

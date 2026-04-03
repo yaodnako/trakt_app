@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from sqlalchemy.exc import OperationalError
 
 from trakt_tracker.application.services import ServiceContainer
 from trakt_tracker.config import timezone_from_utc_offset
@@ -41,20 +42,25 @@ def register_history_routes(app, *, render) -> None:
         has_next = len(rows) > HISTORY_PAGE_SIZE
         rows = rows[:HISTORY_PAGE_SIZE]
         enrich_initial_seq = services.operations.current_seq()
+        bg_tasks = request.app.state.bg_tasks
+        history_enrich_key = f"history_enrich:{title_type or 'all'}:{title_filter or ''}:{current_page}"
+        history_title_enrich_key = f"history_title_enrich:{title_type or 'all'}:{title_filter or ''}:{current_page}"
         enrich_started = False
         if services.history.has_missing_visible_episode_details(rows):
-            enrich_started = request.app.state.bg_tasks.start(
-                f"history_enrich:{title_type or 'all'}:{title_filter or ''}:{current_page}",
+            enrich_started = bg_tasks.start(
+                history_enrich_key,
                 source="History episode enrich",
                 operations=services.operations,
                 fn=lambda rows_snapshot=list(rows): services.history.enrich_visible_episode_details(rows_snapshot),
             )
-        title_enrich_started = request.app.state.bg_tasks.start(
-            f"history_title_enrich:{title_type or 'all'}:{title_filter or ''}:{current_page}",
-            source="History title enrich",
-            operations=services.operations,
-            fn=lambda rows_snapshot=list(rows): services.catalog.enrich_visible_titles(rows_snapshot),
-        )
+        title_enrich_started = False
+        if current_page == 1 and services.catalog.has_missing_visible_titles(rows):
+            title_enrich_started = bg_tasks.start(
+                history_title_enrich_key,
+                source="History title enrich",
+                operations=services.operations,
+                fn=lambda rows_snapshot=list(rows): services.catalog.enrich_visible_titles(rows_snapshot),
+            )
         grouped_days = _group_history_rows(rows, services.auth.config.utc_offset)
         title_options = services.history.history_titles(title_type=title_type)
         return render(
@@ -84,8 +90,15 @@ def register_history_routes(app, *, render) -> None:
     @app.get("/history/auto-sync")
     async def history_auto_sync(request: Request) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
+        if bg_tasks.has_running_prefix("history_enrich:", "history_title_enrich:", "history_sync"):
+            return JSONResponse({"changed": False, "message": "History auto-sync: busy."})
         try:
             changed = await asyncio.to_thread(services.sync.maybe_refresh_history)
+        except OperationalError as exc:
+            if "database is locked" in str(exc).lower():
+                return JSONResponse({"changed": False, "message": "History auto-sync: busy."})
+            return JSONResponse({"changed": False, "error": str(exc), "message": f"History auto-sync failed: {exc}"})
         except Exception as exc:
             return JSONResponse({"changed": False, "error": str(exc), "message": f"History auto-sync failed: {exc}"})
         return JSONResponse(
@@ -164,7 +177,28 @@ def _group_history_rows(rows: list[dict], utc_offset: str) -> list[dict]:
             normalized = watched_at if watched_at.tzinfo is not None else watched_at.replace(tzinfo=UTC)
             local_dt = normalized.astimezone(tz)
             day_label = local_dt.strftime("%d.%m.%Y")
-        group = groups.setdefault(day_label, {"day_label": day_label, "count": 0, "entries": []})
+        group = groups.setdefault(day_label, {"day_label": day_label, "count": 0, "title_groups": [], "_title_map": OrderedDict()})
         group["count"] += 1
-        group["entries"].append(row)
+        title_key = (row.get("type"), row.get("title_trakt_id"))
+        title_group = group["_title_map"].get(title_key)
+        if title_group is None:
+            title_group = {
+                "title_trakt_id": row.get("title_trakt_id"),
+                "title": row.get("title", ""),
+                "title_slug": row.get("title_slug", ""),
+                "type": row.get("type", ""),
+                "poster_url": row.get("poster_url", ""),
+                "title_trakt_rating": row.get("title_trakt_rating"),
+                "title_trakt_votes": row.get("title_trakt_votes"),
+                "title_imdb_rating": row.get("title_imdb_rating"),
+                "title_imdb_votes": row.get("title_imdb_votes"),
+                "title_episode_avg_rating": row.get("title_episode_avg_rating"),
+                "title_episode_rated_count": row.get("title_episode_rated_count", 0),
+                "entries": [],
+            }
+            group["_title_map"][title_key] = title_group
+            group["title_groups"].append(title_group)
+        title_group["entries"].append(row)
+    for day_group in groups.values():
+        day_group.pop("_title_map", None)
     return list(groups.values())
