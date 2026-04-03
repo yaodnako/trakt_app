@@ -36,24 +36,40 @@
 - year filter
 - `Play`
 - `Watched`
-- `Drop` / `Undrop`
-- `New`
 - `Seen`
+- `Drop` / `Undrop`
 - post-watch rating flow
+- shared title poster / title-level ratings
+- next-episode still / Trakt / IMDb metadata
+- queue-driven in-place refresh без whole-page reload
+- stable loading / empty states
 
 ## History
 
 Поддерживается:
 
 - watch rows
-- grouped-by-day cards in web
-- title posters in web history cards
+- grouped-by-day cards в web
+- title posters в web history cards
+- title-level Trakt / IMDb chips
+- episode stills
 - episode rating display
-- Trakt episode aggregate rating in web history cards via lazy enrichment
-- IMDb rating/votes
+- Trakt episode aggregate rating / votes
+- IMDb rating / votes
 - filters
 - sync
-- rate missing item
+- rate item
+- queue-driven in-place refresh без whole-page reload
+- stable loading / empty states
+
+## Shared core behavior
+
+`History` и `Progress` теперь опираются на один и тот же shared metadata/enrich слой:
+
+- explicit enrich statuses в SQLite
+- shared title / episode metadata tables
+- visible-first enrich queue
+- patch refresh вместо page reload
 
 ## Debug
 
@@ -62,13 +78,7 @@
 - desktop
 - web
 
-Он уже показывает часть operation/debug событий, но ещё не доведён до финального единого потока.
-
-## Что ещё требует доработки
-
-- более чистый и единый debug UX
-- further simplification of sync/update paths
-- further simplification of desktop/web orchestration layers
+Он уже показывает operation/debug events, но это вспомогательный режим, а не основной UX-механизм экранов.
 
 ## Settings
 

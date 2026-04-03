@@ -248,6 +248,10 @@
 
             function bindPlayPromptLinks() {
                 document.querySelectorAll(".js-play-link").forEach((link) => {
+                    if (link.dataset.playPromptBound) {
+                        return;
+                    }
+                    link.dataset.playPromptBound = "1";
                     link.addEventListener("click", () => {
                         const key = link.dataset.playPromptKey || "";
                         if (!key) {
@@ -269,6 +273,10 @@
                     });
                 });
                 document.querySelectorAll(".js-watch-form").forEach((form) => {
+                    if (form.dataset.playPromptBound) {
+                        return;
+                    }
+                    form.dataset.playPromptBound = "1";
                     form.addEventListener("submit", () => {
                         const key = form.dataset.playPromptKey || "";
                         if (!key) {
@@ -279,6 +287,8 @@
                     });
                 });
             }
+            window.traktBindPlayPromptLinks = bindPlayPromptLinks;
+            window.traktRenderPlayPrompts = renderPlayPrompts;
 
             async function pollNotifications() {
                 try {

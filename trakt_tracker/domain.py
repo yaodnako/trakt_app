@@ -35,11 +35,14 @@ class EpisodeSummary:
     number: int
     title: str
     still_url: str = ""
+    still_status: str = "unknown"
     trakt_rating: float | None = None
     trakt_votes: int | None = None
+    trakt_details_status: str = "unknown"
     imdb_id: str = ""
     imdb_rating: float | None = None
     imdb_votes: int | None = None
+    imdb_status: str = "unknown"
     first_aired: datetime | None = None
     runtime: int | None = None
     overview: str = ""
@@ -74,7 +77,9 @@ class ProgressSnapshot:
     next_episode: EpisodeSummary | None = None
     last_episode: EpisodeSummary | None = None
     poster_url: str = ""
+    poster_status: str = "unknown"
     status: str = ""
+    title_ratings_status: str = "unknown"
     is_dropped: bool = False
 
 

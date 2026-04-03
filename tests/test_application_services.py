@@ -15,6 +15,8 @@ from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.history import HistoryService
 from trakt_tracker.application.history_read_model import HistoryReadModelService
 from trakt_tracker.application.interactions import InteractionService
+from trakt_tracker.application.operations import OperationLog
+from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
 from trakt_tracker.application.services import build_services
 from trakt_tracker.config import AppConfig, ConfigStore
 from trakt_tracker.domain import EpisodeSummary, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
@@ -42,6 +44,7 @@ class _FakeTraktClient:
         self.history_items: list[HistoryItemInput] = []
         self.ratings: list[RatingInput] = []
         self.episode_details_calls: list[tuple[int, int, int]] = []
+        self.title_details_calls: list[tuple[int, str]] = []
         self.title_details = TitleSummary(
             trakt_id=11,
             title_type="movie",
@@ -63,6 +66,7 @@ class _FakeTraktClient:
         ]
 
     def get_title_details(self, trakt_id: int, title_type: str) -> TitleSummary:
+        self.title_details_calls.append((trakt_id, title_type))
         return replace(self.title_details, trakt_id=trakt_id, title_type=title_type)
 
     def add_history_item(self, item: HistoryItemInput) -> None:
@@ -165,7 +169,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.trakt_client = _FakeTraktClient()
         self.auth = _FakeAuthService(self.trakt_client)
         self.imdb = _FakeImdbClient()
-        self.episode_metadata = EpisodeMetadataService(self.db, self.episode_repo, self.imdb)
+        self.episode_metadata = EpisodeMetadataService(self.db, self.episode_repo, self.imdb, self.titles, self.auth, lambda _config: _FakeTmdbClient())
         self.history_read_model = HistoryReadModelService(
             self.db,
             self.history_repo,
@@ -347,6 +351,174 @@ class ApplicationServiceTests(unittest.TestCase):
             [{"title_trakt_id": 138748, "type": "show", "season": 3, "episode": 4}]
         )
         self.assertFalse(changed)
+        self.assertEqual(self.trakt_client.episode_details_calls, [])
+
+    def test_history_service_has_missing_visible_episode_details_ignores_resolved_states(self) -> None:
+        service = HistoryService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            self.episode_repo,
+            self.history_read_model,
+            self.episode_metadata,
+        )
+        with self.db.session() as session:
+            row = self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=301, season=3, number=4, title="Kill Switch"),
+            )
+            row.trakt_details_status = ENRICH_STATUS_CHECKED_NO_DATA
+            row.still_status = ENRICH_STATUS_CHECKED_NO_DATA
+            row.still_missing = True
+        self.assertFalse(
+            service.has_missing_visible_episode_details(
+                [{"title_trakt_id": 138748, "type": "show", "season": 3, "episode": 4}]
+            )
+        )
+
+    def test_catalog_service_has_missing_visible_titles_ignores_resolved_states(self) -> None:
+        service = CatalogService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.sync_state,
+            lambda _config: _FakeTmdbClient(),
+            self.imdb,
+        )
+        rows = [
+            {
+                "title_trakt_id": 11,
+                "type": "movie",
+                "poster_url": "",
+                "title_poster_status": ENRICH_STATUS_CHECKED_NO_DATA,
+                "title_trakt_rating": None,
+                "title_trakt_votes": None,
+                "title_ratings_status": ENRICH_STATUS_CHECKED_NO_DATA,
+            }
+        ]
+        self.assertFalse(service.has_missing_visible_titles(rows))
+
+    def test_catalog_service_queues_title_ratings_when_trakt_exists_but_imdb_unresolved(self) -> None:
+        service = CatalogService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.sync_state,
+            lambda _config: _FakeTmdbClient(),
+            self.imdb,
+        )
+        rows = [
+            {
+                "title_trakt_id": 11,
+                "type": "show",
+                "poster_url": "https://poster.example/show.jpg",
+                "title_poster_status": ENRICH_STATUS_READY,
+                "title_trakt_rating": 8.2,
+                "title_trakt_votes": 1000,
+                "title_imdb_rating": None,
+                "title_imdb_votes": None,
+                "title_ratings_status": "unknown",
+            }
+        ]
+        self.assertEqual(service.select_title_enrich_keys(rows), [(11, "show")])
+
+    def test_history_set_rating_invalidates_episode_trakt_status(self) -> None:
+        service = HistoryService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            self.episode_repo,
+            self.history_read_model,
+            self.episode_metadata,
+        )
+        with self.db.session() as session:
+            row = self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(
+                    trakt_id=301,
+                    season=3,
+                    number=4,
+                    title="Kill Switch",
+                    trakt_rating=7.9,
+                    trakt_votes=321,
+                ),
+            )
+            row.trakt_details_status = ENRICH_STATUS_READY
+        service.set_rating(
+            RatingInput(title_type="show", trakt_id=138748, rating=9, season=3, episode=4),
+            title="The Capture",
+        )
+        with self.db.session() as session:
+            row = self.episode_repo.find_episode(session, 138748, 3, 4)
+            self.assertEqual(row.trakt_details_status, "unknown")
+
+    def test_progress_dashboard_uses_stored_metadata_only_without_network_enrich(self) -> None:
+        from trakt_tracker.persistence.repositories import ProgressRepository
+
+        workflow = ProgressSyncWorkflow(
+            self.db,
+            self.auth,
+            ProgressRepository(),
+            self.episode_repo,
+            self.titles,
+            self.user_states,
+            self.sync_state,
+            lambda _config: _FakeTmdbClient(),
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=138748,
+                    title_type="show",
+                    title="The Capture",
+                    poster_url="https://poster.example/capture.jpg",
+                    status="returning",
+                ),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(
+                    trakt_id=301,
+                    season=3,
+                    number=4,
+                    title="Kill Switch",
+                    still_url="https://still.example/capture.jpg",
+                    trakt_rating=7.9,
+                    trakt_votes=321,
+                    imdb_id="tt123",
+                    imdb_rating=8.1,
+                    imdb_votes=106,
+                ),
+            )
+            ProgressRepository().upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=138748,
+                    title="The Capture",
+                    completed=3,
+                    aired=6,
+                    percent_completed=50.0,
+                    next_episode=EpisodeSummary(trakt_id=301, season=3, number=4, title="Kill Switch"),
+                ),
+            )
+        items = workflow.dashboard_progress()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].poster_url, "https://poster.example/capture.jpg")
+        self.assertEqual(items[0].next_episode.still_url, "https://still.example/capture.jpg")
+        self.assertEqual(self.trakt_client.title_details_calls, [])
         self.assertEqual(self.trakt_client.episode_details_calls, [])
 
 

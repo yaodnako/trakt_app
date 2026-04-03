@@ -3,61 +3,65 @@
 ## Текущее фактическое состояние
 
 - есть локальный git baseline commit
-- основной remote подключён
-- текущий рефактор уже разбил часть sync/use-case логики на отдельные файлы
-- web теперь принят как основной рабочий UI, desktop больше не считается главным baseline
+- основной remote подключен
+- `web` принят как основной рабочий UI
+- `desktop` остается вторым UI поверх того же core и SQLite
 
 ## Что уже реально сделано
 
-- background manual sync в web
-- background manual history sync в desktop
-- `Debug mode` в desktop/web
-- `Progress` и `History` опираются на более явную policy/update схему
-- уведомления ограничены текущим `next episode`, а не любым левым calendar special
-- для web заведен локальный screenshot workflow через Playwright/Chrome 125% view для самопроверки UI
-- вынесены:
-  - `CatalogService`
-  - `HistoryService`
-  - `InteractionService`
-  - `HistorySyncWorkflow`
-  - `ProgressSyncWorkflow`
-  - `NotificationRefreshWorkflow`
-  - `HistoryReadModelService`
-  - `EpisodeMetadataService`
-  - `SyncPolicy`
-  - `OperationLog`
+- большой stabilization/refactor план для `History + Progress` проведен до конца по фазам 1–5
+- введен explicit enrich-state model в SQLite
+- sync / enrich / UI refresh разведены лучше, чем раньше
+- `History` больше не должен сходиться через full reload страницы
+- `Progress` теперь использует тот же shared enrich core, что и `History`
+- введена shared visible-first queue для provider-backed metadata
+- `History` и `Progress` читают одни и те же shared metadata tables
+- добавлен и используется локальный screenshot workflow для web UI
 
-## Что ещё не доведено
+## Что сейчас считается нормой
 
-- search state / search history / title-details orchestration уже вынесены из `LibraryService`
-- history/rating write-side и history read facade уже отделены от прежнего `LibraryService`
-- watch/seen/rating/drop action flow больше не размазан напрямую между desktop/web
-- IMDb dataset теперь может обновляться в фоне по настраиваемому interval и в desktop, и в web
-- history web теперь умеет lazy-enrich visible rows:
-  - Trakt episode aggregate rating/votes
-  - missing title posters
-- `MainWindow` всё ещё перегружен
-- web routes уже частично разрезаны по screen-level modules, `web/app.py` стал тоньше
-- `Debug mode` ещё не до конца унифицирован
-- refresh policy для episode details/ratings всё ещё можно упростить и сделать яснее
+### History
 
-## Подтверждённые проблемные зоны
+- grouped-by-day layout в web
+- title-level poster / title-level ratings chips
+- episode still / episode ratings
+- queue-driven patch refresh без whole-page reload
+- stable loading / empty states:
+  - `Loading`
+  - `No poster`
+  - `No preview`
+  - `n/a` только для terminal `checked_no_data`
 
-- часть UX-проблем раньше маскировалась логикой sync/cache, а не была чисто UI-багом
-- stale ratings / stale next-episode metadata были реальной проблемой
-- auth/token refresh path был неполным, из-за чего могли лететь `401`
-- web debug раньше переигрывал старый хвост событий
+### Progress
 
-## Что НЕ считать законченным
+- queue-driven patch refresh без whole-page reload
+- shared title/episode metadata из SQLite
+- title poster / provider chips / next-episode preview
+- stable loading / empty states по тем же правилам, что и в `History`
 
-Не считать проект полностью архитектурно дочищенным.
+## Подтвержденные проблемные зоны, которые уже были
 
-Сейчас это состояние:
+Вот какие реальные проблемы уже всплывали и фиксились в этом цикле:
 
-- уже не хаотичный монолит
-- но ещё не чистая финальная структура
+- reload-driven convergence в `History`
+- queue retry-loop на `retryable_failure`
+- image proxy stall на `/cached-image`
+- неверное скрытие уже известных values из-за слишком жесткой привязки template к status
+- визуальный конфликт карточек `History`, когда один и тот же title повторялся в разных днях
+- отсутствие повторной проверки после local re-rate
 
-## Следующий новый чат
+## Что еще не стоит считать “идеальной финальной архитектурой”
+
+Проект уже не в промежуточном монолитном состоянии, но это все еще не “последняя полировка всего продукта”.
+
+Что еще остается как обычная будущая работа, а не как незавершенный blocker фаз 1–5:
+
+- further cleanup desktop orchestration
+- further cleanup debug UX
+- точечные UX-polish задачи на экранах
+- transport/network hardening around provider failures
+
+## Как начинать новый чат после этого цикла
 
 В новом чате стартовать так:
 
@@ -66,4 +70,9 @@
 3. прочитать `STATE.md`
 4. потом смотреть `FEATURES.md`
 
-И только после этого продолжать рефактор.
+И только после этого продолжать работу.
+
+Если баг новый:
+
+- формулировать его как отдельный текущий дефект
+- не смешивать с предыдущими ветками расследования

@@ -2,28 +2,26 @@
 
 ## Базовый принцип
 
-- `web` и `desktop` это два UI-слоя над одним core
-- не дублировать business logic между UI
-- UI не должен напрямую тащить provider logic
+- `web` и `desktop` — это два UI-слоя над одним core
+- business logic не должна дублироваться между UI
+- UI не должен напрямую тянуть provider logic
 
 ## Слои
 
 - `trakt_tracker/web`
-  Main working UI shell
+  Основной web UI
 - `trakt_tracker/ui`
-  Secondary desktop UI shell
+  Второй desktop UI
 - `trakt_tracker/application`
-  Use-cases, orchestration, sync policies, read models
+  Use-cases, orchestration, queue, sync policies, read models
 - `trakt_tracker/infrastructure`
-  Trakt / TMDb / Kinopoisk / notifications / cache / keyring
+  Trakt / TMDb / IMDb / notifications / caches / keyring
 - `trakt_tracker/persistence`
-  SQLite models and repositories
+  SQLite models и repositories
 
-## Что уже разрезано
+## Текущее ядро
 
-Сейчас core уже не полностью монолитный.
-
-Отдельно вынесены:
+Core уже не монолитный. Ключевые куски вынесены отдельно:
 
 - [sync_policy.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/sync_policy.py)
 - [operations.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/operations.py)
@@ -32,92 +30,68 @@
 - [notification_refresh.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/notification_refresh.py)
 - [catalog.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/catalog.py)
 - [history.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history.py)
-- [interactions.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/interactions.py)
 - [history_read_model.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_read_model.py)
 - [episode_metadata.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/episode_metadata.py)
-- [trakt_payload_cache.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/trakt_payload_cache.py)
-- [routes_progress.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_progress.py)
+- [enrich_queue.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/enrich_queue.py)
 - [routes_history.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_history.py)
-- [routes_catalog.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_catalog.py)
-- [routes_system.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_system.py)
-- [capture_web_screens.py](/D:/CodexProjects/Trakt_app/tools/capture_web_screens.py)
+- [routes_progress.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_progress.py)
 
-## Что ещё остаётся тяжёлым
+## Stable shared model
 
-- [services.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/services.py)
-  Уже стал thin composition root без крупной предметной логики
+После фаз 1–5 зафиксирована такая архитектурная модель:
+
+- SQLite — source of truth для enrich state
+- `titles` хранит:
+  - poster
+  - title-level ratings
+  - enrich statuses для title metadata
+- `episodes_cache` хранит:
+  - still
+  - episode Trakt details / ratings
+  - episode IMDb metadata
+  - enrich statuses для episode metadata
+- `History` и `Progress` читают одни и те же shared metadata tables
+- decision о том, нужен ли enrich, принимается только по SQLite statuses
+
+## Queue model
+
+Shared queue primitives живут в `application`, а не в web routes:
+
+- queue process-local и in-memory
+- queue делает:
+  - dedupe по stable task key
+  - visible-first priorities
+  - ограничение concurrency
+  - structured updates для polling
+- `History` и `Progress` используют один и тот же queue service
+- route-level background start для enrich больше не является основной моделью
+
+## Web refresh model
+
+Для web экранов теперь целевая схема такая:
+
+- SSR page render берет текущее состояние из SQLite
+- enrich не должен зависеть от full page reload
+- клиент делает patch-only refresh affected cards/groups
+- `History` и `Progress` используют JSON refresh endpoints и queue revisions
+
+## Что еще остается тяжелым
+
 - [main_window.py](/D:/CodexProjects/Trakt_app/trakt_tracker/ui/main_window.py)
-  Всё ещё слишком большой orchestration class
-- [app.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/app.py)
-  Уже стал thin composition root; web orchestration частично разрезана по route modules
+  Desktop orchestration все еще слишком большая
+- [services.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/services.py)
+  Это уже thin composition root, но он остается важной точкой сборки зависимостей
 
 ## Правила дальнейшей работы
 
-- сначала ревизия, потом следующий рефактор
-- не говорить, что этап “внедрён”, пока нет реального diff
+- не считать этап “внедренным”, пока нет реального diff и локальной проверки
 - для code changes использовать patch-only workflow
-- после каждого этапа:
-  - убедиться, что `git diff` не пустой
-  - только потом считать этап реальным
-
-## Рабочий цикл изменений
-
-- если пользователь просит что-то изменить:
-  - сначала потратить время на поиск наиболее грамотного способа решения, а не начинать правки сразу
-  - по возможности выбирать лучший практический метод заранее, чтобы не тратить потом много итераций на переделки
-  - если запрос сформулирован точно и узко (например формат числа, текст, положение одного элемента, конкретный критерий выравнивания), делать буквальное минимальное изменение под этот запрос, а не переинтерпретировать его шире
-  - потом вносить правки
-- после правок:
-  - проверять прежде всего тот раздел/экран/поток, в котором были изменения, вместе с окружающим контекстом, который мог поехать
-  - не расползаться каждый раз в проверку всех остальных разделов без причины
-- перед сдачей результата:
-  - сделать короткую самодиагностику по изменённому месту
-  - если результат визуально или логически не дотягивает, сначала переделать, потом снова проверить
-  - только если изменённый участок выглядит и работает нормально, считать задачу готовой к показу пользователю
-- для UI-правок:
-  - после изменений обязательно снова снимать локальный скриншот изменённого раздела
-  - проверять не только сам изменённый элемент, но и окружающее пространство/layout рядом с ним
-  - при необходимости повторять цикл “правка -> скрин -> самопроверка”, пока результат не станет нормальным
-  - не вставлять служебные скриншоты в чат, если пользователь сам этого не просил
-  - считать работу готовой к сдаче только если результат реально соответствует ТЗ пользователя, а не просто “стал лучше”
-  - если после 5 итераций по одному и тому же узкому визуальному вопросу точного попадания в ТЗ не получается, не делать вид, что задача решена; вместо этого прямо писать пользователю и предлагать альтернативный вариант/компромисс
-  - до достижения лимита в 5 итераций не останавливать работу на промежуточных “выводах” и не перекладывать оценку недоделанного результата на пользователя; продолжать цикл исправлений и самопроверки
-  - если пользователь указал один конкретный дефект, сначала добивать именно его и не расползаться в соседние “улучшения”, пока этот дефект не исправлен
-  - не сдавать пользователю промежуточный результат, если локальный скрин всё ещё показывает дефект
-  - если новая правка ухудшила уже более удачное предыдущее состояние, не продолжать поверх ухудшения; вернуть более удачное состояние и искать следующее решение от него
-  - не менять дополнительные части композиции/иерархии/размеров, если пользователь не просил этого прямо и если это не необходимо для исправления конкретного дефекта
-  - финальное сообщение по UI-правке давать только после собственной проверки скриншота с выводом, что изменённый раздел и соседний контекст выглядят нормально
-  - если у задачи есть точные измеримые критерии (формат числа, выравнивание, положение, размер, число колонок, сохранение конкретного layout-паттерна), после каждого скрина делать буквальную сверку по каждому критерию отдельно, а не общую субъективную оценку “стало лучше”
-  - если хотя бы один такой критерий не выполнен, не писать пользователю промежуточный вывод о результате и не считать шаг законченным; продолжать исправление молча в рамках текущего цикла
-  - не расходовать итерации на повторение одного и того же ошибочного чтения ТЗ; при первом же обнаружении такого расхождения перечитать формулировку пользователя буквально и сверять следующие правки уже только с ней
-  - если результат можно проверить локально (скриншотом, тестом, данными в БД, логом, локальным вызовом сервиса), такая проверка обязательна перед завершением работы по изменённому разделу
-  - запрещено завершать ход работы на формулировках вида “должно работать”, “логика теперь такая”, “теперь есть смысл проверить”, если обязательная локальная проверка ещё не проведена
-  - отсутствие обязательной локальной проверки считать ошибкой исполнения; в таком случае нужно не объяснять, почему остановился, а немедленно продолжать проверку и следующий цикл исправлений
-  - если текущий скрин не показывает нужный элемент или состояние, это не повод пропускать проверку; нужно снять другой скрин (например полный экран вместо viewport) или подобрать/отфильтровать состояние, в котором нужный элемент точно виден
-  - если пользователь просил проверить конкретный элемент, работа не может считаться завершённой, пока этот элемент реально не был проверен на скрине/экране
-  - если после 2 попыток по одному и тому же дефекту точного попадания нет, считать неудачным не только результат, но и сам способ решения
-  - в таком случае не продолжать крутить те же самые пиксели/отступы вслепую, а остановиться и найти более прямой и управляемый способ решения задачи
-  - предпочитать смену метода решения (например, перейти от “подгонки на глаз” к жёсткому выравниванию по контейнеру/координате/структуре), а не бесконечные микроправки одного и того же подхода
-
-## Порядок дальнейшего рефактора
-
-1. Разрезать UI orchestration
-   Дальше основной фокус на desktop, потому что web shell уже частично разрезан
-
-2. Упростить `Debug mode`
-   Один поток operation events, меньше локальных UI-hints
-
-3. Только потом делать performance pass
-   Не оптимизировать поверх ещё не до конца очищенной структуры
-
-## Важная политика sync
-
-- `History`
-  auto-sync по `last_activities` + probe interval
-  plus lazy visible-row enrichment for episode Trakt details and missing title posters
-- `Progress`
-  full sync реже, focused/visible refresh чаще
-- `Notifications`
-  опираются на текущий `next episode`, не на произвольный calendar item
-- `Episode metadata`
-  должны жить через единый metadata layer, не размазываться по разным сервисам
+- после UI-правок обязательно делать screenshot check
+- если на экране виден странный результат, сначала проверять:
+  - SQLite row values
+  - enrich statuses
+  - queue updates
+- если баг касается `History` или `Progress`, сначала отделять:
+  - данные потерялись
+  - данные есть, но экран их неверно показывает
+  - данные есть, но queue/retry/status застрял

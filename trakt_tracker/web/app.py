@@ -243,6 +243,16 @@ def create_app() -> FastAPI:
         base_context.update(context)
         return templates.TemplateResponse(request, template_name, base_context, status_code=status_code)
 
+    def render_fragment(request: Request, template_name: str, context: dict) -> str:
+        fragment_context = {
+            "request": request,
+            "current_path": request.url.path,
+        }
+        fragment_context.update(context)
+        return templates.get_template(template_name).render(fragment_context)
+
+    app.state.render_fragment = render_fragment
+
     def progress_redirect(
         *,
         hide_upcoming: bool,
@@ -270,7 +280,7 @@ def create_app() -> FastAPI:
 
     register_system_routes(app, render=render, template_filters=_TemplateFilters)
     register_progress_routes(app, render=render, progress_redirect=progress_redirect)
-    register_history_routes(app, render=render)
+    register_history_routes(app, render=render, render_fragment=render_fragment)
     register_catalog_routes(app, render=render, enrich_search_results=_enrich_search_results, schedule_search_enrichment=_schedule_search_enrichment)
     return app
 

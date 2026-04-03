@@ -127,6 +127,31 @@ class HistoryReadModelService:
                         if row.season is not None and row.episode is not None
                         else None
                     ),
+                    "episode_imdb_status": (
+                        "ready"
+                        if (
+                            (
+                                (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_rating")
+                                or (cached_episode_imdb.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_rating")
+                            ) is not None
+                            and (
+                                (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_votes")
+                                or (cached_episode_imdb.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_votes")
+                            ) is not None
+                        )
+                        else (
+                            "checked_no_data"
+                            if row.season is not None
+                            and row.episode is not None
+                            and (
+                                (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_id")
+                                or (cached_episode_imdb.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_id")
+                            )
+                            else "unknown"
+                        )
+                        if row.season is not None and row.episode is not None
+                        else "unknown"
+                    ),
                     "event_rating": row.rating,
                     "title_rating": ratings.get(row.title_trakt_id),
                     "display_rating": (

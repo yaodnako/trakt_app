@@ -3,11 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from trakt_tracker.application.enrich_state import (
-    ENRICH_STATUS_CHECKED_NO_DATA,
     ENRICH_STATUS_READY,
-    ENRICH_STATUS_RETRYABLE_FAILURE,
     ENRICH_STATUS_UNKNOWN,
-    should_attempt_enrich,
 )
 from trakt_tracker.domain import HistoryItemInput, RatingInput, TitleSummary
 
@@ -142,6 +139,12 @@ class HistoryService:
                 episode=item.episode,
                 rating=item.rating,
             )
+            if item.title_type == "show" and item.season is not None and item.episode is not None:
+                episode_row = self._episode_repo.find_episode(session, item.trakt_id, item.season, item.episode)
+                if episode_row is not None:
+                    episode_row.trakt_details_status = ENRICH_STATUS_UNKNOWN
+            else:
+                model.ratings_status = ENRICH_STATUS_UNKNOWN
 
     def history(
         self,
@@ -179,95 +182,24 @@ class HistoryService:
         return None
 
     def has_missing_visible_episode_details(self, rows: list[dict]) -> bool:
-        episode_keys = [
-            (int(row["title_trakt_id"]), int(row["season"]), int(row["episode"]))
-            for row in rows
-            if row.get("type") == "show" and row.get("season") is not None and row.get("episode") is not None
-        ]
-        if not episode_keys:
-            return False
-        with self._db.session() as session:
-            metadata = self._episode_repo.metadata_by_episode_keys(session, episode_keys)
-        for key in dict.fromkeys(episode_keys):
-            item = metadata.get(key) or {}
-            if should_attempt_enrich(
-                item.get("trakt_details_status", ENRICH_STATUS_UNKNOWN),
-                has_value=item.get("trakt_rating") is not None and item.get("trakt_votes") is not None,
-            ):
-                return True
-            if self._episode_metadata.can_enrich_episode_stills() and should_attempt_enrich(
-                item.get("still_status", ENRICH_STATUS_UNKNOWN),
-                has_value=bool(item.get("still_url")),
-            ):
-                return True
-        return False
+        return bool(self._episode_metadata.select_episode_enrich_keys(rows))
+
+    def select_episode_enrich_keys(self, rows: list[dict]) -> list[tuple[int, int, int]]:
+        return self._episode_metadata.select_episode_enrich_keys(rows)
+
+    def episode_key_needs_enrich(self, show_trakt_id: int, season: int, episode: int) -> bool:
+        return self._episode_metadata.episode_key_needs_enrich(show_trakt_id, season, episode)
 
     def enrich_visible_episode_details(self, rows: list[dict]) -> bool:
-        episode_keys = [
-            (int(row["title_trakt_id"]), int(row["season"]), int(row["episode"]))
-            for row in rows
-            if row.get("type") == "show" and row.get("season") is not None and row.get("episode") is not None
-        ]
+        episode_keys = self.select_episode_enrich_keys(rows)
         if not episode_keys:
             return False
-        with self._db.session() as session:
-            metadata = self._episode_repo.metadata_by_episode_keys(session, episode_keys)
-        missing_keys = [
-            key
-            for key in dict.fromkeys(episode_keys)
-            if should_attempt_enrich(
-                (metadata.get(key) or {}).get("trakt_details_status", ENRICH_STATUS_UNKNOWN),
-                has_value=(
-                    (metadata.get(key) or {}).get("trakt_rating") is not None
-                    and (metadata.get(key) or {}).get("trakt_votes") is not None
-                ),
-            )
-        ]
         changed = False
-        if missing_keys:
-            client = self._auth.get_client()
-            with self._db.session() as session:
-                for show_trakt_id, season, episode in missing_keys:
-                    try:
-                        details = client.get_episode_details(show_trakt_id, season, episode)
-                    except Exception:
-                        self._episode_repo.update_trakt_details_enrich_state(
-                            session,
-                            show_trakt_id,
-                            season,
-                            episode,
-                            status=ENRICH_STATUS_RETRYABLE_FAILURE,
-                        )
-                        continue
-                    if details is None:
-                        self._episode_repo.update_trakt_details_enrich_state(
-                            session,
-                            show_trakt_id,
-                            season,
-                            episode,
-                            status=ENRICH_STATUS_CHECKED_NO_DATA,
-                        )
-                        continue
-                    existing = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
-                    previous_rating = existing.trakt_rating if existing is not None else None
-                    previous_votes = existing.trakt_votes if existing is not None else None
-                    status = (
-                        ENRICH_STATUS_CHECKED_NO_DATA
-                        if details.trakt_rating is None or details.trakt_votes is None
-                        else ENRICH_STATUS_READY
-                    )
-                    self._episode_repo.update_trakt_details_enrich_state(
-                        session,
-                        show_trakt_id,
-                        season,
-                        episode,
-                        status=status,
-                        details=details,
-                    )
-                    if details.trakt_rating != previous_rating or details.trakt_votes != previous_votes:
-                        changed = True
-        try:
-            still_changed = self._episode_metadata.enrich_episode_stills(episode_keys)
-        except Exception:
-            still_changed = False
-        return changed or still_changed
+        for show_trakt_id, season, episode in episode_keys:
+            result = self.enrich_episode_key(show_trakt_id, season, episode)
+            if result == ENRICH_STATUS_READY:
+                changed = True
+        return changed
+
+    def enrich_episode_key(self, show_trakt_id: int, season: int, episode: int) -> str:
+        return self._episode_metadata.enrich_episode_key(show_trakt_id, season, episode)

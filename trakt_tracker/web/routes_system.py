@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 from pathlib import Path
+from threading import Lock, Thread
 from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
 
@@ -13,6 +14,10 @@ from trakt_tracker.config import ConfigStore, normalize_utc_offset
 from trakt_tracker.infrastructure.cache import BinaryCache
 from trakt_tracker.web.app_shared import image_cache_suffix
 from trakt_tracker.web.viewmodels import parse_bool_flag
+
+
+_image_warm_lock = Lock()
+_image_warm_running: set[str] = set()
 
 
 def register_system_routes(app, *, render, template_filters) -> None:
@@ -34,23 +39,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
         stale_payload = cache.get_any_bytes(target_url)
         if stale_payload is not None:
             return Response(content=stale_payload, media_type=media_type or "image/jpeg")
-        try:
-            upstream_request = UrlRequest(
-                target_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                },
-            )
-            with urlopen(upstream_request, timeout=20) as upstream_response:
-                fetched = upstream_response.read()
-                content_type = upstream_response.headers.get("Content-Type", "")
-            if fetched:
-                resolved_media_type = media_type or content_type.split(";", 1)[0].strip() or "image/jpeg"
-                cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(target_url, content_type))
-                return Response(content=fetched, media_type=resolved_media_type)
-        except Exception:
-            pass
+        _warm_image_cache_in_background(cache, target_url, timeout=5)
         return RedirectResponse(url=target_url, status_code=307)
 
     @app.get("/settings", response_class=HTMLResponse)
@@ -167,3 +156,32 @@ def register_system_routes(app, *, render, template_filters) -> None:
     async def debug_events(request: Request, after: int = 0) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
         return JSONResponse({"events": services.operations.list_after(after)})
+
+
+def _warm_image_cache_in_background(cache: BinaryCache, target_url: str, *, timeout: int) -> None:
+    with _image_warm_lock:
+        if target_url in _image_warm_running:
+            return
+        _image_warm_running.add(target_url)
+
+    def runner() -> None:
+        try:
+            upstream_request = UrlRequest(
+                target_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                },
+            )
+            with urlopen(upstream_request, timeout=timeout) as upstream_response:
+                fetched = upstream_response.read()
+                content_type = upstream_response.headers.get("Content-Type", "")
+            if fetched:
+                cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(target_url, content_type))
+        except Exception:
+            pass
+        finally:
+            with _image_warm_lock:
+                _image_warm_running.discard(target_url)
+
+    Thread(target=runner, daemon=True).start()

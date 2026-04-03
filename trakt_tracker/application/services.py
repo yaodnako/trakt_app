@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from trakt_tracker.application.catalog import CatalogService
+from trakt_tracker.application.enrich_queue import EnrichQueueService
 from trakt_tracker.application.history import HistoryService
 from trakt_tracker.application.interactions import InteractionService
 from trakt_tracker.application.operations import OperationLog
@@ -45,6 +46,7 @@ class ServiceContainer:
     auth: "AuthService"
     cache: "CacheService"
     catalog: "CatalogService"
+    enrich_queue: "EnrichQueueService"
     history: "HistoryService"
     interactions: "InteractionService"
     play: "PlayService"
@@ -183,6 +185,12 @@ class ProgressService:
 
     def dashboard_progress(self, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
         return self._workflow.dashboard_progress(dropped_only=dropped_only)
+
+    def select_title_enrich_keys(self, items: list[ProgressSnapshot]) -> list[tuple[int, str]]:
+        return self._workflow.select_title_enrich_keys(items)
+
+    def select_episode_enrich_keys(self, items: list[ProgressSnapshot]) -> list[tuple[int, int, int]]:
+        return self._workflow.select_episode_enrich_keys(items)
 
     def sync_progress(self, trakt_ids: list[int] | None = None, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
         return self._workflow.sync_progress(trakt_ids, dropped_only=dropped_only)
@@ -367,6 +375,29 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     history_read_model = HistoryReadModelService(db, history, user_states, titles, episode_repo, episode_metadata)
     catalog = CatalogService(db, auth, titles, user_states, sync_state, tmdb_factory, imdb_client)
     history_service = HistoryService(db, auth, titles, user_states, history, episode_repo, history_read_model, episode_metadata)
+    enrich_queue = EnrichQueueService(
+        {
+            "history_title": lambda task: catalog.enrich_title_key(
+                int(task.payload["trakt_id"]),
+                str(task.payload["title_type"]),
+            ),
+            "history_episode": lambda task: episode_metadata.enrich_episode_key(
+                int(task.payload["show_trakt_id"]),
+                int(task.payload["season"]),
+                int(task.payload["episode"]),
+            ),
+            "progress_title": lambda task: catalog.enrich_title_key(
+                int(task.payload["trakt_id"]),
+                str(task.payload["title_type"]),
+            ),
+            "progress_episode": lambda task: episode_metadata.enrich_episode_key(
+                int(task.payload["show_trakt_id"]),
+                int(task.payload["season"]),
+                int(task.payload["episode"]),
+            ),
+        },
+        max_workers=2,
+    )
     play = PlayService(auth)
     progress_service = ProgressService(db, auth, progress, episode_repo, titles, user_states, sync_state, tmdb_factory, imdb_client, operations, episode_metadata)
     notifications = NotificationService(
@@ -384,6 +415,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         auth=auth,
         cache=cache,
         catalog=catalog,
+        enrich_queue=enrich_queue,
         history=history_service,
         interactions=interactions,
         play=play,

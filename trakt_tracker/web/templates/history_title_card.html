@@ -1,0 +1,168 @@
+<article
+    class="history-title-card"
+    data-history-title-key="{{ title_group.title_key }}"
+    data-history-entry-count="{{ title_group.entries|length }}"
+>
+    {% set title_filter_url = "/history?type=" ~ title_group.type ~ "&title=" ~ (title_group.title|urlencode) ~ "&page=1" %}
+    {% set trakt_title_url = "" %}
+    {% if title_group.title_slug %}
+        {% if title_group.type == 'show' %}
+            {% set trakt_title_url = "https://trakt.tv/shows/" ~ title_group.title_slug %}
+        {% elif title_group.type == 'movie' %}
+            {% set trakt_title_url = "https://trakt.tv/movies/" ~ title_group.title_slug %}
+        {% endif %}
+    {% endif %}
+    <div class="history-title-summary">
+        <div class="history-title-heading">
+            <a href="{{ title_filter_url }}">{{ title_group.title }}</a>
+        </div>
+        {% set title_poster_status = title_group.title_poster_status or 'unknown' %}
+        <a
+            href="{{ trakt_title_url or ('/titles/' ~ title_group.type ~ '/' ~ title_group.title_trakt_id) }}"
+            class="history-title-poster"
+            {% if trakt_title_url %}target="_blank" rel="noreferrer"{% endif %}
+        >
+            {% if title_group.poster_url %}
+            <img
+                src="{{ title_group.poster_url|cached_image_url }}"
+                alt="{{ title_group.title }} poster"
+                loading="lazy"
+                data-direct-src="{{ title_group.poster_url }}"
+                onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+            >
+            {% elif title_poster_status == 'checked_no_data' %}
+            <div class="poster-fallback">No poster</div>
+            {% else %}
+            <div class="poster-fallback poster-loading">Loading</div>
+            {% endif %}
+            {% if title_group.title_episode_avg_rating is not none %}
+            <div class="history-rating-badge">
+                {{ title_group.title_episode_avg_rating|round(1) }} ★
+            </div>
+            {% endif %}
+            <div class="poster-chip history-poster-chip history-title-chip">
+                <span class="poster-chip-part">
+                    <img
+                        class="poster-chip-icon"
+                        src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
+                        alt="trakt"
+                    >
+                    <span>
+                        {% if title_group.title_trakt_rating is not none %}
+                        {{ title_group.title_trakt_rating|rating_with_votes(title_group.title_trakt_votes) }}
+                        {% elif title_group.title_ratings_status == 'checked_no_data' %}
+                        n/a
+                        {% else %}
+                        Loading
+                        {% endif %}
+                    </span>
+                </span>
+                <span class="poster-chip-part">
+                    <img
+                        class="poster-chip-icon"
+                        src="{{ request.url_for('static', path='imdb_icon.png') }}"
+                        alt="imdb"
+                    >
+                    <span>
+                        {% if title_group.title_imdb_rating is not none %}
+                        {{ title_group.title_imdb_rating|rating_with_votes(title_group.title_imdb_votes) }}
+                        {% elif title_group.title_ratings_status == 'checked_no_data' %}
+                        n/a
+                        {% else %}
+                        Loading
+                        {% endif %}
+                    </span>
+                </span>
+            </div>
+        </a>
+    </div>
+    <div class="history-episode-grid">
+        {% for row in title_group.entries %}
+        <article class="history-episode-card{% if row.type != 'show' %} history-episode-card-compact{% endif %}">
+            {% set episode_heading = row.episode_title or row.title %}
+            {% set trakt_episode_url = "" %}
+            {% set still_status = row.episode_still_status or 'unknown' %}
+            {% set trakt_status = row.episode_trakt_status or 'unknown' %}
+            {% set imdb_status = row.episode_imdb_status or 'unknown' %}
+            {% if title_group.title_slug and row.type == 'show' and row.season is not none and row.episode is not none %}
+                {% set trakt_episode_url = "https://trakt.tv/shows/" ~ title_group.title_slug ~ "/seasons/" ~ row.season ~ "/episodes/" ~ row.episode %}
+            {% endif %}
+            <div class="history-episode-head">
+                <p class="history-episode-title{% if episode_heading|length > 24 %} is-long{% endif %}{% if episode_heading|length > 34 %} is-xlong{% endif %}">{{ episode_heading }}</p>
+            </div>
+            <div class="history-entry-still-shell">
+                {% if row.episode_still_url %}
+                <a
+                    href="{{ trakt_episode_url or ('/titles/' ~ row.type ~ '/' ~ row.title_trakt_id) }}"
+                    class="history-entry-still"
+                    {% if trakt_episode_url %}target="_blank" rel="noreferrer"{% endif %}
+                >
+                    <img
+                        src="{{ row.episode_still_url|cached_image_url }}"
+                        alt="{{ row.episode_title or (row.season|episode_label(row.episode)) }}"
+                        loading="lazy"
+                        data-direct-src="{{ row.episode_still_url }}"
+                        onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+                    >
+                </a>
+                {% elif still_status == 'checked_no_data' %}
+                <div class="history-entry-still history-entry-still-empty">
+                    <span>No preview</span>
+                </div>
+                {% else %}
+                <div class="history-entry-still history-entry-still-loading">
+                    <span>Loading</span>
+                </div>
+                {% endif %}
+                {% if row.display_rating is not none %}
+                <div class="history-rating-badge">{{ row.display_rating }} ★</div>
+                {% else %}
+                <a
+                    class="history-rate-chip"
+                    href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page }}&rate_trakt_id={{ row.title_trakt_id }}&rate_type={{ row.type }}&rate_season={{ row.season or '' }}&rate_episode={{ row.episode or '' }}&rate_title={{ row.title|urlencode }}"
+                >Rate</a>
+                {% endif %}
+                {% if row.type == 'show' and row.season is not none and row.episode is not none %}
+                <div class="history-episode-chip">{{ row.season|episode_label(row.episode) }}</div>
+                {% endif %}
+            </div>
+            {% if row.type == 'show' and row.season is not none and row.episode is not none %}
+            <div class="poster-chip history-episode-ratings">
+                <span class="poster-chip-part">
+                    <img
+                        class="poster-chip-icon"
+                        src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
+                        alt="trakt"
+                    >
+                    <span>
+                        {% if row.episode_trakt_rating is not none %}
+                        {{ row.episode_trakt_rating|rating_with_votes(row.episode_trakt_votes) }}
+                        {% elif trakt_status == 'checked_no_data' %}
+                        n/a
+                        {% else %}
+                        Loading
+                        {% endif %}
+                    </span>
+                </span>
+                <span class="poster-chip-part">
+                    <img
+                        class="poster-chip-icon"
+                        src="{{ request.url_for('static', path='imdb_icon.png') }}"
+                        alt="imdb"
+                    >
+                    <span>
+                        {% if row.episode_imdb_rating is not none %}
+                        {{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}
+                        {% elif imdb_status == 'checked_no_data' %}
+                        n/a
+                        {% else %}
+                        Loading
+                        {% endif %}
+                    </span>
+                </span>
+            </div>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+</article>

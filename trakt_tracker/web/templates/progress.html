@@ -1,133 +1,20 @@
 {% extends "base.html" %}
 
 {% macro render_progress_card(item, is_new=False) %}
-<article class="progress-card{% if is_new %} is-released js-new-card{% endif %}"{% if is_new %} data-seen-form="seen-form-{{ item.trakt_id }}"{% endif %}>
-    <div class="progress-main">
-    <div class="progress-poster">
-        {% if item.poster_url %}
-        <img src="{{ item.poster_url|cached_image_url }}" alt="{{ item.title }} poster" loading="lazy">
-        {% else %}
-            <div class="poster-fallback">No poster</div>
-        {% endif %}
-        {% set skipped_count = item|progress_skipped_count %}
-        {% if skipped_count %}
-        <div class="poster-badge">{{ skipped_count }}</div>
-        {% endif %}
-        {% set chip = item|progress_rating_chip %}
-        {% if chip %}
-        <div class="poster-chip">
-            {% for part in chip.split(' | ') %}
-            {% set source = part.split('|', 1)[0] %}
-            {% set value = part.split('|', 1)[1] %}
-            <span class="poster-chip-part">
-                <img
-                    class="poster-chip-icon"
-                    src="{{ request.url_for('static', path='imdb_icon.png' if source == 'imdb' else 'trakt_logo_bw.svg') }}"
-                    alt="{{ source }}"
-                >
-                <span>{{ value }}</span>
-            </span>
-            {% endfor %}
-        </div>
-        {% endif %}
-    </div>
-    <div class="progress-body">
-        <div class="progress-copy">
-        <p class="progress-air-date progress-air-date-top">{{ item.next_episode.first_aired|dt if item.next_episode and item.next_episode.first_aired else 'unknown' }}</p>
-        <div class="progress-head">
-            <h3>{{ item.title }}</h3>
-            {% if item.status %}
-            <p class="progress-status">{{ item.status }}</p>
-            {% endif %}
-        </div>
-        {% if is_new %}
-        <form method="post" action="/progress/{{ item.trakt_id }}/seen" id="seen-form-{{ item.trakt_id }}" class="visually-hidden">
-            <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
-            <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
-            <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-            <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
-        </form>
-        {% if item.next_episode %}
-        <div class="progress-episode-block">
-            <p class="progress-episode-code">{{ item.next_episode.season|episode_label(item.next_episode.number) }}</p>
-            <p class="progress-next">{{ item.next_episode.title }}</p>
-        </div>
-        {% else %}
-        <div class="progress-episode-block">
-            <p class="progress-next">No next episode queued.</p>
-        </div>
-        {% endif %}
-        {% else %}
-        {% if item.next_episode %}
-        <div class="progress-episode-block">
-            <p class="progress-episode-code">{{ item.next_episode.season|episode_label(item.next_episode.number) }}</p>
-            <p class="progress-next">{{ item.next_episode.title }}</p>
-        </div>
-        {% else %}
-        <div class="progress-episode-block">
-            <p class="progress-next">No next episode queued.</p>
-        </div>
-        {% endif %}
-        {% endif %}
-        <p class="meta">{{ item.completed }}/{{ item|progress_effective_aired }} ({{ (item|progress_effective_percent)|round|int }}%)</p>
-        </div>
-        <div class="progress-actions">
-            <a
-                class="icon-button js-play-link"
-                href="/progress/{{ item.trakt_id }}/play?hide_upcoming={{ '1' if hide_upcoming else '0' }}&show_dropped={{ '1' if show_dropped else '0' }}&use_year_filter={{ '1' if use_year_filter else '0' }}&min_year={{ min_year or '' }}"
-                target="_blank"
-                rel="noreferrer"
-                title="Play"
-                {% if item.next_episode and not item.is_dropped %}
-                data-play-prompt-key="{{ item.trakt_id }}:{{ item.next_episode.season }}:{{ item.next_episode.number }}"
-                data-play-trakt-id="{{ item.trakt_id }}"
-                data-play-title="{{ item.title }}"
-                data-play-season="{{ item.next_episode.season }}"
-                data-play-episode="{{ item.next_episode.number }}"
-                data-play-episode-title="{{ item.next_episode.title }}"
-                data-play-hide-upcoming="{{ '1' if hide_upcoming else '0' }}"
-                data-play-show-dropped="{{ '1' if show_dropped else '0' }}"
-                data-play-use-year-filter="{{ '1' if use_year_filter else '0' }}"
-                data-play-min-year="{{ min_year or '' }}"
-                {% endif %}
-            >
-                <img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true">
-            </a>
-            <form method="post" action="/progress/{{ item.trakt_id }}/watch" class="js-watch-form" data-play-prompt-key="{% if item.next_episode %}{{ item.trakt_id }}:{{ item.next_episode.season }}:{{ item.next_episode.number }}{% endif %}">
-                <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
-                <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
-                <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-                <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
-                <button type="submit" class="icon-button" title="Mark watched" {% if not item.next_episode or item.is_dropped %}disabled{% endif %}>
-                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
-                </button>
-            </form>
-            <form
-                method="post"
-                action="/progress/{{ item.trakt_id }}/drop-toggle"
-                {% if not item.is_dropped %}onsubmit='return confirm({{ ("Drop " ~ item.title ~ " from Progress?")|tojson }})'{% endif %}
-            >
-                <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
-                <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
-                <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-                <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
-                <input type="hidden" name="is_dropped" value="{{ '1' if item.is_dropped else '0' }}">
-                <button
-                    type="submit"
-                    class="icon-button drop-toggle {% if item.is_dropped %}undrop{% else %}drop{% endif %}"
-                    title="{% if item.is_dropped %}Undrop{% else %}Drop{% endif %}"
-                >
-                    <img class="icon-glyph icon-glyph-drop" src="{{ request.url_for('static', path='drop.svg' if item.is_dropped else 'drop_red.svg') }}" alt="" aria-hidden="true">
-                </button>
-            </form>
-        </div>
-    </div>
-    </div>
-</article>
+{% set progress_item = item %}
+{% set progress_is_new = is_new %}
+{% include "progress_card.html" %}
 {% endmacro %}
 
 {% block content %}
-<section class="panel panel-hero">
+<section
+    class="panel panel-hero"
+    id="progress-page-root"
+    data-hide-upcoming="{{ '1' if hide_upcoming else '0' }}"
+    data-show-dropped="{{ '1' if show_dropped else '0' }}"
+    data-min-year="{{ min_year or '' }}"
+    data-use-year-filter="{{ '1' if use_year_filter else '0' }}"
+>
     <div class="progress-toolbar">
         <form method="post" action="/progress/sync">
             <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
@@ -204,7 +91,7 @@
 {% endif %}
 
 {% if new_items %}
-<section class="progress-section">
+<section class="progress-section" data-progress-section="new">
     <div class="section-head">
         <h3>New</h3>
     </div>
@@ -217,7 +104,7 @@
 {% endif %}
 
 {% if progress_items %}
-<section class="progress-section">
+<section class="progress-section" data-progress-section="main">
     <section class="progress-grid">
         {% for item in progress_items %}
         {{ render_progress_card(item, False) }}
@@ -225,7 +112,7 @@
     </section>
 </section>
 {% elif not new_items %}
-<section class="empty-state panel">
+<section class="empty-state panel" data-progress-empty-state>
     <h3>No progress cards</h3>
     {% if hide_upcoming or show_dropped or use_year_filter %}
     <p>Current filters hide all cards.</p>
@@ -273,5 +160,256 @@
             });
         });
     })();
+</script>
+<script>
+(() => {
+    if (!window.fetch) {
+        return;
+    }
+
+    class ProgressRefreshController {
+        constructor(root) {
+            this.root = root;
+            this.hideUpcoming = root.dataset.hideUpcoming || "0";
+            this.showDropped = root.dataset.showDropped || "0";
+            this.minYear = root.dataset.minYear || "";
+            this.useYearFilter = root.dataset.useYearFilter || "0";
+            this.progressSyncRunning = {{ 'true' if progress_sync_running else 'false' }};
+            this.queueRevision = 0;
+            this.queueRunning = false;
+            this.pollTimer = null;
+            this.pollInFlight = false;
+            this.pollAttempts = 0;
+            this.pageChangeNotified = false;
+            this.viewportCardKeys = new Set();
+            this.nearbyCardKeys = new Set();
+            this.viewportObserver = null;
+            this.nearbyObserver = null;
+            this.setupObservers();
+            this.bindInteractions();
+        }
+
+        pageCardKeys() {
+            return Array.from(document.querySelectorAll("[data-progress-card-key]"))
+                .map((node) => node.dataset.progressCardKey || "")
+                .filter((value) => value);
+        }
+
+        viewportKeys() {
+            const pageKeys = this.pageCardKeys();
+            if (!this.viewportObserver) {
+                return pageKeys;
+            }
+            return pageKeys.filter((key) => this.viewportCardKeys.has(key));
+        }
+
+        nearbyKeys() {
+            const pageKeys = this.pageCardKeys();
+            if (!this.nearbyObserver) {
+                return [];
+            }
+            return pageKeys.filter((key) => this.nearbyCardKeys.has(key) && !this.viewportCardKeys.has(key));
+        }
+
+        hasRunningJobs() {
+            return Boolean(this.progressSyncRunning || this.queueRunning);
+        }
+
+        setupObservers() {
+            if (!("IntersectionObserver" in window)) {
+                return;
+            }
+            this.viewportObserver = new IntersectionObserver((entries) => {
+                for (const entry of entries) {
+                    const cardKey = entry.target.dataset.progressCardKey || "";
+                    if (!cardKey) {
+                        continue;
+                    }
+                    if (entry.isIntersecting) {
+                        this.viewportCardKeys.add(cardKey);
+                    } else {
+                        this.viewportCardKeys.delete(cardKey);
+                    }
+                }
+            }, {threshold: 0.01});
+            this.nearbyObserver = new IntersectionObserver((entries) => {
+                for (const entry of entries) {
+                    const cardKey = entry.target.dataset.progressCardKey || "";
+                    if (!cardKey) {
+                        continue;
+                    }
+                    if (entry.isIntersecting) {
+                        this.nearbyCardKeys.add(cardKey);
+                    } else {
+                        this.nearbyCardKeys.delete(cardKey);
+                    }
+                }
+            }, {threshold: 0, rootMargin: "600px 0px"});
+            this.observeCards();
+        }
+
+        observeCards() {
+            if (!this.viewportObserver || !this.nearbyObserver) {
+                return;
+            }
+            this.viewportObserver.disconnect();
+            this.nearbyObserver.disconnect();
+            this.viewportCardKeys.clear();
+            this.nearbyCardKeys.clear();
+            for (const card of document.querySelectorAll("[data-progress-card-key]")) {
+                this.viewportObserver.observe(card);
+                this.nearbyObserver.observe(card);
+            }
+        }
+
+        bindInteractions() {
+            if (window.traktBindPlayPromptLinks) {
+                window.traktBindPlayPromptLinks();
+            }
+            document.querySelectorAll(".js-new-card").forEach((card) => {
+                if (card.dataset.boundSeenCardRefresh) {
+                    return;
+                }
+                card.dataset.boundSeenCardRefresh = "1";
+                card.addEventListener("click", (event) => {
+                    if (event.target.closest(".progress-actions")) {
+                        return;
+                    }
+                    const formId = card.getAttribute("data-seen-form");
+                    if (!formId) {
+                        return;
+                    }
+                    const form = document.getElementById(formId);
+                    if (form) {
+                        form.requestSubmit();
+                    }
+                });
+            });
+        }
+
+        startPolling() {
+            if (this.pollTimer !== null) {
+                return;
+            }
+            this.pollOnce();
+            this.pollTimer = window.setInterval(() => this.pollOnce(), 1200);
+        }
+
+        stopPolling() {
+            if (this.pollTimer !== null) {
+                window.clearInterval(this.pollTimer);
+                this.pollTimer = null;
+            }
+        }
+
+        refreshSections() {
+            document.querySelectorAll("[data-progress-section]").forEach((section) => {
+                const hasCards = section.querySelectorAll("[data-progress-card-key]").length > 0;
+                section.hidden = !hasCards;
+            });
+            const emptyState = document.querySelector("[data-progress-empty-state]");
+            if (emptyState) {
+                emptyState.hidden = this.pageCardKeys().length > 0;
+            }
+            this.observeCards();
+            this.bindInteractions();
+        }
+
+        applyRefresh(payload) {
+            const renderedCards = Array.isArray(payload.cards) ? payload.cards : [];
+            for (const item of renderedCards) {
+                const cardKey = String(item && item.card_key ? item.card_key : "");
+                const html = String(item && item.html ? item.html : "");
+                if (!cardKey || !html) {
+                    continue;
+                }
+                const existing = document.querySelector(`[data-progress-card-key="${CSS.escape(cardKey)}"]`);
+                if (!existing) {
+                    continue;
+                }
+                const template = document.createElement("template");
+                template.innerHTML = html.trim();
+                const replacement = template.content.firstElementChild;
+                if (!replacement) {
+                    continue;
+                }
+                existing.replaceWith(replacement);
+            }
+
+            const missingCardKeys = Array.isArray(payload.missing_card_keys) ? payload.missing_card_keys : [];
+            for (const cardKey of missingCardKeys) {
+                const existing = document.querySelector(`[data-progress-card-key="${CSS.escape(String(cardKey))}"]`);
+                if (existing) {
+                    existing.remove();
+                }
+            }
+
+            this.refreshSections();
+
+            if (payload && payload.page_changed && !this.pageChangeNotified && window.pushFlashToast) {
+                window.pushFlashToast("Progress updated; refresh page to show new items/order.", 4200);
+                this.pageChangeNotified = true;
+            }
+        }
+
+        async pollOnce() {
+            if (this.pollInFlight) {
+                return;
+            }
+            this.pollInFlight = true;
+            this.pollAttempts += 1;
+            try {
+                const response = await fetch("/progress/refresh", {
+                    method: "POST",
+                    headers: {
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    cache: "no-store",
+                    body: JSON.stringify({
+                        hide_upcoming: this.hideUpcoming,
+                        show_dropped: this.showDropped,
+                        min_year: this.minYear,
+                        use_year_filter: this.useYearFilter,
+                        viewport_card_keys: this.viewportKeys(),
+                        nearby_card_keys: this.nearbyKeys(),
+                        page_card_keys: this.pageCardKeys(),
+                        queue_after_revision: this.queueRevision,
+                    }),
+                });
+                if (!response.ok) {
+                    if (this.pollAttempts > 75) {
+                        this.stopPolling();
+                    }
+                    return;
+                }
+                const payload = await response.json();
+                this.applyRefresh(payload);
+                this.progressSyncRunning = Boolean(payload && payload.progress_sync_running);
+                const queue = payload && typeof payload.queue === "object" ? payload.queue : null;
+                this.queueRevision = queue && Number.isFinite(queue.revision) ? Number(queue.revision) : this.queueRevision;
+                this.queueRunning = Boolean(queue && queue.running);
+                if (!this.hasRunningJobs()) {
+                    this.stopPolling();
+                }
+            } catch (_error) {
+                if (this.pollAttempts > 75) {
+                    this.stopPolling();
+                }
+            } finally {
+                this.pollInFlight = false;
+            }
+        }
+    }
+
+    const root = document.getElementById("progress-page-root");
+    if (!root) {
+        return;
+    }
+    const controller = new ProgressRefreshController(root);
+    if (controller.pageCardKeys().length || controller.hasRunningJobs()) {
+        controller.startPolling();
+    }
+})();
 </script>
 {% endblock %}

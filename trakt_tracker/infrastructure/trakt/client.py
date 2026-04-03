@@ -255,7 +255,17 @@ class TraktClient:
             )
         return [entry for entry in entries if entry.show_trakt_id and entry.episode.trakt_id]
 
-    def _request(self, method: str, path: str, *, auth_required: bool = True, use_cache: bool = True, _retry_on_401: bool = True, **kwargs: Any) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        auth_required: bool = True,
+        use_cache: bool = True,
+        _retry_on_401: bool = True,
+        _retry_on_transport: bool = True,
+        **kwargs: Any,
+    ) -> Any:
         headers = {
             "Content-Type": "application/json",
             "trakt-api-key": self.client_id,
@@ -270,14 +280,35 @@ class TraktClient:
             cached = self._cache.get_json(cache_key, self._cache_ttl_hours)
             if cached is not None:
                 return cached
-        response = self._client.request(method, f"{API_URL}{path}", headers=headers, **kwargs)
+        try:
+            response = self._client.request(method, f"{API_URL}{path}", headers=headers, **kwargs)
+        except httpx.TransportError as exc:
+            if _retry_on_transport and method.upper() == "GET":
+                return self._request(
+                    method,
+                    path,
+                    auth_required=auth_required,
+                    use_cache=use_cache,
+                    _retry_on_401=_retry_on_401,
+                    _retry_on_transport=False,
+                    **kwargs,
+                )
+            raise TraktError(str(exc)) from exc
         if response.status_code == 401 and auth_required and _retry_on_401 and self._token is not None:
             refreshed = self.refresh_tokens()
             bundle = refreshed.to_bundle()
             self.set_tokens(bundle)
             if self._token_refresh_callback is not None:
                 self._token_refresh_callback(bundle)
-            return self._request(method, path, auth_required=auth_required, use_cache=use_cache, _retry_on_401=False, **kwargs)
+            return self._request(
+                method,
+                path,
+                auth_required=auth_required,
+                use_cache=use_cache,
+                _retry_on_401=False,
+                _retry_on_transport=_retry_on_transport,
+                **kwargs,
+            )
         if response.status_code == 429:
             raise TraktRateLimitError("Trakt rate limit exceeded")
         if response.status_code >= 400:

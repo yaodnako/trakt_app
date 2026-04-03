@@ -98,19 +98,35 @@ class ProgressSyncWorkflow:
     def dashboard_progress(self, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
         with self._db.session() as session:
             items = self._progress_repo.list_in_progress(session, dropped_only=dropped_only)
-            for item in items:
-                self._episode_metadata.attach_progress_episode_metadata(session, item, enrich_imdb=True)
-        for item in items:
-            if item.title and not item.title.startswith("Show ") and item.poster_url:
-                continue
-            summary = self._load_or_fetch_show_summary(item.trakt_id, fallback_title=item.title, persist=False)
-            if summary.title and item.title != summary.title:
-                item.title = summary.title
-            if summary.poster_url and item.poster_url != summary.poster_url:
-                item.poster_url = summary.poster_url
-            if summary.status and item.status != summary.status:
-                item.status = summary.status
         return items
+
+    def select_title_enrich_keys(self, items: list[ProgressSnapshot]) -> list[tuple[int, str]]:
+        keys: list[tuple[int, str]] = []
+        for item in items:
+            needs_poster = item.poster_status in {"unknown", "retryable_failure"}
+            needs_ratings = item.title_ratings_status in {"unknown", "retryable_failure"}
+            if needs_poster or needs_ratings:
+                keys.append((int(item.trakt_id), "show"))
+        return list(dict.fromkeys(keys))
+
+    def select_episode_enrich_keys(self, items: list[ProgressSnapshot]) -> list[tuple[int, int, int]]:
+        keys: list[tuple[int, int, int]] = []
+        for item in items:
+            next_episode = item.next_episode
+            if next_episode is None:
+                continue
+            if (
+                (next_episode.still_status in {"unknown", "retryable_failure"} and not next_episode.still_url)
+                or (
+                    next_episode.trakt_details_status in {"unknown", "retryable_failure"}
+                    and not (
+                        next_episode.trakt_rating is not None
+                        and next_episode.trakt_votes is not None
+                    )
+                )
+            ):
+                keys.append((int(item.trakt_id), int(next_episode.season), int(next_episode.number)))
+        return list(dict.fromkeys(keys))
 
     def sync_progress(self, trakt_ids: list[int] | None = None, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
         if trakt_ids is None and self._can_skip_full_progress_sync():

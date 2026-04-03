@@ -458,11 +458,22 @@ class ProgressRepository:
                     number=row.next_episode_number or 0,
                     title=row.next_episode_title,
                     still_url=next_episode_row.still_url if next_episode_row is not None else "",
+                    still_status=(next_episode_row.still_status if next_episode_row is not None else ENRICH_STATUS_UNKNOWN),
                     trakt_rating=next_episode_row.trakt_rating if next_episode_row is not None else None,
                     trakt_votes=next_episode_row.trakt_votes if next_episode_row is not None else None,
+                    trakt_details_status=(next_episode_row.trakt_details_status if next_episode_row is not None else ENRICH_STATUS_UNKNOWN),
                     imdb_id=next_episode_row.imdb_id if next_episode_row is not None else "",
                     imdb_rating=next_episode_row.imdb_rating if next_episode_row is not None else None,
                     imdb_votes=next_episode_row.imdb_votes if next_episode_row is not None else None,
+                    imdb_status=(
+                        ENRICH_STATUS_READY
+                        if next_episode_row is not None and next_episode_row.imdb_rating is not None and next_episode_row.imdb_votes is not None
+                        else (
+                            ENRICH_STATUS_CHECKED_NO_DATA
+                            if next_episode_row is not None and next_episode_row.imdb_id
+                            else ENRICH_STATUS_UNKNOWN
+                        )
+                    ),
                     first_aired=row.next_episode_first_aired,
                 )
             last_episode = None
@@ -484,7 +495,9 @@ class ProgressRepository:
                     next_episode=next_episode,
                     last_episode=last_episode,
                     poster_url=title.poster_url if title is not None else "",
+                    poster_status=(title.poster_status if title is not None else ENRICH_STATUS_UNKNOWN),
                     status=title.status if title is not None else "",
+                    title_ratings_status=(title.ratings_status if title is not None else ENRICH_STATUS_UNKNOWN),
                     is_dropped=((bool(state.archived) or state.tracked is False) if state is not None else dropped_only),
                 )
             )

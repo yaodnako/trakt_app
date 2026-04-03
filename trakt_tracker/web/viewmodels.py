@@ -133,12 +133,22 @@ def progress_rating_chip(item, rating_with_votes) -> str:
     if next_episode is None:
         return ""
     parts: list[str] = []
-    trakt_text = rating_with_votes(getattr(next_episode, "trakt_rating", None), getattr(next_episode, "trakt_votes", None))
-    imdb_text = rating_with_votes(getattr(next_episode, "imdb_rating", None), getattr(next_episode, "imdb_votes", None))
-    if trakt_text != "n/a":
-        parts.append(f"trakt|{trakt_text}")
-    if imdb_text != "n/a":
-        parts.append(f"imdb|{imdb_text}")
+    trakt_status = getattr(next_episode, "trakt_details_status", "unknown")
+    if getattr(next_episode, "trakt_rating", None) is not None and getattr(next_episode, "trakt_votes", None) is not None:
+        trakt_text = rating_with_votes(getattr(next_episode, "trakt_rating", None), getattr(next_episode, "trakt_votes", None))
+    elif trakt_status == "checked_no_data":
+        trakt_text = "n/a"
+    else:
+        trakt_text = "Loading"
+    imdb_status = getattr(next_episode, "imdb_status", "unknown")
+    if getattr(next_episode, "imdb_rating", None) is not None and getattr(next_episode, "imdb_votes", None) is not None:
+        imdb_text = rating_with_votes(getattr(next_episode, "imdb_rating", None), getattr(next_episode, "imdb_votes", None))
+    elif imdb_status == "checked_no_data":
+        imdb_text = "n/a"
+    else:
+        imdb_text = "Loading"
+    parts.append(f"trakt|{trakt_text}")
+    parts.append(f"imdb|{imdb_text}")
     return " | ".join(parts)
 
 

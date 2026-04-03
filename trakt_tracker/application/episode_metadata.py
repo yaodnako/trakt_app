@@ -10,6 +10,7 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_UNKNOWN,
     should_attempt_enrich,
 )
+from trakt_tracker.application.enrich_queue import TASK_RESULT_SKIPPED_ALREADY_RESOLVED
 from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_history_items,
     load_cached_trakt_rating_items,
@@ -212,8 +213,105 @@ class EpisodeMetadataService:
             row.imdb_rating = enriched.imdb_rating
             row.imdb_votes = enriched.imdb_votes
         progress.next_episode.still_url = row.still_url or ""
+        progress.next_episode.still_status = row.still_status or ENRICH_STATUS_UNKNOWN
+        progress.next_episode.trakt_details_status = row.trakt_details_status or ENRICH_STATUS_UNKNOWN
         progress.next_episode.imdb_rating = row.imdb_rating
         progress.next_episode.imdb_votes = row.imdb_votes
+        progress.next_episode.imdb_status = (
+            ENRICH_STATUS_READY
+            if row.imdb_rating is not None and row.imdb_votes is not None
+            else (ENRICH_STATUS_CHECKED_NO_DATA if row.imdb_id else ENRICH_STATUS_UNKNOWN)
+        )
+
+    def select_episode_enrich_keys(self, rows: list[dict]) -> list[tuple[int, int, int]]:
+        episode_keys = [
+            (int(row["title_trakt_id"]), int(row["season"]), int(row["episode"]))
+            for row in rows
+            if row.get("type") == "show" and row.get("season") is not None and row.get("episode") is not None
+        ]
+        if not episode_keys:
+            return []
+        with self._db.session() as session:
+            metadata = self._episode_repo.metadata_by_episode_keys(session, episode_keys)
+        pending: list[tuple[int, int, int]] = []
+        for key in dict.fromkeys(episode_keys):
+            item = metadata.get(key) or {}
+            if self._episode_item_needs_enrich(item):
+                pending.append(key)
+        return pending
+
+    def episode_key_needs_enrich(self, show_trakt_id: int, season: int, episode: int) -> bool:
+        with self._db.session() as session:
+            item = self._episode_repo.metadata_by_episode_keys(session, [(show_trakt_id, season, episode)]).get(
+                (show_trakt_id, season, episode),
+                {},
+            )
+        return self._episode_item_needs_enrich(item)
+
+    def enrich_episode_key(self, show_trakt_id: int, season: int, episode: int) -> str:
+        if not self.episode_key_needs_enrich(show_trakt_id, season, episode):
+            return TASK_RESULT_SKIPPED_ALREADY_RESOLVED
+
+        with self._db.session() as session:
+            item = self._episode_repo.metadata_by_episode_keys(session, [(show_trakt_id, season, episode)]).get(
+                (show_trakt_id, season, episode),
+                {},
+            )
+        needs_details = should_attempt_enrich(
+            item.get("trakt_details_status", ENRICH_STATUS_UNKNOWN),
+            has_value=item.get("trakt_rating") is not None and item.get("trakt_votes") is not None,
+        )
+        if needs_details and self._auth is not None:
+            client = self._auth.get_client()
+            with self._db.session() as session:
+                try:
+                    details = client.get_episode_details(show_trakt_id, season, episode)
+                except Exception:
+                    self._episode_repo.update_trakt_details_enrich_state(
+                        session,
+                        show_trakt_id,
+                        season,
+                        episode,
+                        status=ENRICH_STATUS_RETRYABLE_FAILURE,
+                    )
+                else:
+                    if details is None:
+                        self._episode_repo.update_trakt_details_enrich_state(
+                            session,
+                            show_trakt_id,
+                            season,
+                            episode,
+                            status=ENRICH_STATUS_CHECKED_NO_DATA,
+                        )
+                    else:
+                        status = (
+                            ENRICH_STATUS_CHECKED_NO_DATA
+                            if details.trakt_rating is None or details.trakt_votes is None
+                            else ENRICH_STATUS_READY
+                        )
+                        self._episode_repo.update_trakt_details_enrich_state(
+                            session,
+                            show_trakt_id,
+                            season,
+                            episode,
+                            status=status,
+                            details=details,
+                        )
+        try:
+            self.enrich_episode_stills([(show_trakt_id, season, episode)])
+        except Exception:
+            pass
+
+        with self._db.session() as session:
+            item = self._episode_repo.metadata_by_episode_keys(session, [(show_trakt_id, season, episode)]).get(
+                (show_trakt_id, season, episode),
+                {},
+            )
+        if self._episode_item_needs_enrich(item):
+            return ENRICH_STATUS_RETRYABLE_FAILURE
+        if item.get("still_url") or item.get("trakt_rating") is not None or item.get("imdb_rating") is not None:
+            return ENRICH_STATUS_READY
+        return ENRICH_STATUS_CHECKED_NO_DATA
 
     def can_enrich_episode_stills(self) -> bool:
         if self._auth is None or self._tmdb_factory is None:
@@ -321,6 +419,21 @@ class EpisodeMetadataService:
         if not cached_row.imdb_id:
             return True
         return False
+
+    def _episode_item_needs_enrich(self, item: dict) -> bool:
+        return bool(
+            should_attempt_enrich(
+                item.get("trakt_details_status", ENRICH_STATUS_UNKNOWN),
+                has_value=item.get("trakt_rating") is not None and item.get("trakt_votes") is not None,
+            )
+            or (
+                self.can_enrich_episode_stills()
+                and should_attempt_enrich(
+                    item.get("still_status", ENRICH_STATUS_UNKNOWN),
+                    has_value=bool(item.get("still_url")),
+                )
+            )
+        )
 
     def _load_show_tmdb_id(self, show_trakt_id: int, client) -> int | None:
         if self._titles is not None:

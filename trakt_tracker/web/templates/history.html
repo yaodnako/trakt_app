@@ -62,168 +62,29 @@
 </section>
 {% endif %}
 
-<section class="panel">
+<section
+    class="panel"
+    id="history-page-root"
+    data-history-type="{{ history_type }}"
+    data-history-title-filter="{{ history_title_filter }}"
+    data-history-page="{{ page }}"
+>
     <div class="section-head">
         <h3>Watch history</h3>
         <p>Page {{ page }}{% if has_next %}, more items available{% endif %}</p>
     </div>
 
     {% if history_days %}
-    <section class="history-day-grid">
+    <section class="history-day-grid" data-history-day-grid>
         {% for day in history_days %}
-        <article class="history-day-card">
+        <article class="history-day-card" data-history-day-card>
             <div class="history-day-head">
                 <h4>{{ day.day_label }}</h4>
-                <span>{{ day.count }} watch{{ '' if day.count == 1 else 'es' }}</span>
+                <span class="history-day-count">{{ day.count }} watch{{ '' if day.count == 1 else 'es' }}</span>
             </div>
             <div class="history-entry-list">
                 {% for title_group in day.title_groups %}
-                <article class="history-title-card">
-                    {% set title_filter_url = "/history?type=" ~ title_group.type ~ "&title=" ~ (title_group.title|urlencode) ~ "&page=1" %}
-                    {% set trakt_title_url = "" %}
-                    {% if title_group.title_slug %}
-                        {% if title_group.type == 'show' %}
-                            {% set trakt_title_url = "https://trakt.tv/shows/" ~ title_group.title_slug %}
-                        {% elif title_group.type == 'movie' %}
-                            {% set trakt_title_url = "https://trakt.tv/movies/" ~ title_group.title_slug %}
-                        {% endif %}
-                    {% endif %}
-                    <div class="history-title-summary">
-                        <div class="history-title-heading">
-                            <a href="{{ title_filter_url }}">{{ title_group.title }}</a>
-                        </div>
-                        <a
-                            href="{{ trakt_title_url or ('/titles/' ~ title_group.type ~ '/' ~ title_group.title_trakt_id) }}"
-                            class="history-title-poster"
-                            {% if trakt_title_url %}target="_blank" rel="noreferrer"{% endif %}
-                        >
-                            {% if title_group.poster_url %}
-                            <img
-                                src="{{ title_group.poster_url|cached_image_url }}"
-                                alt="{{ title_group.title }} poster"
-                                loading="lazy"
-                                data-direct-src="{{ title_group.poster_url }}"
-                                onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
-                            >
-                            {% else %}
-                            <div class="poster-fallback">No poster</div>
-                            {% endif %}
-                            {% if title_group.title_episode_avg_rating is not none %}
-                            <div class="history-rating-badge">
-                                {{ title_group.title_episode_avg_rating|round(1) }} ★
-                            </div>
-                            {% endif %}
-                            <div class="poster-chip history-poster-chip history-title-chip">
-                                <span class="poster-chip-part">
-                                    <img
-                                        class="poster-chip-icon"
-                                        src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
-                                        alt="trakt"
-                                    >
-                                    <span>
-                                        {% if title_group.title_trakt_rating is not none %}
-                                        {{ title_group.title_trakt_rating|rating_with_votes(title_group.title_trakt_votes) }}
-                                        {% else %}
-                                        n/a
-                                        {% endif %}
-                                    </span>
-                                </span>
-                                <span class="poster-chip-part">
-                                    <img
-                                        class="poster-chip-icon"
-                                        src="{{ request.url_for('static', path='imdb_icon.png') }}"
-                                        alt="imdb"
-                                    >
-                                    <span>
-                                        {% if title_group.title_imdb_rating is not none %}
-                                        {{ title_group.title_imdb_rating|rating_with_votes(title_group.title_imdb_votes) }}
-                                        {% else %}
-                                        n/a
-                                        {% endif %}
-                                    </span>
-                                </span>
-                            </div>
-                        </a>
-                    </div>
-                    <div class="history-episode-grid">
-                        {% for row in title_group.entries %}
-                        <article class="history-episode-card{% if row.type != 'show' %} history-episode-card-compact{% endif %}">
-                            {% set episode_heading = row.episode_title or row.title %}
-                            {% set trakt_episode_url = "" %}
-                            {% if title_group.title_slug and row.type == 'show' and row.season is not none and row.episode is not none %}
-                                {% set trakt_episode_url = "https://trakt.tv/shows/" ~ title_group.title_slug ~ "/seasons/" ~ row.season ~ "/episodes/" ~ row.episode %}
-                            {% endif %}
-                            <div class="history-episode-head">
-                                <p class="history-episode-title{% if episode_heading|length > 24 %} is-long{% endif %}{% if episode_heading|length > 34 %} is-xlong{% endif %}">{{ episode_heading }}</p>
-                            </div>
-                            <div class="history-entry-still-shell">
-                                {% if row.episode_still_url %}
-                                <a
-                                    href="{{ trakt_episode_url or ('/titles/' ~ row.type ~ '/' ~ row.title_trakt_id) }}"
-                                    class="history-entry-still"
-                                    {% if trakt_episode_url %}target="_blank" rel="noreferrer"{% endif %}
-                                >
-                                    <img
-                                        src="{{ row.episode_still_url|cached_image_url }}"
-                                        alt="{{ row.episode_title or (row.season|episode_label(row.episode)) }}"
-                                        loading="lazy"
-                                        data-direct-src="{{ row.episode_still_url }}"
-                                        onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
-                                    >
-                                </a>
-                                {% else %}
-                                <div class="history-entry-still history-entry-still-empty">
-                                    <span>No preview</span>
-                                </div>
-                                {% endif %}
-                                {% if row.display_rating is not none %}
-                                <div class="history-rating-badge">{{ row.display_rating }} ★</div>
-                                {% else %}
-                                <a
-                                    class="history-rate-chip"
-                                    href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page }}&rate_trakt_id={{ row.title_trakt_id }}&rate_type={{ row.type }}&rate_season={{ row.season or '' }}&rate_episode={{ row.episode or '' }}&rate_title={{ row.title|urlencode }}"
-                                >Rate</a>
-                                {% endif %}
-                                {% if row.type == 'show' and row.season is not none and row.episode is not none %}
-                                <div class="history-episode-chip">{{ row.season|episode_label(row.episode) }}</div>
-                                {% endif %}
-                            </div>
-                            {% if row.type == 'show' and row.season is not none and row.episode is not none %}
-                            <div class="poster-chip history-episode-ratings">
-                                <span class="poster-chip-part">
-                                    <img
-                                        class="poster-chip-icon"
-                                        src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
-                                        alt="trakt"
-                                    >
-                                    <span>
-                                        {% if row.episode_trakt_rating is not none %}
-                                        {{ row.episode_trakt_rating|rating_with_votes(row.episode_trakt_votes) }}
-                                        {% else %}
-                                        n/a
-                                        {% endif %}
-                                    </span>
-                                </span>
-                                <span class="poster-chip-part">
-                                    <img
-                                        class="poster-chip-icon"
-                                        src="{{ request.url_for('static', path='imdb_icon.png') }}"
-                                        alt="imdb"
-                                    >
-                                    <span>
-                                        {% if row.episode_imdb_rating is not none %}
-                                        {{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}
-                                        {% else %}
-                                        n/a
-                                        {% endif %}
-                                    </span>
-                                </span>
-                            </div>
-                            {% endif %}
-                        </article>
-                        {% endfor %}
-                    </div>
-                </article>
+                {% include "history_title_card.html" %}
                 {% endfor %}
             </div>
         </article>
@@ -239,7 +100,7 @@
         {% endif %}
     </div>
     {% else %}
-    <div class="empty-state">
+    <div class="empty-state" data-history-empty-state>
         <h3>No history rows yet</h3>
         <p>Run sync in the desktop app or adjust the current filters.</p>
     </div>
@@ -253,42 +114,244 @@
     if (!window.fetch) {
         return;
     }
-    const reloadGuardKey = `history:reload:${window.location.pathname}${window.location.search}`;
-    const shouldAutoSync = {{ 'true' if page == 1 else 'false' }};
-    const episodeEnrichStarted = {{ 'true' if history_enrich_started else 'false' }};
-    const titleEnrichStarted = {{ 'true' if history_title_enrich_started else 'false' }};
-    const enrichStarted = episodeEnrichStarted || titleEnrichStarted;
-    let enrichSeq = {{ history_enrich_initial_seq }};
-    const canAutoReload = (() => {
-        try {
-            return window.sessionStorage.getItem(reloadGuardKey) != "1";
-        } catch (_error) {
-            return true;
-        }
-    })();
-    if (!enrichStarted) {
-        try {
-            window.sessionStorage.removeItem(reloadGuardKey);
-        } catch (_error) {
-        }
-    }
 
-    const markReloadConsumed = () => {
-        try {
-            window.sessionStorage.setItem(reloadGuardKey, "1");
-        } catch (_error) {
+    class HistoryRefreshController {
+        constructor(root) {
+            this.root = root;
+            this.page = Number(root.dataset.historyPage || "1") || 1;
+            this.historyType = root.dataset.historyType || "all";
+            this.titleFilter = root.dataset.historyTitleFilter || "";
+            this.shouldAutoSync = this.page === 1;
+            this.historySyncRunning = {{ 'true' if history_sync_running else 'false' }};
+            this.queueRevision = 0;
+            this.queueRunning = false;
+            this.pollTimer = null;
+            this.pollInFlight = false;
+            this.pollAttempts = 0;
+            this.pageChangeNotified = false;
+            this.viewportTitleKeys = new Set();
+            this.nearbyTitleKeys = new Set();
+            this.viewportObserver = null;
+            this.nearbyObserver = null;
+            this.setupObservers();
         }
-    };
-    if (shouldAutoSync && window.traktDebugMode && window.pushFlashToast) {
-        window.pushFlashToast("History auto-sync: checking…", 2400);
-    }
-    if (shouldAutoSync) {
-        fetch("/history/auto-sync", {
-            headers: {"Accept": "application/json"},
-            cache: "no-store",
-        })
-            .then((response) => response.ok ? response.json() : null)
-            .then((payload) => {
+
+        pageTitleKeys() {
+            return Array.from(this.root.querySelectorAll("[data-history-title-key]"))
+                .map((node) => node.dataset.historyTitleKey || "")
+                .filter((value) => value);
+        }
+
+        viewportKeys() {
+            const pageKeys = this.pageTitleKeys();
+            if (!this.viewportObserver) {
+                return pageKeys;
+            }
+            return pageKeys.filter((key) => this.viewportTitleKeys.has(key));
+        }
+
+        nearbyKeys() {
+            const pageKeys = this.pageTitleKeys();
+            if (!this.nearbyObserver) {
+                return [];
+            }
+            return pageKeys.filter((key) => this.nearbyTitleKeys.has(key) && !this.viewportTitleKeys.has(key));
+        }
+
+        hasRunningJobs() {
+            return Boolean(this.historySyncRunning || this.queueRunning);
+        }
+
+        setupObservers() {
+            if (!("IntersectionObserver" in window)) {
+                return;
+            }
+            this.viewportObserver = new IntersectionObserver(
+                (entries) => {
+                    for (const entry of entries) {
+                        const titleKey = entry.target.dataset.historyTitleKey || "";
+                        if (!titleKey) {
+                            continue;
+                        }
+                        if (entry.isIntersecting) {
+                            this.viewportTitleKeys.add(titleKey);
+                        } else {
+                            this.viewportTitleKeys.delete(titleKey);
+                        }
+                    }
+                },
+                {threshold: 0.01}
+            );
+            this.nearbyObserver = new IntersectionObserver(
+                (entries) => {
+                    for (const entry of entries) {
+                        const titleKey = entry.target.dataset.historyTitleKey || "";
+                        if (!titleKey) {
+                            continue;
+                        }
+                        if (entry.isIntersecting) {
+                            this.nearbyTitleKeys.add(titleKey);
+                        } else {
+                            this.nearbyTitleKeys.delete(titleKey);
+                        }
+                    }
+                },
+                {threshold: 0, rootMargin: "600px 0px"}
+            );
+            this.observeTitleCards();
+        }
+
+        observeTitleCards() {
+            if (!this.viewportObserver || !this.nearbyObserver) {
+                return;
+            }
+            this.viewportObserver.disconnect();
+            this.nearbyObserver.disconnect();
+            this.viewportTitleKeys.clear();
+            this.nearbyTitleKeys.clear();
+            for (const card of this.root.querySelectorAll("[data-history-title-key]")) {
+                this.viewportObserver.observe(card);
+                this.nearbyObserver.observe(card);
+            }
+        }
+
+        startPolling() {
+            if (this.pollTimer !== null) {
+                return;
+            }
+            this.pollOnce();
+            this.pollTimer = window.setInterval(() => this.pollOnce(), 1200);
+        }
+
+        stopPolling() {
+            if (this.pollTimer !== null) {
+                window.clearInterval(this.pollTimer);
+                this.pollTimer = null;
+            }
+        }
+
+        updateDayCards() {
+            const dayCards = Array.from(document.querySelectorAll("[data-history-day-card]"));
+            for (const dayCard of dayCards) {
+                const titleCards = Array.from(dayCard.querySelectorAll("[data-history-title-key]"));
+                if (!titleCards.length) {
+                    dayCard.remove();
+                    continue;
+                }
+                const totalEntries = titleCards.reduce((sum, card) => {
+                    const parsed = Number(card.dataset.historyEntryCount || "0");
+                    return sum + (Number.isFinite(parsed) ? parsed : 0);
+                }, 0);
+                const countNode = dayCard.querySelector(".history-day-count");
+                if (countNode) {
+                    countNode.textContent = `${totalEntries} watch${totalEntries === 1 ? "" : "es"}`;
+                }
+            }
+            const emptyState = document.querySelector("[data-history-empty-state]");
+            if (emptyState) {
+                emptyState.hidden = document.querySelectorAll("[data-history-title-key]").length > 0;
+            }
+            this.observeTitleCards();
+        }
+
+        applyRefresh(payload) {
+            const renderedGroups = Array.isArray(payload.title_groups) ? payload.title_groups : [];
+            for (const item of renderedGroups) {
+                const titleKey = String(item && item.title_key ? item.title_key : "");
+                const html = String(item && item.html ? item.html : "");
+                if (!titleKey || !html) {
+                    continue;
+                }
+                const existing = document.querySelector(`[data-history-title-key="${CSS.escape(titleKey)}"]`);
+                if (!existing) {
+                    continue;
+                }
+                const template = document.createElement("template");
+                template.innerHTML = html.trim();
+                const replacement = template.content.firstElementChild;
+                if (!replacement) {
+                    continue;
+                }
+                existing.replaceWith(replacement);
+            }
+
+            const missingGroups = Array.isArray(payload.missing_title_keys) ? payload.missing_title_keys : [];
+            for (const titleKey of missingGroups) {
+                const existing = document.querySelector(`[data-history-title-key="${CSS.escape(String(titleKey))}"]`);
+                if (existing) {
+                    existing.remove();
+                }
+            }
+
+            this.updateDayCards();
+
+            if (payload && payload.page_changed && !this.pageChangeNotified && window.pushFlashToast) {
+                window.pushFlashToast("History updated; refresh page to show new items/order.", 4200);
+                this.pageChangeNotified = true;
+            }
+        }
+
+        async pollOnce() {
+            if (this.pollInFlight) {
+                return;
+            }
+            this.pollInFlight = true;
+            this.pollAttempts += 1;
+            try {
+                const response = await fetch("/history/refresh", {
+                    method: "POST",
+                    headers: {
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    cache: "no-store",
+                    body: JSON.stringify({
+                        type: this.historyType,
+                        title_filter: this.titleFilter,
+                        page: this.page,
+                        viewport_title_keys: this.viewportKeys(),
+                        nearby_title_keys: this.nearbyKeys(),
+                        page_title_keys: this.pageTitleKeys(),
+                        queue_after_revision: this.queueRevision,
+                    }),
+                });
+                if (!response.ok) {
+                    if (this.pollAttempts > 75) {
+                        this.stopPolling();
+                    }
+                    return;
+                }
+                const payload = await response.json();
+                this.applyRefresh(payload);
+                this.historySyncRunning = Boolean(payload && payload.history_sync_running);
+                const queue = payload && typeof payload.queue === "object" ? payload.queue : null;
+                this.queueRevision = queue && Number.isFinite(queue.revision) ? Number(queue.revision) : this.queueRevision;
+                this.queueRunning = Boolean(queue && queue.running);
+                if (!this.hasRunningJobs()) {
+                    this.stopPolling();
+                }
+            } catch (_error) {
+                if (this.pollAttempts > 75) {
+                    this.stopPolling();
+                }
+            } finally {
+                this.pollInFlight = false;
+            }
+        }
+
+        async autoSync() {
+            if (!this.shouldAutoSync) {
+                return;
+            }
+            if (window.traktDebugMode && window.pushFlashToast) {
+                window.pushFlashToast("History auto-sync: checking…", 2400);
+            }
+            try {
+                const response = await fetch("/history/auto-sync", {
+                    headers: {"Accept": "application/json"},
+                    cache: "no-store",
+                });
+                const payload = response.ok ? await response.json() : null;
                 if (window.traktDebugMode && window.pushFlashToast) {
                     if (payload && payload.error) {
                         window.pushFlashToast(`History auto-sync failed: ${payload.error}`, 4200);
@@ -299,70 +362,22 @@
                     }
                 }
                 if (payload && payload.changed) {
-                    window.setTimeout(() => window.location.reload(), 350);
+                    this.startPolling();
                 }
-            })
-            .catch(() => {});
-    }
-
-    if (!enrichStarted) {
-        return;
-    }
-
-    let enrichAttempts = 0;
-    const enrichTimer = window.setInterval(async () => {
-        enrichAttempts += 1;
-        try {
-            const response = await fetch(`/debug/events?after=${enrichSeq}`, {
-                headers: {"Accept": "application/json"},
-                cache: "no-store",
-            });
-            if (!response.ok) {
-                if (enrichAttempts > 75) {
-                    window.clearInterval(enrichTimer);
-                }
-                return;
-            }
-            const payload = await response.json();
-            const events = Array.isArray(payload.events) ? payload.events : [];
-            for (const event of events) {
-                if (typeof event.seq === "number") {
-                    enrichSeq = Math.max(enrichSeq, event.seq);
-                }
-                if (episodeEnrichStarted && event.source === "History episode enrich" && String(event.message || "").includes("completed.")) {
-                    window.clearInterval(enrichTimer);
-                    if (canAutoReload) {
-                        markReloadConsumed();
-                        window.location.reload();
-                    }
-                    return;
-                }
-                if (!episodeEnrichStarted && titleEnrichStarted && event.source === "History title enrich" && String(event.message || "").includes("completed.")) {
-                    window.clearInterval(enrichTimer);
-                    if (canAutoReload) {
-                        markReloadConsumed();
-                        window.location.reload();
-                    }
-                    return;
-                }
-                if (episodeEnrichStarted && event.source === "History episode enrich" && String(event.message || "").includes("failed:")) {
-                    window.clearInterval(enrichTimer);
-                    return;
-                }
-                if (!episodeEnrichStarted && titleEnrichStarted && event.source === "History title enrich" && String(event.message || "").includes("failed:")) {
-                    window.clearInterval(enrichTimer);
-                    return;
-                }
-            }
-            if (enrichAttempts > 75) {
-                window.clearInterval(enrichTimer);
-            }
-        } catch (_error) {
-            if (enrichAttempts > 75) {
-                window.clearInterval(enrichTimer);
+            } catch (_error) {
             }
         }
-    }, 1200);
+    }
+
+    const root = document.getElementById("history-page-root");
+    if (!root) {
+        return;
+    }
+    const controller = new HistoryRefreshController(root);
+    if (controller.pageTitleKeys().length || controller.hasRunningJobs()) {
+        controller.startPolling();
+    }
+    controller.autoSync();
 })();
 </script>
 {% endblock %}

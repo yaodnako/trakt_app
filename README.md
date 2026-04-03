@@ -1,15 +1,15 @@
 # Trakt Tracker
 
-Краткая точка входа для нового чата и новой сессии по проекту.
+Короткая входная точка для нового чата и новой сессии по проекту.
 
 ## Что это сейчас
 
-- `web` на `FastAPI + Jinja2` теперь основной рабочий интерфейс
-- `desktop` на `PySide6` остаётся вторым UI поверх того же Python core и той же SQLite
+- `web` на `FastAPI + Jinja2` — основной рабочий UI
+- `desktop` на `PySide6` — второй UI поверх того же Python core и той же SQLite
 - source of truth:
   - `Trakt` для history / ratings / progress / calendar
   - `TMDb` для artwork и части metadata
-  - official `IMDb datasets` для IMDb ratings/votes
+  - official `IMDb datasets` для IMDb ratings / votes
 
 ## Что читать в новом чате
 
@@ -43,30 +43,45 @@ Visual checks:
 
 - [capture_web_ui.bat](/D:/CodexProjects/Trakt_app/capture_web_ui.bat)
 - [tools/capture_web_screens.py](/D:/CodexProjects/Trakt_app/tools/capture_web_screens.py)
-- screenshots go to [generated/ui_checks](/D:/CodexProjects/Trakt_app/generated/ui_checks)
+- screenshots идут в [generated/ui_checks](/D:/CodexProjects/Trakt_app/generated/ui_checks)
 
-## Где проект сейчас по архитектуре
+## Что уже стабилизировано
 
-Уже вынесены отдельные слои:
+Большой stabilization/refactor цикл для `History + Progress` на core/data-flow уровне уже проведен:
 
-- [sync_policy.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/sync_policy.py)
-- [operations.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/operations.py)
-- [history_sync.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_sync.py)
-- [progress_sync.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/progress_sync.py)
-- [notification_refresh.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/notification_refresh.py)
-- [catalog.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/catalog.py)
-- [history.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history.py)
-- [interactions.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/interactions.py)
-- [history_read_model.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_read_model.py)
-- [episode_metadata.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/episode_metadata.py)
-- [trakt_payload_cache.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/trakt_payload_cache.py)
-
-Это уже лучше, чем исходный монолитный `services.py`, но рефактор ещё не завершён.
+- Phase 1:
+  - SQLite стала источником истины для enrich state
+  - title / episode metadata больше не живут только в file cache
+  - sync не должен сносить уже найденные poster / still / ratings
+- Phase 2:
+  - `History` ушла от reload-driven convergence
+  - page-specific refresh идет через JSON patch path, а не через `window.location.reload()`
+- Phase 3:
+  - введена visible-first enrich queue
+  - queue делает dedupe, priority и ограничение concurrency
+- Phase 4:
+  - `History` получила стабильные loading / empty semantics без misleading `n/a`
+- Phase 5:
+  - `Progress` переведен на тот же shared enrich core и queue path
+  - normal page render больше не должен opportunistically тянуть network enrich
 
 ## Что важно помнить
 
 - `desktop` и `web` делят одну SQLite и один core
-- sync / ratings / progress всё ещё чувствительные места
-- при вопросах про “почему что-то не обновилось” сначала смотреть `STATE.md`
-- при вопросах про дальнейший рефактор сначала смотреть `ARCHITECTURE.md`
-- для web UI-проверок использовать локальные screenshots через `capture_web_ui.bat`
+- `History` и `Progress` теперь используют общий enrich-state model и общую queue
+- `History` и `Progress` читают metadata из одних и тех же таблиц:
+  - `titles`
+  - `episodes_cache`
+- file caches теперь только provider response caches, а не decision authority
+- если что-то визуально выглядит не так, сначала надо проверять:
+  - что лежит в SQLite
+  - какой enrich status у row
+  - не крутится ли queue в `retryable_failure`
+
+## Как работать дальше
+
+- не продолжать старые гипотезы вслепую
+- сначала проверять фактическое состояние в `STATE.md`
+- для архитектурных решений сначала проверять `ARCHITECTURE.md`
+- для UI-правок обязательно делать локальный screenshot check
+- если возникает новый баг, описывать его как отдельный дефект, а не смешивать с предыдущими ветками
