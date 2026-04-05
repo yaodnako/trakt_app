@@ -32,7 +32,10 @@ class AppConfig:
     omdb_api_key: str = ""
     cache_ttl_hours: int = 24
     poll_interval_minutes: int = 30
+    notification_repeat_minutes: int = 5
+    imdb_auto_sync_interval_minutes: int = 180
     imdb_auto_sync_interval_hours: int = 3
+    notification_sound_path: str = ""
     notifications_enabled: bool = True
     debug_mode: bool = False
     utc_offset: str = "+03:00"
@@ -60,6 +63,10 @@ class ConfigStore:
         if not self._path.exists():
             return AppConfig()
         raw = json.loads(self._path.read_text(encoding="utf-8"))
+        if "imdb_auto_sync_interval_minutes" not in raw:
+            raw["imdb_auto_sync_interval_minutes"] = max(1, int(raw.get("imdb_auto_sync_interval_hours", 3) or 3) * 60)
+        if "imdb_auto_sync_interval_hours" not in raw:
+            raw["imdb_auto_sync_interval_hours"] = max(1, int(raw["imdb_auto_sync_interval_minutes"]) // 60 or 1)
         return AppConfig(**raw)
 
     def save(self, config: AppConfig) -> None:

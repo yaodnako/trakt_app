@@ -31,7 +31,7 @@ class NotificationRefreshWorkflow:
         config = self._config_store.load()
         if not config.notifications_enabled:
             return []
-        repeat_interval = timedelta(minutes=max(1, int(config.poll_interval_minutes or 1)))
+        repeat_interval = timedelta(minutes=max(1, int(config.notification_repeat_minutes or 1)))
         client = self._auth.get_client()
         now = datetime.now(tz=UTC)
         start_date = (now - timedelta(days=self._CALENDAR_LOOKBACK_DAYS)).date().isoformat()

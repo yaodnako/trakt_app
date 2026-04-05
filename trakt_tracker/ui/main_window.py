@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QRect, QRunnable, QThread, QThreadPool, QTimer, Qt, Signal, QObject, QSize
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1144,18 +1145,18 @@ class IMDbDatasetSyncWorker(QThread):
     sync_failed = Signal(str)
     status_changed = Signal(str)
 
-    def __init__(self, services: ServiceContainer, force: bool = False, interval_hours: int | None = None) -> None:
+    def __init__(self, services: ServiceContainer, force: bool = False, interval_minutes: int | None = None) -> None:
         super().__init__()
         self.services = services
         self.force = force
-        self.interval_hours = interval_hours
+        self.interval_minutes = interval_minutes
 
     def run(self) -> None:
         try:
-            if self.interval_hours is None:
+            if self.interval_minutes is None:
                 changed = self.services.sync.sync_imdb_dataset(force=self.force, status_callback=self.status_changed.emit)
             else:
-                changed = self.services.sync.maybe_sync_imdb_dataset(self.interval_hours, status_callback=self.status_changed.emit)
+                changed = self.services.sync.maybe_sync_imdb_dataset(self.interval_minutes, status_callback=self.status_changed.emit)
         except Exception as exc:
             self.sync_failed.emit(str(exc))
             return
@@ -1400,17 +1401,24 @@ class MainWindow(QMainWindow):
         self.tmdb_token_edit = QLineEdit()
         self.tmdb_api_key_edit = QLineEdit()
         self.kinopoisk_api_key_edit = QLineEdit()
+        self.notification_sound_path_edit = QLineEdit()
         self.embedded_player_checkbox = QCheckBox("Open Kinopoisk in embedded player")
         self.cache_ttl_edit = QSpinBox()
         self.cache_ttl_edit.setRange(1, 168)
         self.poll_interval_edit = QSpinBox()
         self.poll_interval_edit.setRange(5, 240)
+        self.notification_repeat_edit = QSpinBox()
+        self.notification_repeat_edit.setRange(1, 240)
         self.imdb_auto_sync_interval_edit = QSpinBox()
-        self.imdb_auto_sync_interval_edit.setRange(1, 168)
+        self.imdb_auto_sync_interval_edit.setRange(1, 10080)
         self.utc_offset_edit = QLineEdit()
         self.notifications_checkbox = QCheckBox("Enable Windows notifications")
         self.debug_mode_checkbox = QCheckBox("Enable debug toasts")
         self.imdb_status_label = QLabel()
+        self._notification_audio_output = QAudioOutput(self)
+        self._notification_audio_output.setVolume(1.0)
+        self._notification_sound_player = QMediaPlayer(self)
+        self._notification_sound_player.setAudioOutput(self._notification_audio_output)
         self._imdb_sync_worker: IMDbDatasetSyncWorker | None = None
         self._imdb_sync_background = False
 
@@ -1707,11 +1715,13 @@ class MainWindow(QMainWindow):
         form.addRow("TMDb Read Token", inline_row(self.tmdb_token_edit, clear_tmdb_cache_btn))
         form.addRow("TMDb API Key", inline_row(self.tmdb_api_key_edit))
         form.addRow("Kinopoisk API Key", inline_row(self.kinopoisk_api_key_edit))
+        form.addRow("Notification sound", inline_row(self.notification_sound_path_edit))
         form.addRow("Playback", inline_row(self.embedded_player_checkbox))
         form.addRow("UTC offset", inline_row(self.utc_offset_edit))
         form.addRow("IMDb Dataset", inline_row(self.imdb_status_label, clear_imdb_btn))
-        form.addRow("IMDb Auto-sync (hours)", inline_row(self.imdb_auto_sync_interval_edit))
+        form.addRow("IMDb Auto-sync (minutes)", inline_row(self.imdb_auto_sync_interval_edit))
         form.addRow("Cache TTL (hours)", inline_row(self.cache_ttl_edit, clear_trakt_cache_btn))
+        form.addRow("Notification repeat (minutes)", inline_row(self.notification_repeat_edit))
         form.addRow("Polling interval (minutes)", inline_row(self.poll_interval_edit, sync_imdb_btn, self.notifications_checkbox, self.debug_mode_checkbox))
 
         save_row = QHBoxLayout()
@@ -1737,6 +1747,7 @@ class MainWindow(QMainWindow):
         self.tmdb_token_edit.setText(config.tmdb_read_access_token)
         self.tmdb_api_key_edit.setText(config.tmdb_api_key)
         self.kinopoisk_api_key_edit.setText(config.kinopoisk_api_key)
+        self.notification_sound_path_edit.setText(config.notification_sound_path)
         self.utc_offset_edit.setText(config.utc_offset)
         self.embedded_player_checkbox.setChecked(config.open_in_embedded_player)
         self.hide_upcoming_checkbox.blockSignals(True)
@@ -1753,7 +1764,8 @@ class MainWindow(QMainWindow):
         self.progress_min_year_spin.blockSignals(False)
         self.cache_ttl_edit.setValue(config.cache_ttl_hours)
         self.poll_interval_edit.setValue(config.poll_interval_minutes)
-        self.imdb_auto_sync_interval_edit.setValue(config.imdb_auto_sync_interval_hours)
+        self.notification_repeat_edit.setValue(config.notification_repeat_minutes)
+        self.imdb_auto_sync_interval_edit.setValue(config.imdb_auto_sync_interval_minutes)
         self.notifications_checkbox.setChecked(config.notifications_enabled)
         self.debug_mode_checkbox.setChecked(config.debug_mode)
         self.imdb_status_label.setText(self.services.sync.imdb_dataset_status())
@@ -1809,7 +1821,10 @@ class MainWindow(QMainWindow):
         )
         config.cache_ttl_hours = self.cache_ttl_edit.value()
         config.poll_interval_minutes = self.poll_interval_edit.value()
-        config.imdb_auto_sync_interval_hours = self.imdb_auto_sync_interval_edit.value()
+        config.notification_repeat_minutes = self.notification_repeat_edit.value()
+        config.imdb_auto_sync_interval_minutes = self.imdb_auto_sync_interval_edit.value()
+        config.imdb_auto_sync_interval_hours = max(1, config.imdb_auto_sync_interval_minutes // 60 or 1)
+        config.notification_sound_path = self.notification_sound_path_edit.text().strip()
         config.notifications_enabled = self.notifications_checkbox.isChecked()
         config.debug_mode = self.debug_mode_checkbox.isChecked()
         config.open_in_embedded_player = self.embedded_player_checkbox.isChecked()
@@ -2649,11 +2664,11 @@ class MainWindow(QMainWindow):
     def _maybe_background_imdb_sync(self) -> None:
         if self._imdb_sync_worker is not None and self._imdb_sync_worker.isRunning():
             return
-        interval_hours = max(1, int(self.services.auth.config.imdb_auto_sync_interval_hours or 1))
-        if not self.services.sync.should_auto_sync_imdb_dataset(interval_hours):
+        interval_minutes = max(1, int(self.services.auth.config.imdb_auto_sync_interval_minutes or 1))
+        if not self.services.sync.should_auto_sync_imdb_dataset(interval_minutes):
             return
         self._imdb_sync_background = True
-        self._imdb_sync_worker = IMDbDatasetSyncWorker(self.services, interval_hours=interval_hours)
+        self._imdb_sync_worker = IMDbDatasetSyncWorker(self.services, interval_minutes=interval_minutes)
         self._imdb_sync_worker.status_changed.connect(self._on_imdb_sync_status_changed)
         self._imdb_sync_worker.sync_completed.connect(self._on_imdb_sync_completed)
         self._imdb_sync_worker.sync_failed.connect(self._on_imdb_sync_failed)
@@ -2698,7 +2713,7 @@ class MainWindow(QMainWindow):
         try:
             items = self.services.notifications.poll_upcoming()
             if items:
-                QApplication.beep()
+                self._play_notification_sound()
                 QApplication.alert(self, 4000)
                 if self._tray_icon.isVisible():
                     summary_lines = [f"{item['show_title']} — {item['message']}" for item in items[:3]]
@@ -2715,9 +2730,22 @@ class MainWindow(QMainWindow):
             pass
         self._maybe_background_imdb_sync()
 
+    def _play_notification_sound(self) -> None:
+        sound_path = Path(str(self.services.auth.config.notification_sound_path or "")).expanduser()
+        if sound_path.exists() and sound_path.is_file():
+            self._notification_sound_player.stop()
+            self._notification_sound_player.setSource(QUrl.fromLocalFile(str(sound_path)))
+            self._notification_sound_player.play()
+            return
+        QApplication.beep()
+
     def _start_timer(self) -> None:
         self._timer.stop()
-        interval_ms = self.services.auth.config.poll_interval_minutes * 60 * 1000
+        interval_minutes = min(
+            max(1, int(self.services.auth.config.poll_interval_minutes or 1)),
+            max(1, int(self.services.auth.config.notification_repeat_minutes or 1)),
+        )
+        interval_ms = interval_minutes * 60 * 1000
         self._timer.start(interval_ms)
 
     def refresh_all(self) -> None:

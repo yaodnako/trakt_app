@@ -302,25 +302,33 @@ class SyncService:
         self._episode_metadata.enrich_episode_imdb_ratings()
         return changed
 
-    def should_auto_sync_imdb_dataset(self, interval_hours: int) -> bool:
-        interval = max(1, int(interval_hours or 1))
+    def should_auto_sync_imdb_dataset(self, interval_minutes: int) -> bool:
+        interval = max(1, int(interval_minutes or 1))
         with self._db.session() as session:
             raw = self._sync_state.get_value(session, self.IMDB_AUTO_SYNC_KEY, "")
         last_sync_at = SyncPolicy.parse_timestamp(raw)
         if last_sync_at is None:
             return True
-        return datetime.now(tz=UTC) - last_sync_at >= timedelta(hours=interval)
+        if not self._imdb_client.is_ready():
+            return True
+        modified = datetime.fromtimestamp(self._imdb_client.db_path.stat().st_mtime, tz=UTC)
+        if modified + timedelta(minutes=5) < last_sync_at:
+            return True
+        return datetime.now(tz=UTC) - last_sync_at >= timedelta(minutes=interval)
 
-    def maybe_sync_imdb_dataset(self, interval_hours: int, status_callback=None) -> bool:
-        interval = max(1, int(interval_hours or 1))
+    def maybe_sync_imdb_dataset(self, interval_minutes: int, status_callback=None) -> bool:
+        interval = max(1, int(interval_minutes or 1))
         now = datetime.now(tz=UTC)
         with self._db.session() as session:
             raw = self._sync_state.get_value(session, self.IMDB_AUTO_SYNC_KEY, "")
             last_sync_at = SyncPolicy.parse_timestamp(raw)
-            if last_sync_at is not None and now - last_sync_at < timedelta(hours=interval):
+            if last_sync_at is not None and now - last_sync_at < timedelta(minutes=interval):
                 return False
-            self._sync_state.set_value(session, self.IMDB_AUTO_SYNC_KEY, now.isoformat())
-        return self.sync_imdb_dataset(force=False, status_callback=status_callback)
+        changed = self.sync_imdb_dataset(force=True, status_callback=status_callback)
+        if changed or not self._imdb_client.is_stale():
+            with self._db.session() as session:
+                self._sync_state.set_value(session, self.IMDB_AUTO_SYNC_KEY, now.isoformat())
+        return changed
 
     def clear_imdb_dataset(self) -> None:
         self._imdb_client.clear()

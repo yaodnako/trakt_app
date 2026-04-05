@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import mimetypes
+import shutil
 from pathlib import Path
 from threading import Lock, Thread
 from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from trakt_tracker.application.services import ServiceContainer
-from trakt_tracker.config import ConfigStore, normalize_utc_offset
+from trakt_tracker.config import ConfigStore, get_app_data_dir, normalize_utc_offset
 from trakt_tracker.infrastructure.cache import BinaryCache
 from trakt_tracker.web.app_shared import image_cache_suffix
 from trakt_tracker.web.viewmodels import parse_bool_flag
@@ -41,6 +42,14 @@ def register_system_routes(app, *, render, template_filters) -> None:
             return Response(content=stale_payload, media_type=media_type or "image/jpeg")
         _warm_image_cache_in_background(cache, target_url, timeout=5)
         return RedirectResponse(url=target_url, status_code=307)
+
+    @app.get("/notification-sound")
+    async def notification_sound(request: Request) -> Response:
+        sound_path = Path(str(request.app.state.services.auth.config.notification_sound_path or "")).expanduser()
+        if not sound_path.exists() or not sound_path.is_file():
+            return Response(status_code=404)
+        media_type, _ = mimetypes.guess_type(str(sound_path))
+        return FileResponse(sound_path, media_type=media_type or "audio/mpeg")
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request, flash: str = "") -> HTMLResponse:
@@ -79,14 +88,33 @@ def register_system_routes(app, *, render, template_filters) -> None:
         except ValueError:
             poll_interval_minutes = config.poll_interval_minutes
         try:
-            imdb_auto_sync_interval_hours = int(
-                str(form.get("imdb_auto_sync_interval_hours", config.imdb_auto_sync_interval_hours) or config.imdb_auto_sync_interval_hours)
+            notification_repeat_minutes = int(
+                str(form.get("notification_repeat_minutes", config.notification_repeat_minutes) or config.notification_repeat_minutes)
             )
         except ValueError:
-            imdb_auto_sync_interval_hours = config.imdb_auto_sync_interval_hours
+            notification_repeat_minutes = config.notification_repeat_minutes
+        try:
+            imdb_auto_sync_interval_minutes = int(
+                str(form.get("imdb_auto_sync_interval_minutes", config.imdb_auto_sync_interval_minutes) or config.imdb_auto_sync_interval_minutes)
+            )
+        except ValueError:
+            imdb_auto_sync_interval_minutes = config.imdb_auto_sync_interval_minutes
+        notification_sound_path = str(form.get("notification_sound_path", config.notification_sound_path) or "").strip()
+        uploaded_sound = form.get("notification_sound_file")
+        if uploaded_sound is not None and getattr(uploaded_sound, "filename", ""):
+            filename = Path(str(uploaded_sound.filename)).name
+            destination_dir = get_app_data_dir() / "notification_sounds"
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            destination = destination_dir / filename
+            with destination.open("wb") as handle:
+                shutil.copyfileobj(uploaded_sound.file, handle)
+            notification_sound_path = str(destination)
         config.cache_ttl_hours = max(1, min(168, cache_ttl_hours))
         config.poll_interval_minutes = max(5, min(240, poll_interval_minutes))
-        config.imdb_auto_sync_interval_hours = max(1, min(168, imdb_auto_sync_interval_hours))
+        config.notification_repeat_minutes = max(1, min(240, notification_repeat_minutes))
+        config.imdb_auto_sync_interval_minutes = max(1, min(10080, imdb_auto_sync_interval_minutes))
+        config.imdb_auto_sync_interval_hours = max(1, config.imdb_auto_sync_interval_minutes // 60 or 1)
+        config.notification_sound_path = notification_sound_path
         config.notifications_enabled = parse_bool_flag(str(form.get("notifications_enabled", "")))
         config.debug_mode = parse_bool_flag(str(form.get("debug_mode", "")))
         config.open_in_embedded_player = parse_bool_flag(str(form.get("open_in_embedded_player", "")))
@@ -144,12 +172,20 @@ def register_system_routes(app, *, render, template_filters) -> None:
     @app.get("/notifications/poll")
     async def notifications_poll(request: Request) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
         if not services.auth.is_authorized():
             return JSONResponse({"items": []})
         try:
             items = services.notifications.poll_upcoming(send_native=False)
         except Exception:
             items = []
+        if items:
+            bg_tasks.start(
+                "progress_sync",
+                source="Progress sync (notification)",
+                operations=services.operations,
+                fn=lambda: services.progress.sync_progress(dropped_only=False),
+            )
         return JSONResponse({"items": items})
 
     @app.get("/debug/events")

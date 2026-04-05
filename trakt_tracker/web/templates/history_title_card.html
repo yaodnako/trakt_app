@@ -84,6 +84,8 @@
             {% set still_status = row.episode_still_status or 'unknown' %}
             {% set trakt_status = row.episode_trakt_status or 'unknown' %}
             {% set imdb_status = row.episode_imdb_status or 'unknown' %}
+            {% set preview_url = row.episode_still_url or title_group.poster_url %}
+            {% set preview_alt = (row.episode_title or (row.season|episode_label(row.episode)) or title_group.title) ~ (' still' if row.episode_still_url else ' poster') %}
             {% if title_group.title_slug and row.type == 'show' and row.season is not none and row.episode is not none %}
                 {% set trakt_episode_url = "https://trakt.tv/shows/" ~ title_group.title_slug ~ "/seasons/" ~ row.season ~ "/episodes/" ~ row.episode %}
             {% endif %}
@@ -91,21 +93,21 @@
                 <p class="history-episode-title{% if episode_heading|length > 24 %} is-long{% endif %}{% if episode_heading|length > 34 %} is-xlong{% endif %}">{{ episode_heading }}</p>
             </div>
             <div class="history-entry-still-shell">
-                {% if row.episode_still_url %}
+                {% if preview_url %}
                 <a
                     href="{{ trakt_episode_url or ('/titles/' ~ row.type ~ '/' ~ row.title_trakt_id) }}"
                     class="history-entry-still"
                     {% if trakt_episode_url %}target="_blank" rel="noreferrer"{% endif %}
                 >
                     <img
-                        src="{{ row.episode_still_url|cached_image_url }}"
-                        alt="{{ row.episode_title or (row.season|episode_label(row.episode)) }}"
+                        src="{{ preview_url|cached_image_url }}"
+                        alt="{{ preview_alt }}"
                         loading="lazy"
-                        data-direct-src="{{ row.episode_still_url }}"
+                        data-direct-src="{{ preview_url }}"
                         onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
                     >
                 </a>
-                {% elif still_status == 'checked_no_data' %}
+                {% elif still_status == 'checked_no_data' or still_status == 'retryable_failure' %}
                 <div class="history-entry-still history-entry-still-empty">
                     <span>No preview</span>
                 </div>

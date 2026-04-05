@@ -410,6 +410,10 @@
     if (controller.pageCardKeys().length || controller.hasRunningJobs()) {
         controller.startPolling();
     }
+    window.addEventListener("trakt-notifications-received", () => {
+        controller.progressSyncRunning = true;
+        controller.startPolling();
+    });
 })();
 </script>
 {% endblock %}

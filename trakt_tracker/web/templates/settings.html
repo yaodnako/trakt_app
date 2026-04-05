@@ -5,7 +5,7 @@
     <div class="section-head">
         <h2>Settings</h2>
     </div>
-    <form method="post" action="/settings" class="settings-form" id="settings-form">
+    <form method="post" action="/settings" class="settings-form" id="settings-form" enctype="multipart/form-data">
         <label>
             <span>Client ID</span>
             <input type="text" name="client_id" value="{{ config.client_id }}">
@@ -38,10 +38,14 @@
             <span>Polling interval (minutes)</span>
             <input type="number" name="poll_interval_minutes" min="5" max="240" value="{{ config.poll_interval_minutes }}">
         </label>
+        <label>
+            <span>Notification repeat (minutes)</span>
+            <input type="number" name="notification_repeat_minutes" min="1" max="240" value="{{ config.notification_repeat_minutes }}">
+        </label>
         <div class="settings-row settings-sync-row">
             <label class="settings-inline-field">
-                <span>IMDb auto-sync (hours)</span>
-                <input type="number" name="imdb_auto_sync_interval_hours" min="1" max="168" value="{{ config.imdb_auto_sync_interval_hours }}">
+                <span>IMDb auto-sync (minutes)</span>
+                <input type="number" name="imdb_auto_sync_interval_minutes" min="1" max="10080" value="{{ config.imdb_auto_sync_interval_minutes }}">
             </label>
             <button
                 type="submit"
@@ -55,6 +59,15 @@
                 <span>Last updated</span>
                 <strong data-imdb-current-status>{{ imdb_sync_status }}</strong>
             </div>
+        </div>
+        <label>
+            <span>Notification sound path</span>
+            <input type="text" name="notification_sound_path" value="{{ config.notification_sound_path }}" placeholder="C:\\Sounds\\notify.mp3 or .wav">
+        </label>
+        <div class="settings-inline-actions">
+            <input type="file" name="notification_sound_file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" data-notification-sound-picker hidden>
+            <button type="button" class="button ghost" data-browse-notification-sound>Browse...</button>
+            <button type="button" class="button ghost" data-test-notification-sound>Test sound</button>
         </div>
         <section
             class="settings-sync-status {% if not imdb_sync_running %}is-hidden{% endif %}"
@@ -107,6 +120,11 @@
     const progressNode = root.querySelector("[data-imdb-progress]");
     const logNode = root.querySelector("[data-imdb-log]");
     const syncButton = document.querySelector("[data-imdb-sync-button]");
+    const soundPathInput = document.querySelector('input[name="notification_sound_path"]');
+    const soundPickerInput = document.querySelector("[data-notification-sound-picker]");
+    const browseSoundButton = document.querySelector("[data-browse-notification-sound]");
+    const testSoundButton = document.querySelector("[data-test-notification-sound]");
+    let pendingSoundObjectUrl = "";
     let after = Number(root.dataset.after || "0");
     let keepVisibleUntil = root.classList.contains("is-hidden") ? 0 : Date.now() + 15000;
     let lastProgressMessage = "";
@@ -191,6 +209,40 @@
         syncButton.addEventListener("click", () => {
             keepVisibleUntil = Date.now() + 15000;
             setPanelVisible(true);
+        });
+    }
+
+    if (browseSoundButton && soundPickerInput && soundPathInput) {
+        browseSoundButton.addEventListener("click", () => {
+            soundPickerInput.click();
+        });
+        soundPickerInput.addEventListener("change", () => {
+            const file = soundPickerInput.files && soundPickerInput.files[0];
+            if (!file) {
+                return;
+            }
+            soundPathInput.value = file.name;
+            if (pendingSoundObjectUrl) {
+                URL.revokeObjectURL(pendingSoundObjectUrl);
+            }
+            pendingSoundObjectUrl = URL.createObjectURL(file);
+        });
+    }
+
+    if (testSoundButton) {
+        testSoundButton.addEventListener("click", () => {
+            if (pendingSoundObjectUrl) {
+                const previewAudio = new Audio(pendingSoundObjectUrl);
+                previewAudio.play().catch(() => {
+                    if (window.traktPlayAlertTone) {
+                        window.traktPlayAlertTone();
+                    }
+                });
+                return;
+            }
+            if (window.traktPlayAlertTone) {
+                window.traktPlayAlertTone();
+            }
         });
     }
 

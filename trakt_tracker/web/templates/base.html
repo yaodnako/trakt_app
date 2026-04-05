@@ -50,10 +50,12 @@
             }
 
             const DEBUG_MODE = {{ 'true' if debug_mode else 'false' }};
+            const NOTIFICATION_SOUND_URL = {{ notification_sound_url|tojson }};
             const PLAY_PROMPT_STORAGE_KEY = "trakt-progress-play-prompts";
             let lastDebugSeq = {{ debug_initial_seq }};
             let audioContext = null;
             let audioUnlocked = false;
+            let alertAudio = null;
 
             function pushFlashToast(message, timeoutMs = 4200) {
                 const stack = document.getElementById("web-flash-stack");
@@ -72,7 +74,7 @@
             window.pushFlashToast = pushFlashToast;
             window.traktDebugMode = DEBUG_MODE;
 
-            function playAlertTone() {
+            function playFallbackTone() {
                 try {
                     audioContext = audioContext || new (window.AudioContext || window.webkitAudioContext)();
                     if (audioContext.state === "suspended") {
@@ -93,6 +95,31 @@
                 }
             }
 
+            function playConfiguredNotificationSound() {
+                if (!NOTIFICATION_SOUND_URL) {
+                    return false;
+                }
+                try {
+                    alertAudio = alertAudio || new Audio(NOTIFICATION_SOUND_URL);
+                    alertAudio.currentTime = 0;
+                    const playPromise = alertAudio.play();
+                    if (playPromise && typeof playPromise.catch === "function") {
+                        playPromise.catch(() => playFallbackTone());
+                    }
+                    return true;
+                } catch (_error) {
+                    return false;
+                }
+            }
+
+            function playAlertTone() {
+                if (playConfiguredNotificationSound()) {
+                    return;
+                }
+                playFallbackTone();
+            }
+            window.traktPlayAlertTone = playAlertTone;
+
             function unlockAudio() {
                 if (audioUnlocked) {
                     return;
@@ -100,6 +127,10 @@
                 try {
                     audioContext = audioContext || new (window.AudioContext || window.webkitAudioContext)();
                     audioContext.resume().catch(() => {});
+                    if (NOTIFICATION_SOUND_URL) {
+                        alertAudio = alertAudio || new Audio(NOTIFICATION_SOUND_URL);
+                        alertAudio.load();
+                    }
                     audioUnlocked = true;
                 } catch (_error) {
                 }
@@ -304,6 +335,7 @@
                     if (!items.length) {
                         return;
                     }
+                    window.dispatchEvent(new CustomEvent("trakt-notifications-received", {detail: {items}}));
                     playAlertTone();
                     showInPageNotifications(items);
                     const permission = await ensureNotificationPermission();

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from time import perf_counter
 from urllib.parse import quote
 
@@ -92,6 +92,42 @@ class _BackgroundTaskManager:
     def has_running_prefix(self, *prefixes: str) -> bool:
         with self._lock:
             return any(any(item.startswith(prefix) for prefix in prefixes) for item in self._running)
+
+
+class _IMDbAutoSyncLoop:
+    def __init__(self, app: FastAPI, *, poll_interval_seconds: float = 30.0) -> None:
+        self._app = app
+        self._poll_interval_seconds = max(5.0, float(poll_interval_seconds))
+        self._stop_event = Event()
+        self._thread = Thread(target=self._run, name="web-imdb-auto-sync", daemon=True)
+
+    def start(self) -> None:
+        if not self._thread.is_alive():
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                services: ServiceContainer = self._app.state.services
+                bg_tasks = self._app.state.bg_tasks
+                interval_minutes = max(1, int(services.auth.config.imdb_auto_sync_interval_minutes or 1))
+                if services.sync.should_auto_sync_imdb_dataset(interval_minutes):
+                    bg_tasks.start(
+                        "imdb_auto_sync",
+                        source="IMDb sync (auto)",
+                        operations=services.operations,
+                        fn=lambda: services.sync.maybe_sync_imdb_dataset(
+                            interval_minutes,
+                            status_callback=lambda message: services.operations.publish("IMDb sync", message),
+                        ),
+                    )
+            except Exception:
+                pass
+            self._stop_event.wait(self._poll_interval_seconds)
 
 
 def _build_services_with_profiling() -> ServiceContainer:
@@ -186,6 +222,7 @@ def create_app() -> FastAPI:
     app.state.request_timing_log = get_app_data_dir() / "web_request_timings.log"
     app.state.image_cache = BinaryCache("images")
     app.state.bg_tasks = _BackgroundTaskManager()
+    app.state.imdb_auto_sync_loop = _IMDbAutoSyncLoop(app)
 
     templates = _build_templates()
     static_dir = Path(__file__).with_name("static")
@@ -212,31 +249,28 @@ def create_app() -> FastAPI:
                     handle.write(log_line)
             except OSError:
                 pass
-            if (
-                request.url.path not in {"/cached-image", "/debug/events"}
-                and not request.url.path.startswith("/static")
-            ):
-                services: ServiceContainer = request.app.state.services
-                bg_tasks = request.app.state.bg_tasks
-                interval_hours = max(1, int(services.auth.config.imdb_auto_sync_interval_hours or 1))
-                if services.sync.should_auto_sync_imdb_dataset(interval_hours):
-                    bg_tasks.start(
-                        "imdb_auto_sync",
-                        source="IMDb sync (auto)",
-                        operations=services.operations,
-                        fn=lambda: services.sync.maybe_sync_imdb_dataset(
-                            interval_hours,
-                            status_callback=lambda message: services.operations.publish("IMDb sync", message),
-                        ),
-                    )
+
+    @app.on_event("startup")
+    async def start_background_loops() -> None:
+        app.state.imdb_auto_sync_loop.start()
+
+    @app.on_event("shutdown")
+    async def stop_background_loops() -> None:
+        app.state.imdb_auto_sync_loop.stop()
 
     def render(request: Request, template_name: str, context: dict, status_code: int = 200) -> HTMLResponse:
+        sound_path = Path(str(request.app.state.services.auth.config.notification_sound_path or "")).expanduser()
+        notification_sound_url = ""
+        if sound_path.exists() and sound_path.is_file():
+            stamp = int(sound_path.stat().st_mtime)
+            notification_sound_url = f"/notification-sound?v={stamp}"
         base_context = {
             "request": request,
             "current_path": request.url.path,
             "authorized": request.app.state.services.auth.is_authorized(),
             "configured": request.app.state.services.auth.is_configured(),
             "settings_utc_offset": request.app.state.services.auth.config.utc_offset,
+            "notification_sound_url": notification_sound_url,
             "debug_mode": request.app.state.services.auth.config.debug_mode,
             "debug_initial_seq": request.app.state.services.operations.current_seq(),
         }
