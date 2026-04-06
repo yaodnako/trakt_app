@@ -184,8 +184,20 @@ class HistoryService:
     def has_missing_visible_episode_details(self, rows: list[dict]) -> bool:
         return bool(self._episode_metadata.select_episode_enrich_keys(rows))
 
-    def select_episode_enrich_keys(self, rows: list[dict]) -> list[tuple[int, int, int]]:
-        return self._episode_metadata.select_episode_enrich_keys(rows)
+    def select_episode_enrich_keys(
+        self,
+        rows: list[dict],
+        *,
+        trigger: str = "viewport",
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> list[tuple[int, int, int]]:
+        return self._episode_metadata.select_episode_enrich_keys(
+            rows,
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
+        )
 
     def episode_key_needs_enrich(self, show_trakt_id: int, season: int, episode: int) -> bool:
         return self._episode_metadata.episode_key_needs_enrich(show_trakt_id, season, episode)

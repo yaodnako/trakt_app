@@ -156,6 +156,7 @@ class ProgressService:
         self,
         db: Database,
         auth_service: AuthService,
+        history_repo: HistoryRepository,
         progress_repo: ProgressRepository,
         episode_repo: EpisodeRepository,
         titles: TitleRepository,
@@ -165,6 +166,7 @@ class ProgressService:
         imdb_client: IMDbDatasetClient,
         operations: OperationLog,
         episode_metadata: EpisodeMetadataService,
+        catalog: CatalogService | None = None,
     ) -> None:
         self._workflow = ProgressSyncWorkflow(
             db,
@@ -178,6 +180,8 @@ class ProgressService:
             imdb_client,
             operations,
             episode_metadata,
+            history_repo=history_repo,
+            catalog=catalog,
         )
 
     def refresh_show_progress(self, trakt_id: int, *, fresh: bool = False) -> ProgressSnapshot:
@@ -186,11 +190,35 @@ class ProgressService:
     def dashboard_progress(self, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
         return self._workflow.dashboard_progress(dropped_only=dropped_only)
 
-    def select_title_enrich_keys(self, items: list[ProgressSnapshot]) -> list[tuple[int, str]]:
-        return self._workflow.select_title_enrich_keys(items)
+    def select_title_enrich_keys(
+        self,
+        items: list[ProgressSnapshot],
+        *,
+        trigger: str = "viewport",
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> list[tuple[int, str]]:
+        return self._workflow.select_title_enrich_keys(
+            items,
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
+        )
 
-    def select_episode_enrich_keys(self, items: list[ProgressSnapshot]) -> list[tuple[int, int, int]]:
-        return self._workflow.select_episode_enrich_keys(items)
+    def select_episode_enrich_keys(
+        self,
+        items: list[ProgressSnapshot],
+        *,
+        trigger: str = "viewport",
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> list[tuple[int, int, int]]:
+        return self._workflow.select_episode_enrich_keys(
+            items,
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
+        )
 
     def sync_progress(self, trakt_ids: list[int] | None = None, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
         return self._workflow.sync_progress(trakt_ids, dropped_only=dropped_only)
@@ -263,6 +291,7 @@ class SyncService:
         sync_state: SyncStateRepository,
         operations: OperationLog,
         episode_metadata: EpisodeMetadataService,
+        catalog: CatalogService | None = None,
     ) -> None:
         self._db = db
         self._sync_state = sync_state
@@ -280,6 +309,7 @@ class SyncService:
             self._imdb_client,
             operations,
             episode_metadata,
+            catalog,
         )
 
     def initial_import(self) -> None:
@@ -309,11 +339,6 @@ class SyncService:
         last_sync_at = SyncPolicy.parse_timestamp(raw)
         if last_sync_at is None:
             return True
-        if not self._imdb_client.is_ready():
-            return True
-        modified = datetime.fromtimestamp(self._imdb_client.db_path.stat().st_mtime, tz=UTC)
-        if modified + timedelta(minutes=5) < last_sync_at:
-            return True
         return datetime.now(tz=UTC) - last_sync_at >= timedelta(minutes=interval)
 
     def maybe_sync_imdb_dataset(self, interval_minutes: int, status_callback=None) -> bool:
@@ -324,7 +349,7 @@ class SyncService:
             last_sync_at = SyncPolicy.parse_timestamp(raw)
             if last_sync_at is not None and now - last_sync_at < timedelta(minutes=interval):
                 return False
-        changed = self.sync_imdb_dataset(force=True, status_callback=status_callback)
+        changed = self.sync_imdb_dataset(force=False, status_callback=status_callback)
         if changed or not self._imdb_client.is_stale():
             with self._db.session() as session:
                 self._sync_state.set_value(session, self.IMDB_AUTO_SYNC_KEY, now.isoformat())
@@ -388,26 +413,30 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
             "history_title": lambda task: catalog.enrich_title_key(
                 int(task.payload["trakt_id"]),
                 str(task.payload["title_type"]),
+                refresh_requests=task.payload.get("refresh_requests", []),
             ),
             "history_episode": lambda task: episode_metadata.enrich_episode_key(
                 int(task.payload["show_trakt_id"]),
                 int(task.payload["season"]),
                 int(task.payload["episode"]),
+                refresh_requests=task.payload.get("refresh_requests", []),
             ),
             "progress_title": lambda task: catalog.enrich_title_key(
                 int(task.payload["trakt_id"]),
                 str(task.payload["title_type"]),
+                refresh_requests=task.payload.get("refresh_requests", []),
             ),
             "progress_episode": lambda task: episode_metadata.enrich_episode_key(
                 int(task.payload["show_trakt_id"]),
                 int(task.payload["season"]),
                 int(task.payload["episode"]),
+                refresh_requests=task.payload.get("refresh_requests", []),
             ),
         },
         max_workers=2,
     )
     play = PlayService(auth)
-    progress_service = ProgressService(db, auth, progress, episode_repo, titles, user_states, sync_state, tmdb_factory, imdb_client, operations, episode_metadata)
+    progress_service = ProgressService(db, auth, history, progress, episode_repo, titles, user_states, sync_state, tmdb_factory, imdb_client, operations, episode_metadata, catalog)
     notifications = NotificationService(
         db,
         auth,
@@ -418,7 +447,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         NotificationSender(),
     )
     interactions = InteractionService(history_service, notifications, progress_service)
-    sync = SyncService(db, auth, titles, user_states, history, progress, episode_repo, sync_state, operations, episode_metadata)
+    sync = SyncService(db, auth, titles, user_states, history, progress, episode_repo, sync_state, operations, episode_metadata, catalog)
     return ServiceContainer(
         auth=auth,
         cache=cache,

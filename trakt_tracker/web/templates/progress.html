@@ -146,7 +146,7 @@
         }
         document.querySelectorAll(".js-new-card").forEach((card) => {
             card.addEventListener("click", (event) => {
-                if (event.target.closest(".progress-actions")) {
+                if (event.target.closest(".progress-actions, a, button, input, select, textarea, label")) {
                     return;
                 }
                 const formId = card.getAttribute("data-seen-form");
@@ -174,13 +174,20 @@
             this.showDropped = root.dataset.showDropped || "0";
             this.minYear = root.dataset.minYear || "";
             this.useYearFilter = root.dataset.useYearFilter || "0";
+            this.idleRefreshIntervalMs = 300000;
+            this.viewportRefreshDebounceMs = 180;
             this.progressSyncRunning = {{ 'true' if progress_sync_running else 'false' }};
             this.queueRevision = 0;
             this.queueRunning = false;
             this.pollTimer = null;
+            this.idlePollTimer = null;
+            this.viewportRefreshTimer = null;
             this.pollInFlight = false;
             this.pollAttempts = 0;
             this.pageChangeNotified = false;
+            this.forceVisibleRefresh = false;
+            this.lastViewportRefreshKey = "";
+            this.lastViewportRefreshAt = 0;
             this.viewportCardKeys = new Set();
             this.nearbyCardKeys = new Set();
             this.viewportObserver = null;
@@ -225,8 +232,12 @@
                     if (!cardKey) {
                         continue;
                     }
+                    const wasVisible = this.viewportCardKeys.has(cardKey);
                     if (entry.isIntersecting) {
                         this.viewportCardKeys.add(cardKey);
+                        if (!wasVisible) {
+                            this.requestVisibleRefresh();
+                        }
                     } else {
                         this.viewportCardKeys.delete(cardKey);
                     }
@@ -272,7 +283,7 @@
                 }
                 card.dataset.boundSeenCardRefresh = "1";
                 card.addEventListener("click", (event) => {
-                    if (event.target.closest(".progress-actions")) {
+                    if (event.target.closest(".progress-actions, a, button, input, select, textarea, label")) {
                         return;
                     }
                     const formId = card.getAttribute("data-seen-form");
@@ -288,6 +299,10 @@
         }
 
         startPolling() {
+            if (this.idlePollTimer !== null) {
+                window.clearTimeout(this.idlePollTimer);
+                this.idlePollTimer = null;
+            }
             if (this.pollTimer !== null) {
                 return;
             }
@@ -300,6 +315,39 @@
                 window.clearInterval(this.pollTimer);
                 this.pollTimer = null;
             }
+        }
+
+        scheduleIdlePoll() {
+            if (this.pollTimer !== null || this.idlePollTimer !== null) {
+                return;
+            }
+            this.idlePollTimer = window.setTimeout(() => {
+                this.idlePollTimer = null;
+                this.forceVisibleRefresh = true;
+                this.startPolling();
+            }, this.idleRefreshIntervalMs);
+        }
+
+        requestVisibleRefresh() {
+            if (this.viewportRefreshTimer !== null) {
+                window.clearTimeout(this.viewportRefreshTimer);
+            }
+            this.viewportRefreshTimer = window.setTimeout(() => {
+                this.viewportRefreshTimer = null;
+                const viewportKey = this.viewportKeys().slice().sort().join("|");
+                const now = Date.now();
+                if (viewportKey && viewportKey === this.lastViewportRefreshKey && (now - this.lastViewportRefreshAt) < 2500) {
+                    return;
+                }
+                this.lastViewportRefreshKey = viewportKey;
+                this.lastViewportRefreshAt = now;
+                this.forceVisibleRefresh = true;
+                if (this.pollTimer !== null) {
+                    this.pollOnce();
+                } else {
+                    this.startPolling();
+                }
+            }, this.viewportRefreshDebounceMs);
         }
 
         refreshSections() {
@@ -359,6 +407,8 @@
             this.pollInFlight = true;
             this.pollAttempts += 1;
             try {
+                const forceVisibleRefresh = this.forceVisibleRefresh;
+                this.forceVisibleRefresh = false;
                 const response = await fetch("/progress/refresh", {
                     method: "POST",
                     headers: {
@@ -374,12 +424,14 @@
                         viewport_card_keys: this.viewportKeys(),
                         nearby_card_keys: this.nearbyKeys(),
                         page_card_keys: this.pageCardKeys(),
+                        force_visible_refresh: forceVisibleRefresh ? "1" : "0",
                         queue_after_revision: this.queueRevision,
                     }),
                 });
                 if (!response.ok) {
                     if (this.pollAttempts > 75) {
                         this.stopPolling();
+                        this.scheduleIdlePoll();
                     }
                     return;
                 }
@@ -391,10 +443,12 @@
                 this.queueRunning = Boolean(queue && queue.running);
                 if (!this.hasRunningJobs()) {
                     this.stopPolling();
+                    this.scheduleIdlePoll();
                 }
             } catch (_error) {
                 if (this.pollAttempts > 75) {
                     this.stopPolling();
+                    this.scheduleIdlePoll();
                 }
             } finally {
                 this.pollInFlight = false;
@@ -410,6 +464,7 @@
     if (controller.pageCardKeys().length || controller.hasRunningJobs()) {
         controller.startPolling();
     }
+    controller.scheduleIdlePoll();
     window.addEventListener("trakt-notifications-received", () => {
         controller.progressSyncRunning = true;
         controller.startPolling();

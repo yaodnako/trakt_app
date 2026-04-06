@@ -122,13 +122,20 @@
             this.historyType = root.dataset.historyType || "all";
             this.titleFilter = root.dataset.historyTitleFilter || "";
             this.shouldAutoSync = this.page === 1;
+            this.idleRefreshIntervalMs = 300000;
+            this.viewportRefreshDebounceMs = 180;
             this.historySyncRunning = {{ 'true' if history_sync_running else 'false' }};
             this.queueRevision = 0;
             this.queueRunning = false;
             this.pollTimer = null;
+            this.idlePollTimer = null;
+            this.viewportRefreshTimer = null;
             this.pollInFlight = false;
             this.pollAttempts = 0;
             this.pageChangeNotified = false;
+            this.forceVisibleRefresh = false;
+            this.lastViewportRefreshKey = "";
+            this.lastViewportRefreshAt = 0;
             this.viewportTitleKeys = new Set();
             this.nearbyTitleKeys = new Set();
             this.viewportObserver = null;
@@ -173,8 +180,12 @@
                         if (!titleKey) {
                             continue;
                         }
+                        const wasVisible = this.viewportTitleKeys.has(titleKey);
                         if (entry.isIntersecting) {
                             this.viewportTitleKeys.add(titleKey);
+                            if (!wasVisible) {
+                                this.requestVisibleRefresh();
+                            }
                         } else {
                             this.viewportTitleKeys.delete(titleKey);
                         }
@@ -216,6 +227,10 @@
         }
 
         startPolling() {
+            if (this.idlePollTimer !== null) {
+                window.clearTimeout(this.idlePollTimer);
+                this.idlePollTimer = null;
+            }
             if (this.pollTimer !== null) {
                 return;
             }
@@ -228,6 +243,39 @@
                 window.clearInterval(this.pollTimer);
                 this.pollTimer = null;
             }
+        }
+
+        scheduleIdlePoll() {
+            if (this.pollTimer !== null || this.idlePollTimer !== null) {
+                return;
+            }
+            this.idlePollTimer = window.setTimeout(() => {
+                this.idlePollTimer = null;
+                this.forceVisibleRefresh = true;
+                this.startPolling();
+            }, this.idleRefreshIntervalMs);
+        }
+
+        requestVisibleRefresh() {
+            if (this.viewportRefreshTimer !== null) {
+                window.clearTimeout(this.viewportRefreshTimer);
+            }
+            this.viewportRefreshTimer = window.setTimeout(() => {
+                this.viewportRefreshTimer = null;
+                const viewportKey = this.viewportKeys().slice().sort().join("|");
+                const now = Date.now();
+                if (viewportKey && viewportKey === this.lastViewportRefreshKey && (now - this.lastViewportRefreshAt) < 2500) {
+                    return;
+                }
+                this.lastViewportRefreshKey = viewportKey;
+                this.lastViewportRefreshAt = now;
+                this.forceVisibleRefresh = true;
+                if (this.pollTimer !== null) {
+                    this.pollOnce();
+                } else {
+                    this.startPolling();
+                }
+            }, this.viewportRefreshDebounceMs);
         }
 
         updateDayCards() {
@@ -298,6 +346,8 @@
             this.pollInFlight = true;
             this.pollAttempts += 1;
             try {
+                const forceVisibleRefresh = this.forceVisibleRefresh;
+                this.forceVisibleRefresh = false;
                 const response = await fetch("/history/refresh", {
                     method: "POST",
                     headers: {
@@ -312,12 +362,14 @@
                         viewport_title_keys: this.viewportKeys(),
                         nearby_title_keys: this.nearbyKeys(),
                         page_title_keys: this.pageTitleKeys(),
+                        force_visible_refresh: forceVisibleRefresh ? "1" : "0",
                         queue_after_revision: this.queueRevision,
                     }),
                 });
                 if (!response.ok) {
                     if (this.pollAttempts > 75) {
                         this.stopPolling();
+                        this.scheduleIdlePoll();
                     }
                     return;
                 }
@@ -329,10 +381,12 @@
                 this.queueRunning = Boolean(queue && queue.running);
                 if (!this.hasRunningJobs()) {
                     this.stopPolling();
+                    this.scheduleIdlePoll();
                 }
             } catch (_error) {
                 if (this.pollAttempts > 75) {
                     this.stopPolling();
+                    this.scheduleIdlePoll();
                 }
             } finally {
                 this.pollInFlight = false;
@@ -377,6 +431,7 @@
     if (controller.pageTitleKeys().length || controller.hasRunningJobs()) {
         controller.startPolling();
     }
+    controller.scheduleIdlePoll();
     controller.autoSync();
 })();
 </script>

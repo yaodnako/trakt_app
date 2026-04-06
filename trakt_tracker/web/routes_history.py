@@ -16,10 +16,23 @@ from trakt_tracker.application.enrich_queue import (
     build_history_episode_task,
     build_history_title_task,
 )
+from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_EPISODE_RATINGS,
+    ASSET_KIND_TITLE_RATINGS,
+    TRIGGER_VIEWPORT,
+    TRIGGER_VISIBLE_RATINGS_REFRESH,
+)
 from trakt_tracker.application.services import ServiceContainer
 from trakt_tracker.config import timezone_from_utc_offset
 from trakt_tracker.domain import RatingInput
-from trakt_tracker.web.viewmodels import HISTORY_PAGE_SIZE, normalize_title_type
+from trakt_tracker.web.viewmodels import (
+    EPISODE_RATINGS_READY_REFRESH_SECONDS,
+    HISTORY_PAGE_SIZE,
+    TITLE_RATINGS_READY_REFRESH_SECONDS,
+    normalize_title_type,
+    parse_bool_flag,
+    ratings_refresh_due,
+)
 
 
 def register_history_routes(app, *, render, render_fragment) -> None:
@@ -108,6 +121,7 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         viewport_title_keys = _normalize_title_keys(payload.get("viewport_title_keys", []))
         nearby_title_keys = _normalize_title_keys(payload.get("nearby_title_keys", []))
         page_title_keys = _normalize_title_keys(payload.get("page_title_keys", []))
+        force_visible_refresh = parse_bool_flag(str(payload.get("force_visible_refresh", "")))
         if not page_title_keys:
             page_title_keys = _normalize_title_keys(raw_visible_title_keys)
         try:
@@ -123,11 +137,44 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         current_title_groups = _title_group_map(grouped_days)
         current_page_keys = list(current_title_groups.keys())
         rows_by_title_key = _rows_by_title_key(rows, services.auth.config.utc_offset)
+        stale_visible_title_keys = _select_stale_history_rating_title_keys(
+            rows_by_title_key,
+            viewport_title_keys or page_title_keys or current_page_keys,
+        )
         if not request.app.state.bg_tasks.is_running("history_sync"):
             services.enrich_queue.submit_history_refresh(
-                viewport_tasks=_build_history_bucket_tasks(services, rows_by_title_key, viewport_title_keys, priority=1),
-                nearby_tasks=_build_history_bucket_tasks(services, rows_by_title_key, nearby_title_keys, priority=2),
-                page_tasks=_build_history_bucket_tasks(services, rows_by_title_key, page_title_keys, priority=3),
+                viewport_tasks=_build_history_bucket_tasks(
+                    services,
+                    rows_by_title_key,
+                    viewport_title_keys,
+                    priority=1,
+                    trigger=TRIGGER_VIEWPORT,
+                ),
+                nearby_tasks=_build_history_bucket_tasks(
+                    services,
+                    rows_by_title_key,
+                    nearby_title_keys,
+                    priority=2,
+                    trigger=TRIGGER_VIEWPORT,
+                ),
+                page_tasks=[
+                    *_build_history_bucket_tasks(
+                        services,
+                        rows_by_title_key,
+                        page_title_keys,
+                        priority=3,
+                        trigger=TRIGGER_VIEWPORT,
+                    ),
+                    *_build_history_bucket_tasks(
+                        services,
+                        rows_by_title_key,
+                        stale_visible_title_keys if force_visible_refresh else [],
+                        priority=1,
+                        trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
+                        title_requested_parts=(ASSET_KIND_TITLE_RATINGS,),
+                        episode_requested_parts=(ASSET_KIND_EPISODE_RATINGS,),
+                    ),
+                ],
             )
         relevant_title_keys = set(page_title_keys or current_page_keys)
         queue = services.enrich_queue.list_updates(
@@ -276,22 +323,37 @@ def _build_history_bucket_tasks(
     title_keys: list[str],
     *,
     priority: int,
+    trigger: str = TRIGGER_VIEWPORT,
+    title_requested_parts=(),
+    episode_requested_parts=(),
 ) -> list:
     tasks: list = []
     for title_key in title_keys:
         title_rows = rows_by_title_key.get(title_key, [])
         if not title_rows:
             continue
-        for trakt_id, title_type in services.catalog.select_title_enrich_keys(title_rows):
+        title_enrich_keys = services.catalog.select_title_enrich_keys(
+            title_rows,
+            trigger=trigger,
+            requested_parts=title_requested_parts,
+        )
+        for trakt_id, title_type in title_enrich_keys:
             tasks.append(
                 build_history_title_task(
                     title_key=title_key,
                     trakt_id=trakt_id,
                     title_type=title_type,
                     priority=priority,
+                    trigger=trigger,
+                    requested_parts=title_requested_parts,
                 )
             )
-        for show_trakt_id, season, episode in services.history.select_episode_enrich_keys(title_rows):
+        episode_enrich_keys = services.history.select_episode_enrich_keys(
+            title_rows,
+            trigger=trigger,
+            requested_parts=episode_requested_parts,
+        )
+        for show_trakt_id, season, episode in episode_enrich_keys:
             tasks.append(
                 build_history_episode_task(
                     title_key=title_key,
@@ -299,6 +361,8 @@ def _build_history_bucket_tasks(
                     season=season,
                     episode=episode,
                     priority=priority,
+                    trigger=trigger,
+                    requested_parts=episode_requested_parts,
                 )
             )
     return tasks
@@ -368,3 +432,38 @@ def _history_title_key_for_row(row: dict, utc_offset: str) -> str:
         normalized = watched_at if watched_at.tzinfo is not None else watched_at.replace(tzinfo=UTC)
         day_label = normalized.astimezone(tz).strftime("%d.%m.%Y")
     return _history_title_key_for_day(day_label, row.get("type", ""), row.get("title_trakt_id"))
+
+
+def _select_stale_history_rating_title_keys(rows_by_title_key: dict[str, list[dict]], title_keys: list[str]) -> list[str]:
+    result: list[str] = []
+    for title_key in title_keys:
+        rows = rows_by_title_key.get(title_key, [])
+        if not rows:
+            continue
+        title_due = any(
+            ratings_refresh_due(
+                row.get("title_ratings_status"),
+                row.get("title_ratings_refreshed_at"),
+                asset_kind=ASSET_KIND_TITLE_RATINGS,
+                ready_ttl_seconds=TITLE_RATINGS_READY_REFRESH_SECONDS,
+            )
+            for row in rows
+        )
+        if title_due:
+            result.append(title_key)
+            continue
+        episode_due = any(
+            row.get("type") == "show"
+            and row.get("season") is not None
+            and row.get("episode") is not None
+            and ratings_refresh_due(
+                row.get("episode_trakt_status"),
+                row.get("episode_trakt_refreshed_at"),
+                asset_kind=ASSET_KIND_EPISODE_RATINGS,
+                ready_ttl_seconds=EPISODE_RATINGS_READY_REFRESH_SECONDS,
+            )
+            for row in rows
+        )
+        if episode_due:
+            result.append(title_key)
+    return list(dict.fromkeys(result))

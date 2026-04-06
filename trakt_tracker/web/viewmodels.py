@@ -3,6 +3,15 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
+from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_EPISODE_RATINGS,
+    ASSET_KIND_TITLE_RATINGS,
+    EPISODE_RATINGS_READY_REFRESH_SECONDS,
+    RATINGS_EMPTY_REFRESH_SECONDS,
+    TITLE_RATINGS_READY_REFRESH_SECONDS,
+    TRIGGER_VISIBLE_RATINGS_REFRESH,
+    metadata_refresh_due,
+)
 from trakt_tracker.domain import TitleSummary
 
 
@@ -74,6 +83,44 @@ def parse_progress_year(value: str | None) -> int | None:
     return year if 1900 <= year <= 3000 else None
 
 
+def normalize_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def ratings_refresh_due(
+    status: str | None,
+    refreshed_at: datetime | None,
+    *,
+    asset_kind: str = ASSET_KIND_TITLE_RATINGS,
+    ready_ttl_seconds: int,
+    empty_ttl_seconds: int = RATINGS_EMPTY_REFRESH_SECONDS,
+    now: datetime | None = None,
+) -> bool:
+    if asset_kind == ASSET_KIND_TITLE_RATINGS and ready_ttl_seconds != TITLE_RATINGS_READY_REFRESH_SECONDS:
+        pass
+    if asset_kind == ASSET_KIND_EPISODE_RATINGS and ready_ttl_seconds != EPISODE_RATINGS_READY_REFRESH_SECONDS:
+        pass
+    decision = metadata_refresh_due(
+        asset_kind,
+        status=status,
+        last_checked_at=refreshed_at,
+        has_value=(status or "").strip().lower() == "ready",
+        trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
+        now=now,
+    )
+    if (status or "").strip().lower() == "checked_no_data" and empty_ttl_seconds != RATINGS_EMPTY_REFRESH_SECONDS:
+        refreshed = normalize_datetime(refreshed_at)
+        if refreshed is None:
+            return True
+        now_value = normalize_datetime(now) or datetime.now(tz=UTC)
+        return (now_value - refreshed) >= timedelta(seconds=empty_ttl_seconds)
+    return decision.should_refresh
+
+
 def progress_has_released_next_episode(item) -> bool:
     next_episode = getattr(item, "next_episode", None)
     if next_episode is None or getattr(next_episode, "first_aired", None) is None:
@@ -129,6 +176,27 @@ def progress_skipped_count(item) -> int:
 
 
 def progress_rating_chip(item, rating_with_votes) -> str:
+    parts: list[str] = []
+    trakt_status = getattr(item, "title_ratings_status", "unknown")
+    if getattr(item, "title_trakt_rating", None) is not None and getattr(item, "title_trakt_votes", None) is not None:
+        trakt_text = rating_with_votes(getattr(item, "title_trakt_rating", None), getattr(item, "title_trakt_votes", None))
+    elif trakt_status == "checked_no_data":
+        trakt_text = "n/a"
+    else:
+        trakt_text = "Loading"
+    imdb_status = getattr(item, "title_ratings_status", "unknown")
+    if getattr(item, "title_imdb_rating", None) is not None and getattr(item, "title_imdb_votes", None) is not None:
+        imdb_text = rating_with_votes(getattr(item, "title_imdb_rating", None), getattr(item, "title_imdb_votes", None))
+    elif imdb_status == "checked_no_data":
+        imdb_text = "n/a"
+    else:
+        imdb_text = "Loading"
+    parts.append(f"trakt|{trakt_text}")
+    parts.append(f"imdb|{imdb_text}")
+    return " | ".join(parts)
+
+
+def progress_episode_rating_chip(item, rating_with_votes) -> str:
     next_episode = getattr(item, "next_episode", None)
     if next_episode is None:
         return ""

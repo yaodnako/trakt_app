@@ -37,6 +37,11 @@ class TitleRepository:
         if title.poster_url:
             model.poster_url = title.poster_url
             model.poster_status = ENRICH_STATUS_READY
+            model.poster_refreshed_at = (
+                title.poster_refreshed_at.replace(tzinfo=None)
+                if title.poster_refreshed_at is not None and title.poster_refreshed_at.tzinfo is not None
+                else title.poster_refreshed_at
+            ) or model.poster_refreshed_at or datetime.now(tz=UTC).replace(tzinfo=None)
         if title.trakt_rating is not None:
             model.trakt_rating = title.trakt_rating
         if title.trakt_votes is not None:
@@ -55,6 +60,12 @@ class TitleRepository:
             model.imdb_votes = title.imdb_votes
         if model.poster_url and not model.poster_status:
             model.poster_status = ENRICH_STATUS_READY
+        if title.poster_refreshed_at is not None:
+            model.poster_refreshed_at = (
+                title.poster_refreshed_at.replace(tzinfo=None)
+                if title.poster_refreshed_at.tzinfo is not None
+                else title.poster_refreshed_at
+            )
         if (
             model.ratings_status == ENRICH_STATUS_UNKNOWN
             and model.trakt_rating is not None
@@ -84,6 +95,7 @@ class TitleRepository:
             model.poster_status = ENRICH_STATUS_READY
         else:
             model.poster_status = status
+        model.poster_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
         session.flush()
         return model
 
@@ -125,6 +137,7 @@ class TitleRepository:
             model.ratings_status = ENRICH_STATUS_READY
         else:
             model.ratings_status = status
+        model.ratings_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
         session.flush()
         return model
 
@@ -459,9 +472,11 @@ class ProgressRepository:
                     title=row.next_episode_title,
                     still_url=next_episode_row.still_url if next_episode_row is not None else "",
                     still_status=(next_episode_row.still_status if next_episode_row is not None else ENRICH_STATUS_UNKNOWN),
+                    still_refreshed_at=(next_episode_row.still_refreshed_at if next_episode_row is not None else None),
                     trakt_rating=next_episode_row.trakt_rating if next_episode_row is not None else None,
                     trakt_votes=next_episode_row.trakt_votes if next_episode_row is not None else None,
                     trakt_details_status=(next_episode_row.trakt_details_status if next_episode_row is not None else ENRICH_STATUS_UNKNOWN),
+                    trakt_details_refreshed_at=(next_episode_row.trakt_details_refreshed_at if next_episode_row is not None else None),
                     imdb_id=next_episode_row.imdb_id if next_episode_row is not None else "",
                     imdb_rating=next_episode_row.imdb_rating if next_episode_row is not None else None,
                     imdb_votes=next_episode_row.imdb_votes if next_episode_row is not None else None,
@@ -492,12 +507,19 @@ class ProgressRepository:
                     completed=row.completed,
                     aired=row.aired,
                     percent_completed=row.percent_completed,
+                    slug=title.slug if title is not None else "",
                     next_episode=next_episode,
                     last_episode=last_episode,
                     poster_url=title.poster_url if title is not None else "",
                     poster_status=(title.poster_status if title is not None else ENRICH_STATUS_UNKNOWN),
+                    poster_refreshed_at=(title.poster_refreshed_at if title is not None else None),
                     status=title.status if title is not None else "",
+                    title_trakt_rating=(title.trakt_rating if title is not None else None),
+                    title_trakt_votes=(title.trakt_votes if title is not None else None),
+                    title_imdb_rating=(title.imdb_rating if title is not None else None),
+                    title_imdb_votes=(title.imdb_votes if title is not None else None),
                     title_ratings_status=(title.ratings_status if title is not None else ENRICH_STATUS_UNKNOWN),
+                    title_ratings_refreshed_at=(title.ratings_refreshed_at if title is not None else None),
                     is_dropped=((bool(state.archived) or state.tracked is False) if state is not None else dropped_only),
                 )
             )
@@ -585,6 +607,11 @@ class EpisodeRepository:
                             ENRICH_STATUS_CHECKED_NO_DATA if getattr(existing, "still_missing", False) else ENRICH_STATUS_UNKNOWN
                         ))
                     ),
+                    still_refreshed_at=(
+                        episode.still_refreshed_at
+                        or (existing.still_refreshed_at if existing is not None else None)
+                        or (datetime.now(tz=UTC).replace(tzinfo=None) if episode.still_url else None)
+                    ),
                     trakt_details_status=(
                         ENRICH_STATUS_READY
                         if episode.trakt_rating is not None and episode.trakt_votes is not None
@@ -647,8 +674,19 @@ class EpisodeRepository:
             row.still_url = episode.still_url
             row.still_missing = False
             row.still_status = ENRICH_STATUS_READY
+            row.still_refreshed_at = (
+                episode.still_refreshed_at.replace(tzinfo=None)
+                if episode.still_refreshed_at is not None and episode.still_refreshed_at.tzinfo is not None
+                else episode.still_refreshed_at
+            ) or row.still_refreshed_at or datetime.now(tz=UTC).replace(tzinfo=None)
         elif not row.still_status:
             row.still_status = ENRICH_STATUS_CHECKED_NO_DATA if row.still_missing else ENRICH_STATUS_UNKNOWN
+        elif episode.still_refreshed_at is not None:
+            row.still_refreshed_at = (
+                episode.still_refreshed_at.replace(tzinfo=None)
+                if episode.still_refreshed_at.tzinfo is not None
+                else episode.still_refreshed_at
+            )
         if episode.trakt_rating is not None:
             row.trakt_rating = episode.trakt_rating
         if episode.trakt_votes is not None:
@@ -708,9 +746,11 @@ class EpisodeRepository:
                 "still_url": row.still_url,
                 "still_missing": bool(row.still_missing or row.still_status == ENRICH_STATUS_CHECKED_NO_DATA),
                 "still_status": row.still_status or ENRICH_STATUS_UNKNOWN,
+                "still_refreshed_at": row.still_refreshed_at,
                 "trakt_rating": row.trakt_rating,
                 "trakt_votes": row.trakt_votes,
                 "trakt_details_status": row.trakt_details_status or ENRICH_STATUS_UNKNOWN,
+                "trakt_details_refreshed_at": row.trakt_details_refreshed_at,
                 "imdb_id": row.imdb_id,
                 "imdb_rating": row.imdb_rating,
                 "imdb_votes": row.imdb_votes,
@@ -734,6 +774,7 @@ class EpisodeRepository:
             row.still_url = str(still_url or "")
         row.still_status = ENRICH_STATUS_READY if row.still_url else status
         row.still_missing = row.still_status == ENRICH_STATUS_CHECKED_NO_DATA
+        row.still_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
         session.flush()
         return row
 
@@ -770,6 +811,7 @@ class EpisodeRepository:
             row.trakt_details_status = ENRICH_STATUS_READY
         else:
             row.trakt_details_status = status
+        row.trakt_details_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
         session.flush()
         return row
 

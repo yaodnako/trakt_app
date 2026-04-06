@@ -69,11 +69,15 @@ class HistoryReadModelService:
                     "title_slug": (title_models.get(row.title_trakt_id).slug if title_models.get(row.title_trakt_id) is not None else ""),
                     "poster_url": (title_models.get(row.title_trakt_id).poster_url if title_models.get(row.title_trakt_id) is not None else ""),
                     "title_poster_status": (title_models.get(row.title_trakt_id).poster_status if title_models.get(row.title_trakt_id) is not None else "unknown"),
+                    "title_poster_refreshed_at": (
+                        title_models.get(row.title_trakt_id).poster_refreshed_at if title_models.get(row.title_trakt_id) is not None else None
+                    ),
                     "title_trakt_rating": (title_models.get(row.title_trakt_id).trakt_rating if title_models.get(row.title_trakt_id) is not None else None),
                     "title_trakt_votes": (title_models.get(row.title_trakt_id).trakt_votes if title_models.get(row.title_trakt_id) is not None else None),
                     "title_imdb_rating": (title_models.get(row.title_trakt_id).imdb_rating if title_models.get(row.title_trakt_id) is not None else None),
                     "title_imdb_votes": (title_models.get(row.title_trakt_id).imdb_votes if title_models.get(row.title_trakt_id) is not None else None),
                     "title_ratings_status": (title_models.get(row.title_trakt_id).ratings_status if title_models.get(row.title_trakt_id) is not None else "unknown"),
+                    "title_ratings_refreshed_at": (title_models.get(row.title_trakt_id).ratings_refreshed_at if title_models.get(row.title_trakt_id) is not None else None),
                     "title_episode_avg_rating": (title_episode_stats.get(row.title_trakt_id) or {}).get("avg_rating"),
                     "title_episode_rated_count": (title_episode_stats.get(row.title_trakt_id) or {}).get("rated_count", 0),
                     "type": row.title_type,
@@ -96,6 +100,11 @@ class HistoryReadModelService:
                         if row.season is not None and row.episode is not None
                         else "unknown"
                     ),
+                    "episode_still_refreshed_at": (
+                        (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("still_refreshed_at")
+                        if row.season is not None and row.episode is not None
+                        else None
+                    ),
                     "episode_trakt_rating": (
                         (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("trakt_rating")
                         if row.season is not None and row.episode is not None
@@ -110,6 +119,11 @@ class HistoryReadModelService:
                         (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("trakt_details_status", "unknown")
                         if row.season is not None and row.episode is not None
                         else "unknown"
+                    ),
+                    "episode_trakt_refreshed_at": (
+                        (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("trakt_details_refreshed_at")
+                        if row.season is not None and row.episode is not None
+                        else None
                     ),
                     "episode_imdb_rating": (
                         (

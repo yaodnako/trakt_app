@@ -45,13 +45,15 @@ Core уже не монолитный. Ключевые куски вынесе�
   - poster
   - title-level ratings
   - enrich statuses для title metadata
+  - ratings refresh timestamps для title-level ratings
 - `episodes_cache` хранит:
   - still
   - episode Trakt details / ratings
   - episode IMDb metadata
   - enrich statuses для episode metadata
+  - refresh timestamps для episode ratings/details
 - `History` и `Progress` читают одни и те же shared metadata tables
-- decision о том, нужен ли enrich, принимается только по SQLite statuses
+- decision о том, нужен ли enrich, принимается по SQLite statuses и refresh timestamps
 
 ## Queue model
 
@@ -74,6 +76,9 @@ Shared queue primitives живут в `application`, а не в web routes:
 - enrich не должен зависеть от full page reload
 - клиент делает patch-only refresh affected cards/groups
 - `History` и `Progress` используют JSON refresh endpoints и queue revisions
+- entering viewport триггерит быстрый debounce refresh для видимых cards/groups
+- visible ratings могут быть force-refreshed по stale policy без whole-page reload
+- posters / stills не должны жить на частом periodic refresh path после успешного resolve
 
 ## Что еще остается тяжелым
 

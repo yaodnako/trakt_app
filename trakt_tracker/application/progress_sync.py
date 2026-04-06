@@ -8,6 +8,14 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
 )
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
+from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_POSTER,
+    ASSET_KIND_STILL,
+    TITLE_ALLOWED_PARTS,
+    TRIGGER_SYNC_EVENT,
+    TRIGGER_VIEWPORT,
+    build_refresh_request,
+)
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.sync_policy import SyncPolicy
 from trakt_tracker.config import AppConfig
@@ -30,9 +38,12 @@ class ProgressSyncWorkflow:
         imdb_client: IMDbDatasetClient,
         operations: OperationLog,
         episode_metadata: EpisodeMetadataService,
+        history_repo=None,
+        catalog=None,
     ) -> None:
         self._db = db
         self._auth = auth_service
+        self._history = history_repo
         self._progress_repo = progress_repo
         self._episode_repo = episode_repo
         self._titles = titles
@@ -43,6 +54,7 @@ class ProgressSyncWorkflow:
         self._operations = operations
         self._policy = SyncPolicy
         self._episode_metadata = episode_metadata
+        self._catalog = catalog
 
     def refresh_show_progress(self, trakt_id: int, *, fresh: bool = False) -> ProgressSnapshot:
         client = self._auth.get_client()
@@ -93,37 +105,85 @@ class ProgressSyncWorkflow:
                         details=detailed_episode,
                     )
             self._episode_metadata.attach_progress_episode_metadata(session, progress, enrich_imdb=True)
+        if fresh and self._catalog is not None:
+            self._catalog.enrich_title_key(
+                trakt_id,
+                "show",
+                trigger=TRIGGER_SYNC_EVENT,
+                requested_parts=(ASSET_KIND_POSTER,),
+            )
+            if progress.next_episode is not None:
+                self._episode_metadata.enrich_episode_key(
+                    trakt_id,
+                    progress.next_episode.season,
+                    progress.next_episode.number,
+                    trigger=TRIGGER_SYNC_EVENT,
+                    requested_parts=(ASSET_KIND_STILL,),
+                )
         return progress
 
     def dashboard_progress(self, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
         with self._db.session() as session:
             items = self._progress_repo.list_in_progress(session, dropped_only=dropped_only)
+            watched_rows = self._history.list_filtered(session, title_type="show", action="watched") if self._history is not None else []
+            rated_map = self._history.latest_rated_map(session, title_type="show") if self._history is not None else {}
+        _, cached_episode_ratings = self._episode_metadata.load_cached_trakt_rating_maps()
+        title_episode_stats = self._build_title_episode_rating_stats(
+            watched_rows,
+            rated_map=rated_map,
+            cached_episode_ratings=cached_episode_ratings,
+        )
+        for item in items:
+            item.title_episode_avg_rating = (title_episode_stats.get(int(item.trakt_id)) or {}).get("avg_rating")
         return items
 
-    def select_title_enrich_keys(self, items: list[ProgressSnapshot]) -> list[tuple[int, str]]:
+    def select_title_enrich_keys(
+        self,
+        items: list[ProgressSnapshot],
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> list[tuple[int, str]]:
+        normalized_requests = refresh_requests
+        if normalized_requests is None:
+            normalized_requests = [
+                build_refresh_request(
+                    trigger=trigger,
+                    requested_parts=requested_parts,
+                    allowed_parts=TITLE_ALLOWED_PARTS,
+                ).to_payload()
+            ]
         keys: list[tuple[int, str]] = []
         for item in items:
-            needs_poster = item.poster_status in {"unknown", "retryable_failure"}
-            needs_ratings = item.title_ratings_status in {"unknown", "retryable_failure"}
-            if needs_poster or needs_ratings:
+            if self._catalog is not None and self._catalog.title_key_needs_enrich(
+                int(item.trakt_id),
+                "show",
+                refresh_requests=normalized_requests,
+            ):
                 keys.append((int(item.trakt_id), "show"))
         return list(dict.fromkeys(keys))
 
-    def select_episode_enrich_keys(self, items: list[ProgressSnapshot]) -> list[tuple[int, int, int]]:
+    def select_episode_enrich_keys(
+        self,
+        items: list[ProgressSnapshot],
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> list[tuple[int, int, int]]:
         keys: list[tuple[int, int, int]] = []
         for item in items:
             next_episode = item.next_episode
             if next_episode is None:
                 continue
-            if (
-                (next_episode.still_status in {"unknown", "retryable_failure"} and not next_episode.still_url)
-                or (
-                    next_episode.trakt_details_status in {"unknown", "retryable_failure"}
-                    and not (
-                        next_episode.trakt_rating is not None
-                        and next_episode.trakt_votes is not None
-                    )
-                )
+            if self._episode_metadata.episode_key_needs_enrich(
+                int(item.trakt_id),
+                int(next_episode.season),
+                int(next_episode.number),
+                trigger=trigger,
+                requested_parts=requested_parts,
+                refresh_requests=refresh_requests,
             ):
                 keys.append((int(item.trakt_id), int(next_episode.season), int(next_episode.number)))
         return list(dict.fromkeys(keys))
@@ -244,3 +304,37 @@ class ProgressSyncWorkflow:
         client = self._auth.get_client()
         payload = client.get_last_activities(use_cache=False)
         return self._policy.build_progress_activity_signature(payload)
+
+    @staticmethod
+    def _build_title_episode_rating_stats(
+        rows: list,
+        *,
+        rated_map: dict[tuple[int, int | None, int | None], int],
+        cached_episode_ratings: dict[tuple[int, int, int], int],
+    ) -> dict[int, dict]:
+        seen: set[tuple[int, int, int]] = set()
+        totals: dict[int, dict[str, float | int]] = {}
+        for row in rows:
+            if row.title_type != "show" or row.season is None or row.episode is None:
+                continue
+            episode_key = (int(row.title_trakt_id), int(row.season), int(row.episode))
+            if episode_key in seen:
+                continue
+            seen.add(episode_key)
+            display_rating = (
+                row.rating
+                or rated_map.get((row.title_trakt_id, row.season, row.episode))
+                or cached_episode_ratings.get((row.title_trakt_id, row.season, row.episode))
+            )
+            if display_rating is None:
+                continue
+            item = totals.setdefault(int(row.title_trakt_id), {"sum_rating": 0.0, "rated_count": 0})
+            item["sum_rating"] += float(display_rating)
+            item["rated_count"] += 1
+        return {
+            trakt_id: {
+                "avg_rating": (item["sum_rating"] / item["rated_count"]) if item["rated_count"] else None,
+                "rated_count": int(item["rated_count"]),
+            }
+            for trakt_id, item in totals.items()
+        }

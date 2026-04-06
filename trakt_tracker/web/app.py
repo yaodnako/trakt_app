@@ -26,6 +26,7 @@ from trakt_tracker.web.viewmodels import (
     progress_effective_aired,
     progress_effective_percent,
     progress_query_string,
+    progress_episode_rating_chip,
     progress_rating_chip,
     progress_recent_release,
     progress_skipped_count,
@@ -159,6 +160,7 @@ def _build_templates() -> Jinja2Templates:
     templates.env.filters["progress_skipped_count"] = progress_skipped_count
     templates.env.filters["progress_recent_release"] = progress_recent_release
     templates.env.filters["progress_rating_chip"] = lambda item: progress_rating_chip(item, _TemplateFilters.format_rating_with_votes)
+    templates.env.filters["progress_episode_rating_chip"] = lambda item: progress_episode_rating_chip(item, _TemplateFilters.format_rating_with_votes)
     templates.env.filters["cached_image_url"] = lambda value: (f"/cached-image?url={quote(str(value))}" if value else "")
     return templates
 

@@ -26,6 +26,7 @@ class TitleSummary:
     imdb_id: str = ""
     imdb_rating: float | None = None
     imdb_votes: int | None = None
+    poster_refreshed_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -36,9 +37,11 @@ class EpisodeSummary:
     title: str
     still_url: str = ""
     still_status: str = "unknown"
+    still_refreshed_at: datetime | None = None
     trakt_rating: float | None = None
     trakt_votes: int | None = None
     trakt_details_status: str = "unknown"
+    trakt_details_refreshed_at: datetime | None = None
     imdb_id: str = ""
     imdb_rating: float | None = None
     imdb_votes: int | None = None
@@ -74,12 +77,20 @@ class ProgressSnapshot:
     completed: int
     aired: int
     percent_completed: float
+    slug: str = ""
     next_episode: EpisodeSummary | None = None
     last_episode: EpisodeSummary | None = None
     poster_url: str = ""
     poster_status: str = "unknown"
+    poster_refreshed_at: datetime | None = None
     status: str = ""
+    title_trakt_rating: float | None = None
+    title_trakt_votes: int | None = None
+    title_imdb_rating: float | None = None
+    title_imdb_votes: int | None = None
     title_ratings_status: str = "unknown"
+    title_ratings_refreshed_at: datetime | None = None
+    title_episode_avg_rating: float | None = None
     is_dropped: bool = False
 
 

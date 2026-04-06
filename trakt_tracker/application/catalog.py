@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from datetime import datetime
 from typing import Callable
 
 from trakt_tracker.application.enrich_state import (
@@ -9,9 +10,21 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
     ENRICH_STATUS_RETRYABLE_FAILURE,
     ENRICH_STATUS_UNKNOWN,
-    should_attempt_enrich,
 )
 from trakt_tracker.application.enrich_queue import TASK_RESULT_SKIPPED_ALREADY_RESOLVED
+from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_POSTER,
+    ASSET_KIND_TITLE_RATINGS,
+    TITLE_ALLOWED_PARTS,
+    TRIGGER_MANUAL_REPAIR,
+    TRIGGER_SYNC_EVENT,
+    TRIGGER_VIEWPORT,
+    TRIGGER_VISIBLE_RATINGS_REFRESH,
+    MetadataRefreshRequest,
+    build_refresh_request,
+    metadata_refresh_due,
+    refresh_requests_from_payload,
+)
 from trakt_tracker.config import AppConfig
 from trakt_tracker.domain import TitleSummary
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
@@ -38,25 +51,111 @@ class CatalogService:
         self._tmdb_factory = tmdb_factory
         self._imdb_client = imdb_client
 
-    def _visible_title_items_needing_enrich(self, rows: list[dict]) -> list[tuple[int, str]]:
-        can_enrich_posters = self._tmdb_factory(self._auth.config).is_configured()
-        return [
-            (int(row["title_trakt_id"]), str(row["type"]))
-            for row in rows
-            if row.get("title_trakt_id") and row.get("type") in {"movie", "show"} and (
-                (
-                    can_enrich_posters
-                    and should_attempt_enrich(
-                        row.get("title_poster_status", ENRICH_STATUS_UNKNOWN),
-                        has_value=bool(row.get("poster_url")) and row.get("title_poster_status") == ENRICH_STATUS_READY,
-                    )
-                )
-                or row.get("title_ratings_status", ENRICH_STATUS_UNKNOWN) in {ENRICH_STATUS_UNKNOWN, ENRICH_STATUS_RETRYABLE_FAILURE}
-            )
-        ]
+    def _normalize_title_refresh_requests(
+        self,
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> tuple[MetadataRefreshRequest, ...]:
+        if refresh_requests is not None:
+            normalized = refresh_requests_from_payload(refresh_requests, allowed_parts=TITLE_ALLOWED_PARTS)
+            if normalized:
+                return normalized
+        return (
+            build_refresh_request(
+                trigger=trigger,
+                requested_parts=requested_parts,
+                allowed_parts=TITLE_ALLOWED_PARTS,
+            ),
+        )
 
-    def select_title_enrich_keys(self, rows: list[dict]) -> list[tuple[int, str]]:
-        return list(dict.fromkeys(self._visible_title_items_needing_enrich(rows)))
+    @staticmethod
+    def _title_row_type(record) -> str:
+        if record is None:
+            return ""
+        if isinstance(record, dict):
+            return str(record.get("type") or record.get("title_type") or "")
+        return str(getattr(record, "title_type", "") or "")
+
+    @staticmethod
+    def _title_record_value(record, dict_key: str, attr_name: str):
+        if record is None:
+            return None
+        if isinstance(record, dict):
+            return record.get(dict_key)
+        return getattr(record, attr_name, None)
+
+    def _title_refresh_parts(
+        self,
+        record,
+        title_type: str,
+        refresh_requests: tuple[MetadataRefreshRequest, ...],
+    ) -> dict[str, str]:
+        if record is not None and self._title_row_type(record) not in {"", title_type}:
+            return {}
+        parts: dict[str, str] = {}
+        can_enrich_posters = self._tmdb_factory(self._auth.config).is_configured()
+        poster_url = str(self._title_record_value(record, "poster_url", "poster_url") or "")
+        poster_status = str(
+            self._title_record_value(record, "title_poster_status", "poster_status") or ENRICH_STATUS_UNKNOWN
+        )
+        poster_refreshed_at = self._title_record_value(record, "title_poster_refreshed_at", "poster_refreshed_at")
+        ratings_status = str(
+            self._title_record_value(record, "title_ratings_status", "ratings_status") or ENRICH_STATUS_UNKNOWN
+        )
+        ratings_refreshed_at = self._title_record_value(record, "title_ratings_refreshed_at", "ratings_refreshed_at")
+        has_ratings_value = any(
+            self._title_record_value(record, dict_key, attr_name) is not None
+            for dict_key, attr_name in (
+                ("title_trakt_rating", "trakt_rating"),
+                ("title_imdb_rating", "imdb_rating"),
+            )
+        )
+        for request in refresh_requests:
+            requested = request.requested_parts or TITLE_ALLOWED_PARTS
+            if ASSET_KIND_POSTER in requested and can_enrich_posters:
+                poster_decision = metadata_refresh_due(
+                    ASSET_KIND_POSTER,
+                    status=poster_status,
+                    last_checked_at=poster_refreshed_at,
+                    has_value=bool(poster_url),
+                    trigger=request.trigger,
+                )
+                if poster_decision.should_refresh:
+                    parts[ASSET_KIND_POSTER] = poster_decision.reason
+            if ASSET_KIND_TITLE_RATINGS in requested:
+                ratings_decision = metadata_refresh_due(
+                    ASSET_KIND_TITLE_RATINGS,
+                    status=ratings_status,
+                    last_checked_at=ratings_refreshed_at,
+                    has_value=has_ratings_value,
+                    trigger=request.trigger,
+                )
+                if ratings_decision.should_refresh:
+                    parts[ASSET_KIND_TITLE_RATINGS] = ratings_decision.reason
+        return parts
+
+    def select_title_enrich_keys(
+        self,
+        rows: list[dict],
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> list[tuple[int, str]]:
+        normalized_requests = self._normalize_title_refresh_requests(
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
+        )
+        result: list[tuple[int, str]] = []
+        for row in rows:
+            if not row.get("title_trakt_id") or row.get("type") not in {"movie", "show"}:
+                continue
+            if self._title_refresh_parts(row, str(row["type"]), normalized_requests):
+                result.append((int(row["title_trakt_id"]), str(row["type"])))
+        return list(dict.fromkeys(result))
 
     def search_titles(self, query: str, title_type: str | None = None) -> list[TitleSummary]:
         self._remember_search_query(query)
@@ -130,15 +229,23 @@ class CatalogService:
             return []
         return [item for item in items if isinstance(item, str) and item.strip()]
 
-    def get_title_details(self, trakt_id: int, title_type: str) -> TitleSummary:
+    def get_title_details(
+        self,
+        trakt_id: int,
+        title_type: str,
+        *,
+        use_cache: bool = True,
+        refresh_posters: bool = True,
+        refresh_ratings: bool = True,
+    ) -> TitleSummary:
         client = self._auth.get_client()
-        title = client.get_title_details(trakt_id, title_type)
+        title = client.get_title_details(trakt_id, title_type, use_cache=use_cache)
         poster_status = ENRICH_STATUS_UNKNOWN
         ratings_status = ENRICH_STATUS_UNKNOWN
         tmdb = self._tmdb_factory(self._auth.config)
         if title.poster_url:
             poster_status = ENRICH_STATUS_READY
-        elif tmdb.is_configured():
+        elif refresh_posters and tmdb.is_configured():
             if title.tmdb_id is None:
                 poster_status = ENRICH_STATUS_CHECKED_NO_DATA
             else:
@@ -148,7 +255,7 @@ class CatalogService:
                     poster_status = ENRICH_STATUS_RETRYABLE_FAILURE
                 else:
                     poster_status = ENRICH_STATUS_READY if title.poster_url else ENRICH_STATUS_CHECKED_NO_DATA
-        if self._imdb_client.is_ready():
+        if refresh_ratings and self._imdb_client.is_ready():
             if title.imdb_id:
                 title = self._imdb_client.enrich_title(title)
                 ratings_status = (
@@ -160,25 +267,27 @@ class CatalogService:
                 ratings_status = ENRICH_STATUS_CHECKED_NO_DATA
         with self._db.session() as session:
             model = self._titles.upsert_title(session, title)
-            self._titles.update_poster_enrich_state(
-                session,
-                trakt_id,
-                status=poster_status,
-                poster_url=title.poster_url,
-            )
-            self._titles.update_ratings_enrich_state(
-                session,
-                trakt_id,
-                status=ratings_status,
-                trakt_rating=title.trakt_rating,
-                trakt_votes=title.trakt_votes,
-                tmdb_id=title.tmdb_id,
-                tmdb_rating=title.tmdb_rating,
-                tmdb_votes=title.tmdb_votes,
-                imdb_id=title.imdb_id,
-                imdb_rating=title.imdb_rating,
-                imdb_votes=title.imdb_votes,
-            )
+            if refresh_posters:
+                self._titles.update_poster_enrich_state(
+                    session,
+                    trakt_id,
+                    status=poster_status,
+                    poster_url=title.poster_url,
+                )
+            if refresh_ratings:
+                self._titles.update_ratings_enrich_state(
+                    session,
+                    trakt_id,
+                    status=ratings_status,
+                    trakt_rating=title.trakt_rating,
+                    trakt_votes=title.trakt_votes,
+                    tmdb_id=title.tmdb_id,
+                    tmdb_rating=title.tmdb_rating,
+                    tmdb_votes=title.tmdb_votes,
+                    imdb_id=title.imdb_id,
+                    imdb_rating=title.imdb_rating,
+                    imdb_votes=title.imdb_votes,
+                )
             self._user_states.ensure_state(session, model.id)
         return title
 
@@ -196,45 +305,83 @@ class CatalogService:
     def has_missing_visible_titles(self, rows: list[dict]) -> bool:
         return bool(self.select_title_enrich_keys(rows))
 
-    def title_key_needs_enrich(self, trakt_id: int, title_type: str) -> bool:
+    def title_key_needs_enrich(
+        self,
+        trakt_id: int,
+        title_type: str,
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> bool:
         with self._db.session() as session:
             row = self._titles.get_title(session, trakt_id)
-        return self._title_row_needs_enrich(row, title_type)
-
-    def _title_row_needs_enrich(self, row, title_type: str) -> bool:
-        if row is None or row.title_type != title_type:
-            return True
-        needs_poster = self._tmdb_factory(self._auth.config).is_configured() and should_attempt_enrich(
-            getattr(row, "poster_status", ENRICH_STATUS_UNKNOWN),
-            has_value=bool(getattr(row, "poster_url", "")) and getattr(row, "poster_status", ENRICH_STATUS_UNKNOWN) == ENRICH_STATUS_READY,
+        normalized_requests = self._normalize_title_refresh_requests(
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
         )
-        needs_ratings = getattr(row, "ratings_status", ENRICH_STATUS_UNKNOWN) in {ENRICH_STATUS_UNKNOWN, ENRICH_STATUS_RETRYABLE_FAILURE}
-        return bool(needs_poster or needs_ratings)
+        return bool(self._title_refresh_parts(row, title_type, normalized_requests))
 
-    def enrich_title_key(self, trakt_id: int, title_type: str) -> str:
-        if not self.title_key_needs_enrich(trakt_id, title_type):
+    def enrich_title_key(
+        self,
+        trakt_id: int,
+        title_type: str,
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> str:
+        normalized_requests = self._normalize_title_refresh_requests(
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
+        )
+        if not self.title_key_needs_enrich(
+            trakt_id,
+            title_type,
+            refresh_requests=tuple(request.to_payload() for request in normalized_requests),
+        ):
             return TASK_RESULT_SKIPPED_ALREADY_RESOLVED
+        due_parts: dict[str, str] = {}
+        with self._db.session() as session:
+            row = self._titles.get_title(session, trakt_id)
+            due_parts = self._title_refresh_parts(row, title_type, normalized_requests)
+        refresh_posters = ASSET_KIND_POSTER in due_parts
+        refresh_ratings = ASSET_KIND_TITLE_RATINGS in due_parts
+        force_network = refresh_ratings or any(
+            request.trigger in {TRIGGER_VISIBLE_RATINGS_REFRESH, TRIGGER_SYNC_EVENT, TRIGGER_MANUAL_REPAIR}
+            for request in normalized_requests
+        )
         try:
-            self.get_title_details(trakt_id, title_type)
+            self.get_title_details(
+                trakt_id,
+                title_type,
+                use_cache=not force_network,
+                refresh_posters=refresh_posters,
+                refresh_ratings=refresh_ratings,
+            )
         except Exception:
             with self._db.session() as session:
                 row = self._titles.get_title(session, trakt_id)
                 if row is not None:
-                    if should_attempt_enrich(
-                        getattr(row, "poster_status", ENRICH_STATUS_UNKNOWN),
-                        has_value=bool(getattr(row, "poster_url", "")) and getattr(row, "poster_status", ENRICH_STATUS_UNKNOWN) == ENRICH_STATUS_READY,
-                    ):
+                    if refresh_posters:
                         self._titles.update_poster_enrich_state(session, trakt_id, status=ENRICH_STATUS_RETRYABLE_FAILURE)
-                    if getattr(row, "ratings_status", ENRICH_STATUS_UNKNOWN) in {ENRICH_STATUS_UNKNOWN, ENRICH_STATUS_RETRYABLE_FAILURE}:
+                    if refresh_ratings:
                         self._titles.update_ratings_enrich_state(session, trakt_id, status=ENRICH_STATUS_RETRYABLE_FAILURE)
             return ENRICH_STATUS_RETRYABLE_FAILURE
         with self._db.session() as session:
             row = self._titles.get_title(session, trakt_id)
             if row is None:
                 return ENRICH_STATUS_RETRYABLE_FAILURE
-            if self._title_row_needs_enrich(row, title_type):
+            remaining_due = self._title_refresh_parts(row, title_type, normalized_requests)
+            if remaining_due:
                 return ENRICH_STATUS_RETRYABLE_FAILURE
-            if row.poster_url or row.trakt_rating is not None or row.imdb_rating is not None:
+            if (
+                (refresh_posters and row.poster_url)
+                or (refresh_ratings and (row.trakt_rating is not None or row.imdb_rating is not None))
+                or (not refresh_posters and not refresh_ratings and (row.poster_url or row.trakt_rating is not None or row.imdb_rating is not None))
+            ):
                 return ENRICH_STATUS_READY
         return ENRICH_STATUS_CHECKED_NO_DATA
 

@@ -3,6 +3,14 @@
     data-progress-card-key="progress:{{ progress_item.trakt_id }}"
     {% if progress_is_new %}data-seen-form="seen-form-{{ progress_item.trakt_id }}"{% endif %}
 >
+    {% set trakt_title_url = "" %}
+    {% if progress_item.slug %}
+        {% set trakt_title_url = "https://trakt.tv/shows/" ~ progress_item.slug %}
+    {% endif %}
+    {% set trakt_episode_url = "" %}
+    {% if progress_item.slug and progress_item.next_episode and progress_item.next_episode.season is not none and progress_item.next_episode.number is not none %}
+        {% set trakt_episode_url = "https://trakt.tv/shows/" ~ progress_item.slug ~ "/seasons/" ~ progress_item.next_episode.season ~ "/episodes/" ~ progress_item.next_episode.number %}
+    {% endif %}
     <div class="progress-main">
         <div class="progress-side">
             <div class="progress-title-stack">
@@ -11,7 +19,11 @@
                 <p class="progress-status">{{ progress_item.status }}</p>
                 {% endif %}
             </div>
-            <div class="progress-poster">
+            <a
+                href="{{ trakt_title_url or ('/titles/show/' ~ progress_item.trakt_id) }}"
+                class="progress-poster"
+                {% if trakt_title_url %}target="_blank" rel="noreferrer"{% endif %}
+            >
                 {% if progress_item.poster_url %}
                 <img src="{{ progress_item.poster_url|cached_image_url }}" alt="{{ progress_item.title }} poster" loading="lazy">
                 {% elif progress_item.poster_status == 'checked_no_data' %}
@@ -21,7 +33,12 @@
                 {% endif %}
                 {% set skipped_count = progress_item|progress_skipped_count %}
                 {% if skipped_count %}
-                <div class="poster-badge">{{ skipped_count }}</div>
+                <div class="poster-badge poster-badge-left">{{ skipped_count }}</div>
+                {% endif %}
+                {% if progress_item.title_episode_avg_rating is not none %}
+                <div class="history-rating-badge">
+                    {{ progress_item.title_episode_avg_rating|round(1) }} ★
+                </div>
                 {% endif %}
                 {% set chip = progress_item|progress_rating_chip %}
                 {% if chip %}
@@ -40,7 +57,7 @@
                     {% endfor %}
                 </div>
                 {% endif %}
-            </div>
+            </a>
         </div>
         <div class="progress-body">
             {% if progress_is_new %}
@@ -58,8 +75,13 @@
                 </div>
                 {% set preview_url = progress_item.next_episode.still_url or progress_item.poster_url %}
                 {% set preview_is_poster_fallback = (not progress_item.next_episode.still_url) and progress_item.poster_url %}
+                {% set episode_chip = progress_item|progress_episode_rating_chip %}
                 <div class="progress-episode-preview-shell">
-                    <div class="progress-episode-preview{% if not preview_url %} is-empty{% endif %}{% if preview_is_poster_fallback %} is-poster-fallback{% endif %}">
+                    <a
+                        href="{{ trakt_episode_url or ('/titles/show/' ~ progress_item.trakt_id) }}"
+                        class="progress-episode-preview{% if not preview_url %} is-empty{% endif %}{% if preview_is_poster_fallback %} is-poster-fallback{% endif %}"
+                        {% if trakt_episode_url %}target="_blank" rel="noreferrer"{% endif %}
+                    >
                         {% if preview_url %}
                             {% if preview_is_poster_fallback %}
                             <div class="progress-episode-preview-backdrop" style="background-image: url('{{ preview_url|cached_image_url }}');"></div>
@@ -72,8 +94,24 @@
                         {% else %}
                         <span>Loading</span>
                         {% endif %}
-                    </div>
+                    </a>
                     <div class="progress-episode-chip">{{ progress_item.next_episode.season|episode_label(progress_item.next_episode.number) }}</div>
+                    {% if episode_chip %}
+                    <div class="poster-chip progress-episode-ratings-chip">
+                        {% for part in episode_chip.split(' | ') %}
+                        {% set source = part.split('|', 1)[0] %}
+                        {% set value = part.split('|', 1)[1] %}
+                        <span class="poster-chip-part">
+                            <img
+                                class="poster-chip-icon"
+                                src="{{ request.url_for('static', path='imdb_icon.png' if source == 'imdb' else 'trakt_logo_bw.svg') }}"
+                                alt="{{ source }}"
+                            >
+                            <span>{{ value }}</span>
+                        </span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
                 </div>
                 <div class="progress-episode-footer">
                     <p class="progress-air-date">{{ progress_item.next_episode.first_aired|dt if progress_item.next_episode.first_aired else 'unknown' }}</p>

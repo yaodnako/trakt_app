@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
+from trakt_tracker.application.metadata_refresh_policy import ASSET_KIND_POSTER, ASSET_KIND_STILL, TRIGGER_SYNC_EVENT
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.sync_policy import SyncPolicy
 from trakt_tracker.application.trakt_payload_cache import (
@@ -28,6 +29,7 @@ class HistorySyncWorkflow:
         imdb_client: IMDbDatasetClient,
         operations: OperationLog,
         episode_metadata: EpisodeMetadataService,
+        catalog=None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -41,6 +43,7 @@ class HistorySyncWorkflow:
         self._operations = operations
         self._policy = SyncPolicy
         self._episode_metadata = episode_metadata
+        self._catalog = catalog
 
     def initial_import(self) -> None:
         client = self._auth.get_client()
@@ -107,16 +110,29 @@ class HistorySyncWorkflow:
             client = self._auth.get_client()
             rating_items = self._fetch_all_ratings(client)
         show_ids: set[int] = set()
+        title_sync_targets: set[tuple[int, str]] = set()
+        episode_sync_targets: set[tuple[int, int, int]] = set()
         with self._db.session() as session:
             for item in history_items:
                 imported = self._import_history_item(session, item)
                 if imported is not None and imported["title_type"] == "show":
                     show_ids.add(imported["trakt_id"])
+                title_target, episode_target = self._sync_event_targets_from_item(item)
+                if title_target is not None:
+                    title_sync_targets.add(title_target)
+                if episode_target is not None:
+                    episode_sync_targets.add(episode_target)
             self._history.delete_trakt_rated(session)
             for item in rating_items:
                 self._import_rating_item(session, item)
+                title_target, episode_target = self._sync_event_targets_from_item(item)
+                if title_target is not None:
+                    title_sync_targets.add(title_target)
+                if episode_target is not None:
+                    episode_sync_targets.add(episode_target)
         for trakt_id in show_ids:
             self.refresh_show(trakt_id)
+        self._run_sync_event_refreshes(title_sync_targets, episode_sync_targets)
         self._episode_metadata.backfill_episode_imdb_ids_from_payloads(history_items + rating_items)
         self._episode_metadata.enrich_episode_imdb_ratings()
         return True
@@ -128,6 +144,21 @@ class HistorySyncWorkflow:
         with self._db.session() as session:
             self._progress.upsert_progress(session, progress)
             self._episode_repo.replace_show_episodes(session, trakt_id, episodes)
+        if self._catalog is not None:
+            self._catalog.enrich_title_key(
+                trakt_id,
+                "show",
+                trigger=TRIGGER_SYNC_EVENT,
+                requested_parts=(ASSET_KIND_POSTER,),
+            )
+        if progress.next_episode is not None:
+            self._episode_metadata.enrich_episode_key(
+                trakt_id,
+                progress.next_episode.season,
+                progress.next_episode.number,
+                trigger=TRIGGER_SYNC_EVENT,
+                requested_parts=(ASSET_KIND_STILL,),
+            )
         return progress
 
     def dashboard_state(self) -> DashboardState:
@@ -148,19 +179,78 @@ class HistorySyncWorkflow:
 
     def _sync_history_and_ratings(self, history_items: list[dict], ratings: list[dict]) -> None:
         show_ids: set[int] = set()
+        title_sync_targets: set[tuple[int, str]] = set()
+        episode_sync_targets: set[tuple[int, int, int]] = set()
         with self._db.session() as session:
             for item in history_items:
                 imported = self._import_history_item(session, item)
                 if imported is not None and imported["title_type"] == "show":
                     show_ids.add(imported["trakt_id"])
+                title_target, episode_target = self._sync_event_targets_from_item(item)
+                if title_target is not None:
+                    title_sync_targets.add(title_target)
+                if episode_target is not None:
+                    episode_sync_targets.add(episode_target)
             self._history.delete_trakt_rated(session)
             for item in ratings:
                 self._import_rating_item(session, item)
+                title_target, episode_target = self._sync_event_targets_from_item(item)
+                if title_target is not None:
+                    title_sync_targets.add(title_target)
+                if episode_target is not None:
+                    episode_sync_targets.add(episode_target)
             self._sync_state.set_value(session, "initial_import_at", datetime.now(tz=UTC).isoformat())
         for trakt_id in show_ids:
             self.refresh_show(trakt_id)
+        self._run_sync_event_refreshes(title_sync_targets, episode_sync_targets)
         self._episode_metadata.backfill_episode_imdb_ids_from_payloads(history_items + ratings)
         self._episode_metadata.enrich_episode_imdb_ratings()
+
+    @staticmethod
+    def _sync_event_targets_from_item(item: dict) -> tuple[tuple[int, str] | None, tuple[int, int, int] | None]:
+        raw_type = str(item.get("type", "") or "")
+        if raw_type == "episode":
+            show_payload = item.get("show", {}) or {}
+            episode_payload = item.get("episode", {}) or {}
+            show_ids = show_payload.get("ids", {}) if isinstance(show_payload, dict) else {}
+            show_trakt_id = show_ids.get("trakt")
+            season = episode_payload.get("season")
+            number = episode_payload.get("number")
+            title_target = (int(show_trakt_id), "show") if show_trakt_id else None
+            episode_target = (
+                (int(show_trakt_id), int(season), int(number))
+                if show_trakt_id and season is not None and number is not None
+                else None
+            )
+            return title_target, episode_target
+        payload = item.get(raw_type, {}) or {}
+        ids = payload.get("ids", {}) if isinstance(payload, dict) else {}
+        trakt_id = ids.get("trakt")
+        if trakt_id and raw_type in {"movie", "show"}:
+            return (int(trakt_id), raw_type), None
+        return None, None
+
+    def _run_sync_event_refreshes(
+        self,
+        title_targets: set[tuple[int, str]],
+        episode_targets: set[tuple[int, int, int]],
+    ) -> None:
+        if self._catalog is not None:
+            for trakt_id, title_type in sorted(title_targets):
+                self._catalog.enrich_title_key(
+                    trakt_id,
+                    title_type,
+                    trigger=TRIGGER_SYNC_EVENT,
+                    requested_parts=(ASSET_KIND_POSTER,),
+                )
+        for show_trakt_id, season, episode in sorted(episode_targets):
+            self._episode_metadata.enrich_episode_key(
+                show_trakt_id,
+                season,
+                episode,
+                trigger=TRIGGER_SYNC_EVENT,
+                requested_parts=(ASSET_KIND_STILL,),
+            )
 
     def _import_history_item(self, session, item: dict) -> dict | None:
         raw_type = item.get("type")

@@ -65,7 +65,7 @@ class _FakeTraktClient:
             )
         ]
 
-    def get_title_details(self, trakt_id: int, title_type: str) -> TitleSummary:
+    def get_title_details(self, trakt_id: int, title_type: str, use_cache: bool = True) -> TitleSummary:
         self.title_details_calls.append((trakt_id, title_type))
         return replace(self.title_details, trakt_id=trakt_id, title_type=title_type)
 
@@ -81,7 +81,7 @@ class _FakeTraktClient:
             EpisodeSummary(trakt_id=302, season=1, number=2, title="Second"),
         ]
 
-    def get_episode_details(self, show_trakt_id: int, season: int, episode: int) -> EpisodeSummary:
+    def get_episode_details(self, show_trakt_id: int, season: int, episode: int, use_cache: bool = True) -> EpisodeSummary:
         self.episode_details_calls.append((show_trakt_id, season, episode))
         return EpisodeSummary(
             trakt_id=300 + episode,
@@ -347,6 +347,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 EpisodeSummary(trakt_id=301, season=3, number=4, title="Kill Switch"),
             )
             row.trakt_details_status = ENRICH_STATUS_CHECKED_NO_DATA
+            row.trakt_details_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
         changed = service.enrich_visible_episode_details(
             [{"title_trakt_id": 138748, "type": "show", "season": 3, "episode": 4}]
         )
@@ -371,8 +372,10 @@ class ApplicationServiceTests(unittest.TestCase):
                 EpisodeSummary(trakt_id=301, season=3, number=4, title="Kill Switch"),
             )
             row.trakt_details_status = ENRICH_STATUS_CHECKED_NO_DATA
+            row.trakt_details_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
             row.still_status = ENRICH_STATUS_CHECKED_NO_DATA
             row.still_missing = True
+            row.still_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
         self.assertFalse(
             service.has_missing_visible_episode_details(
                 [{"title_trakt_id": 138748, "type": "show", "season": 3, "episode": 4}]
@@ -395,9 +398,11 @@ class ApplicationServiceTests(unittest.TestCase):
                 "type": "movie",
                 "poster_url": "",
                 "title_poster_status": ENRICH_STATUS_CHECKED_NO_DATA,
+                "title_poster_refreshed_at": datetime.now(tz=UTC),
                 "title_trakt_rating": None,
                 "title_trakt_votes": None,
                 "title_ratings_status": ENRICH_STATUS_CHECKED_NO_DATA,
+                "title_ratings_refreshed_at": datetime.now(tz=UTC),
             }
         ]
         self.assertFalse(service.has_missing_visible_titles(rows))

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,7 +37,7 @@ class _FakeHistoryService:
     def has_missing_visible_episode_details(self, _rows):
         return self.episode_missing
 
-    def select_episode_enrich_keys(self, rows):
+    def select_episode_enrich_keys(self, rows, *, trigger="viewport", requested_parts=(), refresh_requests=None):
         result = []
         for row in rows:
             if row.get("type") == "show" and row.get("season") is not None and row.get("episode") is not None:
@@ -59,7 +59,7 @@ class _FakeCatalogService:
     def has_missing_visible_titles(self, _rows):
         return self.title_missing
 
-    def select_title_enrich_keys(self, rows):
+    def select_title_enrich_keys(self, rows, *, trigger="viewport", requested_parts=(), refresh_requests=None):
         result = []
         for row in rows:
             if row.get("title_trakt_id") and row.get("type") in {"movie", "show"}:
@@ -184,6 +184,7 @@ class HistoryRouteTests(unittest.TestCase):
                 "authorized": True,
                 "configured": True,
                 "settings_utc_offset": "+03:00",
+                "notification_sound_url": "",
                 "debug_mode": False,
                 "debug_initial_seq": self.operations.current_seq(),
             }
@@ -271,6 +272,35 @@ class HistoryRouteTests(unittest.TestCase):
             },
         )
         self.assertTrue(response.json()["page_changed"])
+
+    def test_history_refresh_queues_ratings_only_requests_for_stale_visible_items(self) -> None:
+        stale_row = self._row("show", 1, "Severance", watched_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC))
+        stale_row["title_ratings_status"] = "ready"
+        stale_row["title_ratings_refreshed_at"] = datetime.now(tz=UTC) - timedelta(minutes=10)
+        stale_row["episode_trakt_status"] = "ready"
+        stale_row["episode_trakt_refreshed_at"] = datetime.now(tz=UTC) - timedelta(minutes=10)
+        self.history.rows = [stale_row]
+        show_key = "03.04.2026:show:1"
+        response = self.client.post(
+            "/history/refresh",
+            json={
+                "type": "all",
+                "title_filter": "",
+                "page": 1,
+                "viewport_title_keys": [show_key],
+                "nearby_title_keys": [],
+                "page_title_keys": [show_key],
+                "queue_after_revision": 0,
+                "force_visible_refresh": "1",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        page_tasks = self.enrich_queue.submissions[0]["page"]
+        ratings_only = [task for task in page_tasks if task.payload["refresh_requests"][0]["trigger"] == "visible_ratings_refresh"]
+        self.assertEqual(
+            sorted(tuple(task.payload["refresh_requests"][0]["requested_parts"]) for task in ratings_only),
+            [("episode_ratings",), ("title_ratings",)],
+        )
 
     def test_history_page_uses_no_reload_refresh_script(self) -> None:
         response = self.client.get("/history?page=2")

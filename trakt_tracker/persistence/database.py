@@ -48,7 +48,9 @@ class Database:
             "ALTER TABLE titles ADD COLUMN imdb_rating FLOAT",
             "ALTER TABLE titles ADD COLUMN imdb_votes INTEGER",
             "ALTER TABLE titles ADD COLUMN poster_status VARCHAR(32) DEFAULT 'unknown'",
+            "ALTER TABLE titles ADD COLUMN poster_refreshed_at DATETIME",
             "ALTER TABLE titles ADD COLUMN ratings_status VARCHAR(32) DEFAULT 'unknown'",
+            "ALTER TABLE titles ADD COLUMN ratings_refreshed_at DATETIME",
             "ALTER TABLE episodes_cache ADD COLUMN still_url VARCHAR(512) DEFAULT ''",
             "ALTER TABLE episodes_cache ADD COLUMN still_missing BOOLEAN DEFAULT 0",
             "ALTER TABLE episodes_cache ADD COLUMN imdb_id VARCHAR(32) DEFAULT ''",
@@ -57,7 +59,9 @@ class Database:
             "ALTER TABLE episodes_cache ADD COLUMN trakt_rating FLOAT",
             "ALTER TABLE episodes_cache ADD COLUMN trakt_votes INTEGER",
             "ALTER TABLE episodes_cache ADD COLUMN still_status VARCHAR(32) DEFAULT 'unknown'",
+            "ALTER TABLE episodes_cache ADD COLUMN still_refreshed_at DATETIME",
             "ALTER TABLE episodes_cache ADD COLUMN trakt_details_status VARCHAR(32) DEFAULT 'unknown'",
+            "ALTER TABLE episodes_cache ADD COLUMN trakt_details_refreshed_at DATETIME",
             "ALTER TABLE notifications_log ADD COLUMN last_sent_at DATETIME",
             "ALTER TABLE notifications_log ADD COLUMN seen_at DATETIME",
             "ALTER TABLE notifications_log ADD COLUMN notify_count INTEGER DEFAULT 1",
@@ -86,6 +90,10 @@ class Database:
                         "WHEN COALESCE(poster_status, '') = '' AND COALESCE(poster_url, '') != '' THEN 'ready' "
                         "WHEN COALESCE(poster_status, '') = '' THEN 'unknown' "
                         "ELSE poster_status END, "
+                        "poster_refreshed_at = CASE "
+                        "WHEN poster_refreshed_at IS NOT NULL THEN poster_refreshed_at "
+                        "WHEN COALESCE(poster_url, '') != '' OR COALESCE(poster_status, '') IN ('ready', 'checked_no_data', 'retryable_failure') THEN updated_at "
+                        "ELSE poster_refreshed_at END, "
                         "ratings_status = CASE "
                         "WHEN COALESCE(ratings_status, '') = '' AND trakt_rating IS NOT NULL AND trakt_votes IS NOT NULL THEN 'ready' "
                         "WHEN COALESCE(ratings_status, '') = '' THEN 'unknown' "
@@ -103,6 +111,10 @@ class Database:
                         "WHEN COALESCE(still_status, '') = '' AND COALESCE(still_missing, 0) != 0 THEN 'checked_no_data' "
                         "WHEN COALESCE(still_status, '') = '' THEN 'unknown' "
                         "ELSE still_status END, "
+                        "still_refreshed_at = CASE "
+                        "WHEN still_refreshed_at IS NOT NULL THEN still_refreshed_at "
+                        "WHEN COALESCE(still_url, '') != '' OR COALESCE(still_status, '') IN ('ready', 'checked_no_data', 'retryable_failure') OR COALESCE(still_missing, 0) != 0 THEN CURRENT_TIMESTAMP "
+                        "ELSE still_refreshed_at END, "
                         "trakt_details_status = CASE "
                         "WHEN COALESCE(trakt_details_status, '') = '' AND trakt_rating IS NOT NULL AND trakt_votes IS NOT NULL THEN 'ready' "
                         "WHEN COALESCE(trakt_details_status, '') = '' THEN 'unknown' "

@@ -135,8 +135,8 @@ class TraktClient:
             )
         return [item for item in result if item.trakt_id]
 
-    def get_title_details(self, trakt_id: int, title_type: str) -> TitleSummary:
-        payload = self._request("GET", f"/{title_type}s/{trakt_id}", params={"extended": "full"})
+    def get_title_details(self, trakt_id: int, title_type: str, *, use_cache: bool = True) -> TitleSummary:
+        payload = self._request("GET", f"/{title_type}s/{trakt_id}", params={"extended": "full"}, use_cache=use_cache)
         if not isinstance(payload, dict):
             raise TraktError("Unexpected Trakt title details payload")
         ids = payload.get("ids", {})
@@ -181,8 +181,13 @@ class TraktClient:
                     episodes.append(parsed)
         return episodes
 
-    def get_episode_details(self, show_trakt_id: int, season: int, episode: int) -> EpisodeSummary | None:
-        payload = self._request("GET", f"/shows/{show_trakt_id}/seasons/{season}/episodes/{episode}", params={"extended": "full"})
+    def get_episode_details(self, show_trakt_id: int, season: int, episode: int, *, use_cache: bool = True) -> EpisodeSummary | None:
+        payload = self._request(
+            "GET",
+            f"/shows/{show_trakt_id}/seasons/{season}/episodes/{episode}",
+            params={"extended": "full"},
+            use_cache=use_cache,
+        )
         if not isinstance(payload, dict):
             return None
         return self._parse_episode(payload, season)

@@ -64,6 +64,10 @@ Visual checks:
 - Phase 5:
   - `Progress` переведен на тот же shared enrich core и queue path
   - normal page render больше не должен opportunistically тянуть network enrich
+- Post-phase hardening:
+  - visible ratings в `History` и `Progress` получили stale-by-time refresh policy
+  - entering viewport триггерит быстрый patch refresh для видимых cards/groups
+  - posters / stills больше не должны периодически перепроверяться как ratings
 
 ## Что важно помнить
 
@@ -72,10 +76,12 @@ Visual checks:
 - `History` и `Progress` читают metadata из одних и тех же таблиц:
   - `titles`
   - `episodes_cache`
+- decision о refresh теперь принимается не только по `status`, но и по refresh timestamps для ratings
 - file caches теперь только provider response caches, а не decision authority
 - если что-то визуально выглядит не так, сначала надо проверять:
   - что лежит в SQLite
   - какой enrich status у row
+  - какой refresh timestamp у ratings row
   - не крутится ли queue в `retryable_failure`
 
 ## Как работать дальше

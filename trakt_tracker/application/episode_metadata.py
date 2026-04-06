@@ -8,9 +8,21 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
     ENRICH_STATUS_RETRYABLE_FAILURE,
     ENRICH_STATUS_UNKNOWN,
-    should_attempt_enrich,
 )
 from trakt_tracker.application.enrich_queue import TASK_RESULT_SKIPPED_ALREADY_RESOLVED
+from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_EPISODE_RATINGS,
+    ASSET_KIND_STILL,
+    EPISODE_ALLOWED_PARTS,
+    TRIGGER_MANUAL_REPAIR,
+    TRIGGER_SYNC_EVENT,
+    TRIGGER_VIEWPORT,
+    TRIGGER_VISIBLE_RATINGS_REFRESH,
+    MetadataRefreshRequest,
+    build_refresh_request,
+    metadata_refresh_due,
+    refresh_requests_from_payload,
+)
 from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_history_items,
     load_cached_trakt_rating_items,
@@ -36,6 +48,81 @@ class EpisodeMetadataService:
         self._titles = titles_repo
         self._auth = auth_service
         self._tmdb_factory = tmdb_factory
+
+    def _normalize_episode_refresh_requests(
+        self,
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> tuple[MetadataRefreshRequest, ...]:
+        if refresh_requests is not None:
+            normalized = refresh_requests_from_payload(refresh_requests, allowed_parts=EPISODE_ALLOWED_PARTS)
+            if normalized:
+                return normalized
+        return (
+            build_refresh_request(
+                trigger=trigger,
+                requested_parts=requested_parts,
+                allowed_parts=EPISODE_ALLOWED_PARTS,
+            ),
+        )
+
+    @staticmethod
+    def _episode_record_value(record, dict_key: str, attr_name: str):
+        if record is None:
+            return None
+        if isinstance(record, dict):
+            return record.get(dict_key)
+        return getattr(record, attr_name, None)
+
+    def _episode_refresh_parts(
+        self,
+        record,
+        refresh_requests: tuple[MetadataRefreshRequest, ...],
+    ) -> dict[str, str]:
+        parts: dict[str, str] = {}
+        still_url = str(self._episode_record_value(record, "still_url", "still_url") or "")
+        still_status = str(self._episode_record_value(record, "still_status", "still_status") or ENRICH_STATUS_UNKNOWN)
+        still_refreshed_at = self._episode_record_value(record, "still_refreshed_at", "still_refreshed_at")
+        trakt_details_status = str(
+            self._episode_record_value(record, "trakt_details_status", "trakt_details_status") or ENRICH_STATUS_UNKNOWN
+        )
+        trakt_details_refreshed_at = self._episode_record_value(
+            record,
+            "trakt_details_refreshed_at",
+            "trakt_details_refreshed_at",
+        )
+        has_ratings_value = any(
+            self._episode_record_value(record, dict_key, attr_name) is not None
+            for dict_key, attr_name in (
+                ("trakt_rating", "trakt_rating"),
+                ("imdb_rating", "imdb_rating"),
+            )
+        )
+        for request in refresh_requests:
+            requested = request.requested_parts or EPISODE_ALLOWED_PARTS
+            if ASSET_KIND_EPISODE_RATINGS in requested:
+                ratings_decision = metadata_refresh_due(
+                    ASSET_KIND_EPISODE_RATINGS,
+                    status=trakt_details_status,
+                    last_checked_at=trakt_details_refreshed_at,
+                    has_value=has_ratings_value,
+                    trigger=request.trigger,
+                )
+                if ratings_decision.should_refresh:
+                    parts[ASSET_KIND_EPISODE_RATINGS] = ratings_decision.reason
+            if ASSET_KIND_STILL in requested and self.can_enrich_episode_stills():
+                still_decision = metadata_refresh_due(
+                    ASSET_KIND_STILL,
+                    status=still_status,
+                    last_checked_at=still_refreshed_at,
+                    has_value=bool(still_url),
+                    trigger=request.trigger,
+                )
+                if still_decision.should_refresh:
+                    parts[ASSET_KIND_STILL] = still_decision.reason
+        return parts
 
     def load_cached_trakt_rating_maps(self) -> tuple[dict[int, int], dict[tuple[int, int, int], int]]:
         title_ratings: dict[int, tuple[datetime, int]] = {}
@@ -214,7 +301,9 @@ class EpisodeMetadataService:
             row.imdb_votes = enriched.imdb_votes
         progress.next_episode.still_url = row.still_url or ""
         progress.next_episode.still_status = row.still_status or ENRICH_STATUS_UNKNOWN
+        progress.next_episode.still_refreshed_at = row.still_refreshed_at
         progress.next_episode.trakt_details_status = row.trakt_details_status or ENRICH_STATUS_UNKNOWN
+        progress.next_episode.trakt_details_refreshed_at = row.trakt_details_refreshed_at
         progress.next_episode.imdb_rating = row.imdb_rating
         progress.next_episode.imdb_votes = row.imdb_votes
         progress.next_episode.imdb_status = (
@@ -223,7 +312,14 @@ class EpisodeMetadataService:
             else (ENRICH_STATUS_CHECKED_NO_DATA if row.imdb_id else ENRICH_STATUS_UNKNOWN)
         )
 
-    def select_episode_enrich_keys(self, rows: list[dict]) -> list[tuple[int, int, int]]:
+    def select_episode_enrich_keys(
+        self,
+        rows: list[dict],
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> list[tuple[int, int, int]]:
         episode_keys = [
             (int(row["title_trakt_id"]), int(row["season"]), int(row["episode"]))
             for row in rows
@@ -233,23 +329,61 @@ class EpisodeMetadataService:
             return []
         with self._db.session() as session:
             metadata = self._episode_repo.metadata_by_episode_keys(session, episode_keys)
+        normalized_requests = self._normalize_episode_refresh_requests(
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
+        )
         pending: list[tuple[int, int, int]] = []
         for key in dict.fromkeys(episode_keys):
             item = metadata.get(key) or {}
-            if self._episode_item_needs_enrich(item):
+            if self._episode_refresh_parts(item, normalized_requests):
                 pending.append(key)
         return pending
 
-    def episode_key_needs_enrich(self, show_trakt_id: int, season: int, episode: int) -> bool:
+    def episode_key_needs_enrich(
+        self,
+        show_trakt_id: int,
+        season: int,
+        episode: int,
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> bool:
         with self._db.session() as session:
             item = self._episode_repo.metadata_by_episode_keys(session, [(show_trakt_id, season, episode)]).get(
                 (show_trakt_id, season, episode),
                 {},
             )
-        return self._episode_item_needs_enrich(item)
+        normalized_requests = self._normalize_episode_refresh_requests(
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
+        )
+        return bool(self._episode_refresh_parts(item, normalized_requests))
 
-    def enrich_episode_key(self, show_trakt_id: int, season: int, episode: int) -> str:
-        if not self.episode_key_needs_enrich(show_trakt_id, season, episode):
+    def enrich_episode_key(
+        self,
+        show_trakt_id: int,
+        season: int,
+        episode: int,
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(),
+        refresh_requests=None,
+    ) -> str:
+        normalized_requests = self._normalize_episode_refresh_requests(
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
+        )
+        if not self.episode_key_needs_enrich(
+            show_trakt_id,
+            season,
+            episode,
+            refresh_requests=tuple(request.to_payload() for request in normalized_requests),
+        ):
             return TASK_RESULT_SKIPPED_ALREADY_RESOLVED
 
         with self._db.session() as session:
@@ -257,15 +391,18 @@ class EpisodeMetadataService:
                 (show_trakt_id, season, episode),
                 {},
             )
-        needs_details = should_attempt_enrich(
-            item.get("trakt_details_status", ENRICH_STATUS_UNKNOWN),
-            has_value=item.get("trakt_rating") is not None and item.get("trakt_votes") is not None,
+        due_parts = self._episode_refresh_parts(item, normalized_requests)
+        needs_details = ASSET_KIND_EPISODE_RATINGS in due_parts
+        needs_still = ASSET_KIND_STILL in due_parts
+        force_network = needs_details or any(
+            request.trigger in {TRIGGER_VISIBLE_RATINGS_REFRESH, TRIGGER_SYNC_EVENT, TRIGGER_MANUAL_REPAIR}
+            for request in normalized_requests
         )
         if needs_details and self._auth is not None:
             client = self._auth.get_client()
             with self._db.session() as session:
                 try:
-                    details = client.get_episode_details(show_trakt_id, season, episode)
+                    details = client.get_episode_details(show_trakt_id, season, episode, use_cache=not force_network)
                 except Exception:
                     self._episode_repo.update_trakt_details_enrich_state(
                         session,
@@ -297,19 +434,27 @@ class EpisodeMetadataService:
                             status=status,
                             details=details,
                         )
-        try:
-            self.enrich_episode_stills([(show_trakt_id, season, episode)])
-        except Exception:
-            pass
+        if needs_still:
+            try:
+                self.enrich_episode_stills(
+                    [(show_trakt_id, season, episode)],
+                    refresh_requests=tuple(request.to_payload() for request in normalized_requests),
+                )
+            except Exception:
+                pass
 
         with self._db.session() as session:
             item = self._episode_repo.metadata_by_episode_keys(session, [(show_trakt_id, season, episode)]).get(
                 (show_trakt_id, season, episode),
                 {},
             )
-        if self._episode_item_needs_enrich(item):
+        if self._episode_refresh_parts(item, normalized_requests):
             return ENRICH_STATUS_RETRYABLE_FAILURE
-        if item.get("still_url") or item.get("trakt_rating") is not None or item.get("imdb_rating") is not None:
+        if (
+            (needs_still and item.get("still_url"))
+            or (needs_details and (item.get("trakt_rating") is not None or item.get("imdb_rating") is not None))
+            or (not needs_still and not needs_details and (item.get("still_url") or item.get("trakt_rating") is not None or item.get("imdb_rating") is not None))
+        ):
             return ENRICH_STATUS_READY
         return ENRICH_STATUS_CHECKED_NO_DATA
 
@@ -318,19 +463,28 @@ class EpisodeMetadataService:
             return False
         return self._tmdb_factory(self._auth.config).is_configured()
 
-    def enrich_episode_stills(self, keys: list[tuple[int, int, int]]) -> bool:
+    def enrich_episode_stills(
+        self,
+        keys: list[tuple[int, int, int]],
+        *,
+        trigger: str = TRIGGER_VIEWPORT,
+        requested_parts=(ASSET_KIND_STILL,),
+        refresh_requests=None,
+    ) -> bool:
         if not keys or not self.can_enrich_episode_stills():
             return False
         unique_keys = list(dict.fromkeys(keys))
+        normalized_requests = self._normalize_episode_refresh_requests(
+            trigger=trigger,
+            requested_parts=requested_parts,
+            refresh_requests=refresh_requests,
+        )
         with self._db.session() as session:
             metadata = self._episode_repo.metadata_by_episode_keys(session, unique_keys)
         missing_by_show: dict[int, list[tuple[int, int]]] = {}
         for show_trakt_id, season, episode in unique_keys:
             item = metadata.get((show_trakt_id, season, episode)) or {}
-            if not should_attempt_enrich(
-                item.get("still_status", ENRICH_STATUS_UNKNOWN),
-                has_value=bool(item.get("still_url")),
-            ):
+            if ASSET_KIND_STILL not in self._episode_refresh_parts(item, normalized_requests):
                 continue
             missing_by_show.setdefault(show_trakt_id, []).append((season, episode))
         if not missing_by_show:
@@ -419,21 +573,6 @@ class EpisodeMetadataService:
         if not cached_row.imdb_id:
             return True
         return False
-
-    def _episode_item_needs_enrich(self, item: dict) -> bool:
-        return bool(
-            should_attempt_enrich(
-                item.get("trakt_details_status", ENRICH_STATUS_UNKNOWN),
-                has_value=item.get("trakt_rating") is not None and item.get("trakt_votes") is not None,
-            )
-            or (
-                self.can_enrich_episode_stills()
-                and should_attempt_enrich(
-                    item.get("still_status", ENRICH_STATUS_UNKNOWN),
-                    has_value=bool(item.get("still_url")),
-                )
-            )
-        )
 
     def _load_show_tmdb_id(self, show_trakt_id: int, client) -> int | None:
         if self._titles is not None:

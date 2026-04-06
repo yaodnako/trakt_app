@@ -182,6 +182,42 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(row.imdb_rating, 8.3)
         self.assertEqual(row.ratings_status, ENRICH_STATUS_READY)
 
+    def test_update_artwork_enrich_state_writes_refresh_timestamps(self) -> None:
+        title_repo = TitleRepository()
+        episode_repo = EpisodeRepository()
+        with self.db.session() as session:
+            title_repo.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=88,
+                    title_type="show",
+                    title="Poster target",
+                ),
+            )
+            episode_repo.upsert_episode(
+                session,
+                88,
+                EpisodeSummary(trakt_id=801, season=1, number=1, title="Pilot"),
+            )
+            title_repo.update_poster_enrich_state(
+                session,
+                88,
+                status=ENRICH_STATUS_CHECKED_NO_DATA,
+                poster_url="",
+            )
+            episode_repo.update_still_enrich_state(
+                session,
+                88,
+                1,
+                1,
+                status=ENRICH_STATUS_CHECKED_NO_DATA,
+                still_url="",
+            )
+            title_row = title_repo.get_title(session, 88)
+            episode_row = episode_repo.find_episode(session, 88, 1, 1)
+        self.assertIsNotNone(title_row.poster_refreshed_at)
+        self.assertIsNotNone(episode_row.still_refreshed_at)
+
     def test_database_backfills_status_columns_from_existing_values(self) -> None:
         with self.db.session() as session:
             TitleRepository().upsert_title(
@@ -208,10 +244,14 @@ class RepositoryTests(unittest.TestCase):
         with self.db.session() as session:
             poster_status = session.execute(text("SELECT poster_status FROM titles WHERE trakt_id = 1")).scalar()
             ratings_status = session.execute(text("SELECT ratings_status FROM titles WHERE trakt_id = 1")).scalar()
+            poster_refreshed_at = session.execute(text("SELECT poster_refreshed_at FROM titles WHERE trakt_id = 1")).scalar()
             still_status = session.execute(text("SELECT still_status FROM episodes_cache WHERE show_trakt_id = 1")).scalar()
+            still_refreshed_at = session.execute(text("SELECT still_refreshed_at FROM episodes_cache WHERE show_trakt_id = 1")).scalar()
         self.assertEqual(poster_status, ENRICH_STATUS_READY)
         self.assertEqual(ratings_status, ENRICH_STATUS_READY)
+        self.assertIsNotNone(poster_refreshed_at)
         self.assertEqual(still_status, ENRICH_STATUS_CHECKED_NO_DATA)
+        self.assertIsNotNone(still_refreshed_at)
 
 
 if __name__ == "__main__":

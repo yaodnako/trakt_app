@@ -7,6 +7,14 @@ from threading import Condition, Thread
 from time import monotonic
 from typing import Callable
 
+from trakt_tracker.application.metadata_refresh_policy import (
+    EPISODE_ALLOWED_PARTS,
+    TITLE_ALLOWED_PARTS,
+    TRIGGER_VIEWPORT,
+    build_refresh_request,
+    merge_refresh_requests,
+)
+
 
 TASK_KIND_HISTORY_TITLE = "history_title"
 TASK_KIND_HISTORY_EPISODE = "history_episode"
@@ -54,13 +62,31 @@ class EnrichTaskUpdate:
         }
 
 
-def build_history_title_task(*, title_key: str, trakt_id: int, title_type: str, priority: int = 3) -> EnrichTask:
+def build_history_title_task(
+    *,
+    title_key: str,
+    trakt_id: int,
+    title_type: str,
+    priority: int = 3,
+    trigger: str = TRIGGER_VIEWPORT,
+    requested_parts=(),
+) -> EnrichTask:
     return EnrichTask(
         kind=TASK_KIND_HISTORY_TITLE,
         task_key=f"title:{title_type}:{trakt_id}",
         priority=priority,
         affected_title_keys=(title_key,),
-        payload={"trakt_id": int(trakt_id), "title_type": str(title_type)},
+        payload={
+            "trakt_id": int(trakt_id),
+            "title_type": str(title_type),
+            "refresh_requests": [
+                build_refresh_request(
+                    trigger=trigger,
+                    requested_parts=requested_parts,
+                    allowed_parts=TITLE_ALLOWED_PARTS,
+                ).to_payload()
+            ],
+        },
     )
 
 
@@ -71,6 +97,8 @@ def build_history_episode_task(
     season: int,
     episode: int,
     priority: int = 3,
+    trigger: str = TRIGGER_VIEWPORT,
+    requested_parts=(),
 ) -> EnrichTask:
     return EnrichTask(
         kind=TASK_KIND_HISTORY_EPISODE,
@@ -81,17 +109,42 @@ def build_history_episode_task(
             "show_trakt_id": int(show_trakt_id),
             "season": int(season),
             "episode": int(episode),
+            "refresh_requests": [
+                build_refresh_request(
+                    trigger=trigger,
+                    requested_parts=requested_parts,
+                    allowed_parts=EPISODE_ALLOWED_PARTS,
+                ).to_payload()
+            ],
         },
     )
 
 
-def build_progress_title_task(*, title_key: str, trakt_id: int, title_type: str, priority: int = 3) -> EnrichTask:
+def build_progress_title_task(
+    *,
+    title_key: str,
+    trakt_id: int,
+    title_type: str,
+    priority: int = 3,
+    trigger: str = TRIGGER_VIEWPORT,
+    requested_parts=(),
+) -> EnrichTask:
     return EnrichTask(
         kind=TASK_KIND_PROGRESS_TITLE,
         task_key=f"title:{title_type}:{trakt_id}",
         priority=priority,
         affected_title_keys=(title_key,),
-        payload={"trakt_id": int(trakt_id), "title_type": str(title_type)},
+        payload={
+            "trakt_id": int(trakt_id),
+            "title_type": str(title_type),
+            "refresh_requests": [
+                build_refresh_request(
+                    trigger=trigger,
+                    requested_parts=requested_parts,
+                    allowed_parts=TITLE_ALLOWED_PARTS,
+                ).to_payload()
+            ],
+        },
     )
 
 
@@ -102,6 +155,8 @@ def build_progress_episode_task(
     season: int,
     episode: int,
     priority: int = 3,
+    trigger: str = TRIGGER_VIEWPORT,
+    requested_parts=(),
 ) -> EnrichTask:
     return EnrichTask(
         kind=TASK_KIND_PROGRESS_EPISODE,
@@ -112,6 +167,13 @@ def build_progress_episode_task(
             "show_trakt_id": int(show_trakt_id),
             "season": int(season),
             "episode": int(episode),
+            "refresh_requests": [
+                build_refresh_request(
+                    trigger=trigger,
+                    requested_parts=requested_parts,
+                    allowed_parts=EPISODE_ALLOWED_PARTS,
+                ).to_payload()
+            ],
         },
     )
 
@@ -239,12 +301,19 @@ class EnrichQueueService:
     def _merge_tasks(existing: EnrichTask, incoming: EnrichTask) -> EnrichTask:
         affected_title_keys = tuple(dict.fromkeys([*existing.affected_title_keys, *incoming.affected_title_keys]))
         priority = min(existing.priority, incoming.priority)
+        payload = dict(existing.payload)
+        allowed_parts = TITLE_ALLOWED_PARTS if "trakt_id" in payload else EPISODE_ALLOWED_PARTS
+        payload["refresh_requests"] = merge_refresh_requests(
+            payload.get("refresh_requests", []),
+            incoming.payload.get("refresh_requests", []),
+            allowed_parts=allowed_parts,
+        )
         return EnrichTask(
             kind=existing.kind,
             task_key=existing.task_key,
             priority=priority,
             affected_title_keys=affected_title_keys,
-            payload=dict(existing.payload),
+            payload=payload,
         )
 
     def _worker_loop(self) -> None:

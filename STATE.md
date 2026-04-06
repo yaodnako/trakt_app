@@ -17,6 +17,9 @@
 - введена shared visible-first queue для provider-backed metadata
 - `History` и `Progress` читают одни и те же shared metadata tables
 - добавлен и используется локальный screenshot workflow для web UI
+- для web введен viewport-driven patch refresh path
+- для title / episode ratings введен stale-by-time refresh через SQLite timestamps
+- poster / still после успешного resolve больше не должны перепроверяться как ratings
 
 ## Что сейчас считается нормой
 
@@ -24,8 +27,12 @@
 
 - grouped-by-day layout в web
 - title-level poster / title-level ratings chips
+- title poster click -> Trakt title page
 - episode still / episode ratings
+- episode still click -> Trakt episode page
 - queue-driven patch refresh без whole-page reload
+- entering viewport триггерит быстрый refresh видимых groups
+- stale ratings для видимой части могут обновляться без page reload
 - stable loading / empty states:
   - `Loading`
   - `No poster`
@@ -37,6 +44,12 @@
 - queue-driven patch refresh без whole-page reload
 - shared title/episode metadata из SQLite
 - title poster / provider chips / next-episode preview
+- title poster click -> Trakt title page
+- next-episode preview click -> Trakt episode page
+- entering viewport триггерит быстрый refresh видимых cards
+- stale ratings для видимой части могут обновляться без page reload
+- skipped-count badge на постере слева
+- average rated-episodes badge на постере справа
 - stable loading / empty states по тем же правилам, что и в `History`
 
 ## Подтвержденные проблемные зоны, которые уже были
@@ -49,6 +62,8 @@
 - неверное скрытие уже известных values из-за слишком жесткой привязки template к status
 - визуальный конфликт карточек `History`, когда один и тот же title повторялся в разных днях
 - отсутствие повторной проверки после local re-rate
+- отсутствие повторной проверки stale ratings для уже `ready` rows
+- ранняя остановка polling на `Progress`, когда первый viewport refresh уходил пустым
 
 ## Что еще не стоит считать “идеальной финальной архитектурой”
 

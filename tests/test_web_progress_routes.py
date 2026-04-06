@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +17,7 @@ from trakt_tracker.web.routes_progress import register_progress_routes
 from trakt_tracker.web.viewmodels import (
     progress_effective_aired,
     progress_effective_percent,
+    progress_episode_rating_chip,
     progress_query_string,
     progress_rating_chip,
     progress_recent_release,
@@ -33,14 +34,18 @@ class _FakeProgressService:
             return [item for item in self.items if item.is_dropped]
         return [item for item in self.items if not item.is_dropped]
 
-    def select_title_enrich_keys(self, items):
+    def select_title_enrich_keys(self, items, *, trigger="viewport", requested_parts=(), refresh_requests=None):
         result = []
         for item in items:
-            if item.poster_status in {"unknown", "retryable_failure"} or item.title_ratings_status in {"unknown", "retryable_failure"}:
+            needs_poster = item.poster_status in {"unknown", "retryable_failure"}
+            needs_ratings = item.title_ratings_status in {"unknown", "retryable_failure"} or (
+                requested_parts and "title_ratings" in requested_parts and item.title_ratings_status == "ready"
+            )
+            if needs_poster or needs_ratings:
                 result.append((int(item.trakt_id), "show"))
         return result
 
-    def select_episode_enrich_keys(self, items):
+    def select_episode_enrich_keys(self, items, *, trigger="viewport", requested_parts=(), refresh_requests=None):
         result = []
         for item in items:
             if item.next_episode is None:
@@ -48,6 +53,7 @@ class _FakeProgressService:
             if (
                 item.next_episode.still_status in {"unknown", "retryable_failure"}
                 or item.next_episode.trakt_details_status in {"unknown", "retryable_failure"}
+                or (requested_parts and "episode_ratings" in requested_parts and item.next_episode.trakt_details_status == "ready")
                 or item.next_episode.imdb_status in {"unknown", "retryable_failure"}
             ):
                 result.append((int(item.trakt_id), int(item.next_episode.season), int(item.next_episode.number)))
@@ -123,6 +129,7 @@ class ProgressRouteTests(unittest.TestCase):
         self.templates.env.filters["progress_skipped_count"] = progress_skipped_count
         self.templates.env.filters["progress_recent_release"] = progress_recent_release
         self.templates.env.filters["progress_rating_chip"] = lambda item: progress_rating_chip(item, lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a")
+        self.templates.env.filters["progress_episode_rating_chip"] = lambda item: progress_episode_rating_chip(item, lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a")
         self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
         items = [
@@ -190,6 +197,7 @@ class ProgressRouteTests(unittest.TestCase):
                 "authorized": True,
                 "configured": True,
                 "settings_utc_offset": "+03:00",
+                "notification_sound_url": "",
                 "debug_mode": False,
                 "debug_initial_seq": 0,
             }
@@ -235,6 +243,51 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertIn("No poster", html)
         self.assertIn("No preview", html)
         self.assertGreaterEqual(html.count("n/a"), 2)
+
+    def test_progress_refresh_queues_ratings_only_requests_for_stale_visible_cards(self) -> None:
+        self.progress.items = [
+            ProgressSnapshot(
+                trakt_id=1,
+                title="Severance",
+                completed=1,
+                aired=2,
+                percent_completed=50.0,
+                next_episode=EpisodeSummary(
+                    trakt_id=11,
+                    season=2,
+                    number=3,
+                    title="Who Is Alive?",
+                    still_status="ready",
+                    trakt_details_status="ready",
+                    trakt_details_refreshed_at=datetime.now(tz=UTC) - timedelta(minutes=10),
+                    imdb_status="ready",
+                ),
+                poster_status="ready",
+                title_ratings_status="ready",
+                title_ratings_refreshed_at=datetime.now(tz=UTC) - timedelta(minutes=10),
+            )
+        ]
+        response = self.client.post(
+            "/progress/refresh",
+            json={
+                "hide_upcoming": "0",
+                "show_dropped": "0",
+                "min_year": "",
+                "use_year_filter": "0",
+                "viewport_card_keys": ["progress:1"],
+                "nearby_card_keys": [],
+                "page_card_keys": ["progress:1"],
+                "queue_after_revision": 0,
+                "force_visible_refresh": "1",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        page_tasks = self.queue.submissions[0]["page"]
+        ratings_only = [task for task in page_tasks if task.payload["refresh_requests"][0]["trigger"] == "visible_ratings_refresh"]
+        self.assertEqual(
+            sorted(tuple(task.payload["refresh_requests"][0]["requested_parts"]) for task in ratings_only),
+            [("episode_ratings",), ("title_ratings",)],
+        )
 
 
 if __name__ == "__main__":

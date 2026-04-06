@@ -12,6 +12,12 @@ from trakt_tracker.application.enrich_queue import (
     build_progress_episode_task,
     build_progress_title_task,
 )
+from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_EPISODE_RATINGS,
+    ASSET_KIND_TITLE_RATINGS,
+    TRIGGER_VIEWPORT,
+    TRIGGER_VISIBLE_RATINGS_REFRESH,
+)
 from trakt_tracker.application.services import ServiceContainer
 from trakt_tracker.config import ConfigStore
 from trakt_tracker.domain import RatingInput
@@ -19,6 +25,9 @@ from trakt_tracker.web.viewmodels import (
     filter_progress_items,
     parse_bool_flag,
     parse_progress_year,
+    ratings_refresh_due,
+    TITLE_RATINGS_READY_REFRESH_SECONDS,
+    EPISODE_RATINGS_READY_REFRESH_SECONDS,
 )
 
 
@@ -113,6 +122,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
         viewport_card_keys = _normalize_card_keys(payload.get("viewport_card_keys", []))
         nearby_card_keys = _normalize_card_keys(payload.get("nearby_card_keys", []))
         page_card_keys = _normalize_card_keys(payload.get("page_card_keys", []))
+        force_visible_refresh = parse_bool_flag(str(payload.get("force_visible_refresh", "")))
         try:
             queue_after_revision = max(0, int(payload.get("queue_after_revision", 0) or 0))
         except (TypeError, ValueError):
@@ -126,11 +136,44 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
         )
         items_by_key = {f"progress:{item.trakt_id}": item for item in all_items}
         current_page_keys = [f"progress:{item.trakt_id}" for item in all_items]
+        stale_visible_card_keys = _select_stale_progress_rating_card_keys(
+            items_by_key,
+            viewport_card_keys or page_card_keys or current_page_keys,
+        )
         if not request.app.state.bg_tasks.is_running("progress_sync"):
             services.enrich_queue.submit_progress_refresh(
-                viewport_tasks=_build_progress_bucket_tasks(services, items_by_key, viewport_card_keys, priority=1),
-                nearby_tasks=_build_progress_bucket_tasks(services, items_by_key, nearby_card_keys, priority=2),
-                page_tasks=[],
+                viewport_tasks=_build_progress_bucket_tasks(
+                    services,
+                    items_by_key,
+                    viewport_card_keys,
+                    priority=1,
+                    trigger=TRIGGER_VIEWPORT,
+                ),
+                nearby_tasks=_build_progress_bucket_tasks(
+                    services,
+                    items_by_key,
+                    nearby_card_keys,
+                    priority=2,
+                    trigger=TRIGGER_VIEWPORT,
+                ),
+                page_tasks=[
+                    *_build_progress_bucket_tasks(
+                        services,
+                        items_by_key,
+                        page_card_keys,
+                        priority=3,
+                        trigger=TRIGGER_VIEWPORT,
+                    ),
+                    *_build_progress_bucket_tasks(
+                        services,
+                        items_by_key,
+                        stale_visible_card_keys if force_visible_refresh else [],
+                        priority=1,
+                        trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
+                        title_requested_parts=(ASSET_KIND_TITLE_RATINGS,),
+                        episode_requested_parts=(ASSET_KIND_EPISODE_RATINGS,),
+                    ),
+                ],
             )
         relevant_card_keys = set(page_card_keys or current_page_keys)
         queue = services.enrich_queue.list_updates(
@@ -417,11 +460,32 @@ def _normalize_card_keys(raw_keys) -> list[str]:
     ]
 
 
-def _build_progress_bucket_tasks(services: ServiceContainer, items_by_key: dict[str, object], card_keys: list[str], *, priority: int) -> list:
+def _build_progress_bucket_tasks(
+    services: ServiceContainer,
+    items_by_key: dict[str, object],
+    card_keys: list[str],
+    *,
+    priority: int,
+    trigger: str = TRIGGER_VIEWPORT,
+    title_requested_parts=(),
+    episode_requested_parts=(),
+) -> list:
     tasks: list = []
     items = [items_by_key[key] for key in card_keys if key in items_by_key]
-    title_keys = set(services.progress.select_title_enrich_keys(items))
-    episode_keys = set(services.progress.select_episode_enrich_keys(items))
+    title_keys = set(
+        services.progress.select_title_enrich_keys(
+            items,
+            trigger=trigger,
+            requested_parts=title_requested_parts,
+        )
+    )
+    episode_keys = set(
+        services.progress.select_episode_enrich_keys(
+            items,
+            trigger=trigger,
+            requested_parts=episode_requested_parts,
+        )
+    )
     for card_key in card_keys:
         item = items_by_key.get(card_key)
         if item is None:
@@ -434,6 +498,8 @@ def _build_progress_bucket_tasks(services: ServiceContainer, items_by_key: dict[
                     trakt_id=int(item.trakt_id),
                     title_type="show",
                     priority=priority,
+                    trigger=trigger,
+                    requested_parts=title_requested_parts,
                 )
             )
         next_episode = item.next_episode
@@ -448,6 +514,35 @@ def _build_progress_bucket_tasks(services: ServiceContainer, items_by_key: dict[
                     season=int(next_episode.season),
                     episode=int(next_episode.number),
                     priority=priority,
+                    trigger=trigger,
+                    requested_parts=episode_requested_parts,
                 )
             )
     return tasks
+
+
+def _select_stale_progress_rating_card_keys(items_by_key: dict[str, object], card_keys: list[str]) -> list[str]:
+    result: list[str] = []
+    for card_key in card_keys:
+        item = items_by_key.get(card_key)
+        if item is None:
+            continue
+        if ratings_refresh_due(
+            getattr(item, "title_ratings_status", "unknown"),
+            getattr(item, "title_ratings_refreshed_at", None),
+            asset_kind=ASSET_KIND_TITLE_RATINGS,
+            ready_ttl_seconds=TITLE_RATINGS_READY_REFRESH_SECONDS,
+        ):
+            result.append(card_key)
+            continue
+        next_episode = getattr(item, "next_episode", None)
+        if next_episode is None:
+            continue
+        if ratings_refresh_due(
+            getattr(next_episode, "trakt_details_status", "unknown"),
+            getattr(next_episode, "trakt_details_refreshed_at", None),
+            asset_kind=ASSET_KIND_EPISODE_RATINGS,
+            ready_ttl_seconds=EPISODE_RATINGS_READY_REFRESH_SECONDS,
+        ):
+            result.append(card_key)
+    return list(dict.fromkeys(result))
