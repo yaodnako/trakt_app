@@ -12,6 +12,7 @@ from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_POSTER,
     ASSET_KIND_STILL,
     TITLE_ALLOWED_PARTS,
+    TRIGGER_MANUAL_REPAIR,
     TRIGGER_SYNC_EVENT,
     TRIGGER_VIEWPORT,
     build_refresh_request,
@@ -188,7 +189,13 @@ class ProgressSyncWorkflow:
                 keys.append((int(item.trakt_id), int(next_episode.season), int(next_episode.number)))
         return list(dict.fromkeys(keys))
 
-    def sync_progress(self, trakt_ids: list[int] | None = None, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
+    def sync_progress(
+        self,
+        trakt_ids: list[int] | None = None,
+        *,
+        dropped_only: bool = False,
+        force_full_assets: bool = False,
+    ) -> list[ProgressSnapshot]:
         if trakt_ids is None and self._can_skip_full_progress_sync():
             self._operations.publish("Progress sync", "Policy skipped full progress sync; using local dashboard state.")
             return self.dashboard_progress(dropped_only=dropped_only)
@@ -203,6 +210,8 @@ class ProgressSyncWorkflow:
         snapshots: list[ProgressSnapshot] = []
         for trakt_id in show_ids:
             snapshots.append(self.refresh_show_progress(trakt_id, fresh=True))
+        if force_full_assets:
+            self._force_refresh_assets_for_shows(show_ids)
         if trakt_ids is None:
             self._remember_progress_activity_signature()
         return snapshots
@@ -304,6 +313,22 @@ class ProgressSyncWorkflow:
         client = self._auth.get_client()
         payload = client.get_last_activities(use_cache=False)
         return self._policy.build_progress_activity_signature(payload)
+
+    def _force_refresh_assets_for_shows(self, show_ids: list[int]) -> None:
+        unique_show_ids = list(dict.fromkeys(int(show_id) for show_id in show_ids))
+        if not unique_show_ids:
+            return
+        self._operations.publish("Progress sync", f"Force refreshing artwork for {len(unique_show_ids)} show(s).")
+        if self._catalog is not None:
+            for show_trakt_id in unique_show_ids:
+                self._catalog.enrich_title_key(
+                    show_trakt_id,
+                    "show",
+                    trigger=TRIGGER_MANUAL_REPAIR,
+                    requested_parts=(ASSET_KIND_POSTER,),
+                )
+        for show_trakt_id in unique_show_ids:
+            self._episode_metadata.force_refresh_show_stills(show_trakt_id)
 
     @staticmethod
     def _build_title_episode_rating_stats(

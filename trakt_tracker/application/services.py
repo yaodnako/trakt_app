@@ -5,12 +5,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from trakt_tracker.application.catalog import CatalogService
+from trakt_tracker.application.episode_ratings_matrix import EpisodeRatingsMatrixService
 from trakt_tracker.application.enrich_queue import EnrichQueueService
 from trakt_tracker.application.history import HistoryService
 from trakt_tracker.application.interactions import InteractionService
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.history_sync import HistorySyncWorkflow
+from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_POSTER,
+    ASSET_KIND_STILL,
+    TRIGGER_MANUAL_REPAIR,
+)
 from trakt_tracker.application.history_read_model import HistoryReadModelService
 from trakt_tracker.application.notification_refresh import NotificationRefreshWorkflow
 from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
@@ -46,6 +52,7 @@ class ServiceContainer:
     auth: "AuthService"
     cache: "CacheService"
     catalog: "CatalogService"
+    episode_ratings_matrix: "EpisodeRatingsMatrixService"
     enrich_queue: "EnrichQueueService"
     history: "HistoryService"
     interactions: "InteractionService"
@@ -220,8 +227,18 @@ class ProgressService:
             refresh_requests=refresh_requests,
         )
 
-    def sync_progress(self, trakt_ids: list[int] | None = None, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
-        return self._workflow.sync_progress(trakt_ids, dropped_only=dropped_only)
+    def sync_progress(
+        self,
+        trakt_ids: list[int] | None = None,
+        *,
+        dropped_only: bool = False,
+        force_full_assets: bool = False,
+    ) -> list[ProgressSnapshot]:
+        return self._workflow.sync_progress(
+            trakt_ids,
+            dropped_only=dropped_only,
+            force_full_assets=force_full_assets,
+        )
 
     def drop_show(self, trakt_id: int) -> None:
         self._workflow.drop_show(trakt_id)
@@ -296,6 +313,10 @@ class SyncService:
         self._db = db
         self._sync_state = sync_state
         self._imdb_client = IMDbDatasetClient()
+        self._titles = titles
+        self._episode_repo = episode_repo
+        self._catalog = catalog
+        self._operations = operations
         self._episode_metadata = episode_metadata
         self._workflow = HistorySyncWorkflow(
             db,
@@ -315,8 +336,41 @@ class SyncService:
     def initial_import(self) -> None:
         self._workflow.initial_import()
 
-    def refresh_history(self) -> None:
-        self._workflow.refresh_history()
+    def refresh_history(self, *, force_full_assets: bool = False, status_callback=None) -> None:
+        self._workflow.refresh_history(force_full_assets=force_full_assets, status_callback=status_callback)
+
+    def sync_assets_full(self, *, status_callback=None) -> None:
+        self.refresh_history(force_full_assets=True, status_callback=status_callback)
+
+    def sync_assets_backfill(self, *, status_callback=None) -> None:
+        self._sync_assets(
+            mode_label="Backfill sync",
+            title_statuses=("unknown", "retryable_failure"),
+            episode_statuses=("unknown", "retryable_failure"),
+            include_missing_title_url=True,
+            include_missing_still=True,
+            status_callback=status_callback,
+        )
+
+    def sync_assets_timeout_only(self, *, status_callback=None) -> None:
+        self._sync_assets(
+            mode_label="Timeout sync",
+            title_statuses=("retryable_failure",),
+            episode_statuses=("retryable_failure",),
+            include_missing_title_url=False,
+            include_missing_still=False,
+            status_callback=status_callback,
+        )
+
+    def sync_assets_repair(self, *, status_callback=None) -> None:
+        self._sync_assets(
+            mode_label="Repair sync",
+            title_statuses=("checked_no_data", "retryable_failure"),
+            episode_statuses=("checked_no_data", "retryable_failure"),
+            include_missing_title_url=False,
+            include_missing_still=False,
+            status_callback=status_callback,
+        )
 
     def maybe_refresh_history(self) -> bool:
         return self._workflow.maybe_refresh_history()
@@ -349,7 +403,8 @@ class SyncService:
             last_sync_at = SyncPolicy.parse_timestamp(raw)
             if last_sync_at is not None and now - last_sync_at < timedelta(minutes=interval):
                 return False
-        changed = self.sync_imdb_dataset(force=False, status_callback=status_callback)
+        # Auto-sync interval should mean a real scheduled refresh, not just a stale check.
+        changed = self.sync_imdb_dataset(force=True, status_callback=status_callback)
         if changed or not self._imdb_client.is_stale():
             with self._db.session() as session:
                 self._sync_state.set_value(session, self.IMDB_AUTO_SYNC_KEY, now.isoformat())
@@ -369,6 +424,64 @@ class SyncService:
 
     def dashboard_state(self) -> DashboardState:
         return self._workflow.dashboard_state()
+
+    def _sync_assets(
+        self,
+        *,
+        mode_label: str,
+        title_statuses: tuple[str, ...],
+        episode_statuses: tuple[str, ...],
+        include_missing_title_url: bool,
+        include_missing_still: bool,
+        status_callback=None,
+    ) -> None:
+        def report(message: str) -> None:
+            self._operations.publish(mode_label, message)
+            if status_callback is not None:
+                status_callback(message)
+
+        with self._db.session() as session:
+            title_targets = set(self._titles.list_title_targets(session, statuses=title_statuses))
+            if include_missing_title_url:
+                title_targets.update(self._titles.list_title_targets(session, include_missing_url=True))
+            episode_targets = set(self._episode_repo.list_episode_keys(session, statuses=episode_statuses))
+            if include_missing_still:
+                episode_targets.update(self._episode_repo.list_episode_keys(session, include_missing_still=True))
+
+        title_list = sorted(title_targets)
+        episode_list = sorted(episode_targets)
+        total = len(title_list) + len(episode_list)
+        completed = 0
+        report(f"{mode_label}: selected {len(title_list)} posters and {len(episode_list)} stills.")
+        if total <= 0:
+            report(f"{mode_label}: nothing to sync.")
+            return
+
+        for trakt_id, title_type in title_list:
+            try:
+                if self._catalog is not None:
+                    self._catalog.enrich_title_key(
+                        int(trakt_id),
+                        str(title_type),
+                        trigger=TRIGGER_MANUAL_REPAIR,
+                        requested_parts=(ASSET_KIND_POSTER,),
+                    )
+            except Exception as exc:
+                report(f"{mode_label}: poster failed for {title_type}:{trakt_id}: {exc}")
+            completed += 1
+            report(f"{mode_label}: {completed}/{total} ({(completed * 100.0 / total):.1f}%)")
+
+        for show_trakt_id, season, episode in episode_list:
+            try:
+                self._episode_metadata.enrich_episode_stills(
+                    [(int(show_trakt_id), int(season), int(episode))],
+                    trigger=TRIGGER_MANUAL_REPAIR,
+                    requested_parts=(ASSET_KIND_STILL,),
+                )
+            except Exception as exc:
+                report(f"{mode_label}: still failed for show:{show_trakt_id} S{season}E{episode}: {exc}")
+            completed += 1
+            report(f"{mode_label}: {completed}/{total} ({(completed * 100.0 / total):.1f}%)")
 
 
 def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
@@ -407,6 +520,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     episode_metadata = EpisodeMetadataService(db, episode_repo, imdb_client, titles, auth, tmdb_factory)
     history_read_model = HistoryReadModelService(db, history, user_states, titles, episode_repo, episode_metadata)
     catalog = CatalogService(db, auth, titles, user_states, sync_state, tmdb_factory, imdb_client)
+    episode_ratings_matrix = EpisodeRatingsMatrixService(db, auth, titles, history, episode_repo, imdb_client)
     history_service = HistoryService(db, auth, titles, user_states, history, episode_repo, history_read_model, episode_metadata)
     enrich_queue = EnrichQueueService(
         {
@@ -452,6 +566,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         auth=auth,
         cache=cache,
         catalog=catalog,
+        episode_ratings_matrix=episode_ratings_matrix,
         enrich_queue=enrich_queue,
         history=history_service,
         interactions=interactions,

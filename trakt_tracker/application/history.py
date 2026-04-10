@@ -152,12 +152,30 @@ class HistoryService:
         limit: int | None = None,
         offset: int = 0,
         title_filter: str | None = None,
+        rated_only: bool = False,
     ) -> list[dict]:
         return self._history_read_model.history(
             title_type=title_type,
             limit=limit,
             offset=offset,
             title_filter=title_filter,
+            rated_only=rated_only,
+        )
+
+    def history_title_summaries(
+        self,
+        title_type: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        title_filter: str | None = None,
+        rated_only: bool = False,
+    ) -> list[dict]:
+        return self._history_read_model.history_title_summaries(
+            title_type=title_type,
+            limit=limit,
+            offset=offset,
+            title_filter=title_filter,
+            rated_only=rated_only,
         )
 
     def history_titles(self, title_type: str | None = None) -> list[str]:

@@ -1,93 +1,82 @@
 # Trakt Tracker State
 
-## Текущее фактическое состояние
+This file is a compact current-state reference. It is not mandatory startup
+context; new chats should read `AGENTS.md` first and open this file only when
+they need current behavior or policy details.
 
-- есть локальный git baseline commit
-- основной remote подключен
-- `web` принят как основной рабочий UI
-- `desktop` остается вторым UI поверх того же core и SQLite
+## Current Facts
 
-## Что уже реально сделано
+- `web` is the primary UI.
+- `desktop` is the secondary UI over the same Python core and the same SQLite DB.
+- `History` and `Progress` use shared metadata tables:
+  - `titles`
+  - `episodes_cache`
+- SQLite is the source of truth for enrich state, statuses, and refresh timestamps.
+- Provider/file caches are response caches, not decision authority.
 
-- большой stabilization/refactor план для `History + Progress` проведен до конца по фазам 1–5
-- введен explicit enrich-state model в SQLite
-- sync / enrich / UI refresh разведены лучше, чем раньше
-- `History` больше не должен сходиться через full reload страницы
-- `Progress` теперь использует тот же shared enrich core, что и `History`
-- введена shared visible-first queue для provider-backed metadata
-- `History` и `Progress` читают одни и те же shared metadata tables
-- добавлен и используется локальный screenshot workflow для web UI
-- для web введен viewport-driven patch refresh path
-- для title / episode ratings введен stale-by-time refresh через SQLite timestamps
-- poster / still после успешного resolve больше не должны перепроверяться как ratings
+## Normal Behavior
 
-## Что сейчас считается нормой
+- `History` and `Progress` use queue-driven patch refresh, not full page reload convergence.
+- Visible viewport entries get higher-priority refresh.
+- Stale visible refresh is scoped to ratings/details.
+- Ready poster/still artwork is not periodically rechecked like ratings.
+- Screenshot workflow is required after UI or visible behavior changes:
+  - run `capture_web_ui.bat`
+  - inspect the generated screenshots
+  - iterate if the visible result is wrong
 
-### History
+## Metadata Policy
 
-- grouped-by-day layout в web
-- title-level poster / title-level ratings chips
-- title poster click -> Trakt title page
-- episode still / episode ratings
-- episode still click -> Trakt episode page
-- queue-driven patch refresh без whole-page reload
-- entering viewport триггерит быстрый refresh видимых groups
-- stale ratings для видимой части могут обновляться без page reload
-- stable loading / empty states:
-  - `Loading`
-  - `No poster`
-  - `No preview`
-  - `n/a` только для terminal `checked_no_data`
+- `title_ratings`:
+  - `ready`: 5 minutes on visible stale refresh
+  - `checked_no_data`: 6 hours
+  - `retryable_failure`: 30 minutes
+- `episode_ratings`:
+  - `ready`: 5 minutes on visible stale refresh
+  - `checked_no_data`: 6 hours
+  - `retryable_failure`: 30 minutes
+- `poster`:
+  - `ready`: not rechecked by normal viewport/sync; only manual repair
+  - `checked_no_data`: 7 days
+  - `retryable_failure`: 6 hours
+- `still`:
+  - `ready`: not rechecked by normal viewport/sync; only manual repair
+  - `checked_no_data` for recent released + visible (`viewport`): about 5 minutes
+  - `checked_no_data` for recent released + non-visible (`page_context` / `sync_event`): about 1 hour
+  - `checked_no_data` for old / unknown / unreleased: 7 days
+  - `retryable_failure`: 6 hours
 
-### Progress
+## Refresh Triggers
 
-- queue-driven patch refresh без whole-page reload
-- shared title/episode metadata из SQLite
-- title poster / provider chips / next-episode preview
-- title poster click -> Trakt title page
-- next-episode preview click -> Trakt episode page
-- entering viewport триггерит быстрый refresh видимых cards
-- stale ratings для видимой части могут обновляться без page reload
-- skipped-count badge на постере слева
-- average rated-episodes badge на постере справа
-- stable loading / empty states по тем же правилам, что и в `History`
+- `viewport`: actually visible cards/groups.
+- `page_context`: nearby/page buckets that are loaded but not actually visible.
+- `visible_ratings_refresh`: ratings/details stale refresh only.
+- `sync_event`: targeted sync-driven refresh.
+- `manual_repair`: explicit repair override.
 
-## Подтвержденные проблемные зоны, которые уже были
+## Current Web Features
 
-Вот какие реальные проблемы уже всплывали и фиксились в этом цикле:
+- `Progress`
+- `History`
+- `Search`
+- `Settings`
+- title/details page
+- show-level episode ratings matrix overlay
+- web sync modes: `Full Sync`, `Sync`, `Timeout Sync`, `Repair Sync`
 
-- reload-driven convergence в `History`
-- queue retry-loop на `retryable_failure`
-- image proxy stall на `/cached-image`
-- неверное скрытие уже известных values из-за слишком жесткой привязки template к status
-- визуальный конфликт карточек `History`, когда один и тот же title повторялся в разных днях
-- отсутствие повторной проверки после local re-rate
-- отсутствие повторной проверки stale ratings для уже `ready` rows
-- ранняя остановка polling на `Progress`, когда первый viewport refresh уходил пустым
+## Investigation Checklist
 
-## Что еще не стоит считать “идеальной финальной архитектурой”
+For History/Progress metadata bugs:
 
-Проект уже не в промежуточном монолитном состоянии, но это все еще не “последняя полировка всего продукта”.
+1. Check SQLite row values in `titles` / `episodes_cache`.
+2. Check enrich statuses and refresh timestamps.
+3. Check queue updates and `retryable_failure` state.
+4. Check route trigger and `requested_parts`.
+5. For UI issues, run and inspect screenshot workflow.
 
-Что еще остается как обычная будущая работа, а не как незавершенный blocker фаз 1–5:
+## Recent Fix Notes
 
-- further cleanup desktop orchestration
-- further cleanup debug UX
-- точечные UX-polish задачи на экранах
-- transport/network hardening around provider failures
-
-## Как начинать новый чат после этого цикла
-
-В новом чате стартовать так:
-
-1. прочитать `README.md`
-2. прочитать `ARCHITECTURE.md`
-3. прочитать `STATE.md`
-4. потом смотреть `FEATURES.md`
-
-И только после этого продолжать работу.
-
-Если баг новый:
-
-- формулировать его как отдельный текущий дефект
-- не смешивать с предыдущими ветками расследования
+- Episode still retry is now release-aware and visibility-aware.
+- Fresh `checked_no_data` stills no longer wait 7 days when the episode is already released and visible.
+- The confirmed The Boys S05E01/S05E02 stale negative case was resolved through the shared policy path.
+- Episode ratings matrix overlay is DB-first and reads from shared `episodes_cache`.

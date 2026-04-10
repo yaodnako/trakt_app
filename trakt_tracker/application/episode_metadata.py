@@ -85,6 +85,7 @@ class EpisodeMetadataService:
         still_url = str(self._episode_record_value(record, "still_url", "still_url") or "")
         still_status = str(self._episode_record_value(record, "still_status", "still_status") or ENRICH_STATUS_UNKNOWN)
         still_refreshed_at = self._episode_record_value(record, "still_refreshed_at", "still_refreshed_at")
+        first_aired = self._episode_record_value(record, "first_aired", "first_aired")
         trakt_details_status = str(
             self._episode_record_value(record, "trakt_details_status", "trakt_details_status") or ENRICH_STATUS_UNKNOWN
         )
@@ -119,6 +120,7 @@ class EpisodeMetadataService:
                     last_checked_at=still_refreshed_at,
                     has_value=bool(still_url),
                     trigger=request.trigger,
+                    first_aired=first_aired,
                 )
                 if still_decision.should_refresh:
                     parts[ASSET_KIND_STILL] = still_decision.reason
@@ -553,6 +555,22 @@ class EpisodeMetadataService:
                     )
         return changed
 
+    def force_refresh_show_stills(self, show_trakt_id: int) -> bool:
+        with self._db.session() as session:
+            rows = self._episode_repo.list_show_episode_metadata(session, show_trakt_id)
+        keys = [
+            (int(show_trakt_id), int(row["season"]), int(row["number"]))
+            for row in rows
+            if row.get("season") is not None and row.get("number") is not None
+        ]
+        if not keys:
+            return False
+        return self.enrich_episode_stills(
+            keys,
+            trigger=TRIGGER_MANUAL_REPAIR,
+            requested_parts=(ASSET_KIND_STILL,),
+        )
+
     @staticmethod
     def should_refresh_next_episode_details(next_episode: EpisodeSummary, cached_row) -> bool:
         if cached_row is None:
@@ -580,10 +598,7 @@ class EpisodeMetadataService:
                 title_row = self._titles.get_title(session, show_trakt_id)
                 if title_row is not None and getattr(title_row, "tmdb_id", None):
                     return int(title_row.tmdb_id)
-        try:
-            title = client.get_title_details(show_trakt_id, "show")
-        except Exception:
-            return None
+        title = client.get_title_details(show_trakt_id, "show")
         if self._titles is not None and title.tmdb_id:
             with self._db.session() as session:
                 self._titles.upsert_title(session, title)

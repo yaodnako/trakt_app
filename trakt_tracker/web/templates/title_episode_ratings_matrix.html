@@ -1,0 +1,112 @@
+{% set matrix_error = matrix_error_message if matrix_error_message is defined else (matrix.error_message if matrix else "") %}
+{% if matrix and matrix.has_episodes %}
+<div class="title-matrix-fragment is-hide-season-zero" data-matrix-provider="{{ matrix.provider }}" data-matrix-imdb-subtitle="IMDb episode ratings by season" data-matrix-trakt-subtitle="Trakt episode ratings by season" data-matrix-my-subtitle="My episode ratings by season">
+    {% if matrix_error %}
+    <div class="title-matrix-inline-note">
+        Latest refresh hit an error. Showing cached episode data.
+    </div>
+    {% endif %}
+    <div class="title-matrix-options">
+        <label class="title-matrix-option">
+            <input type="checkbox" data-hide-season-zero-toggle checked>
+            <span>Hide season 0</span>
+        </label>
+        <label class="title-matrix-option">
+            <input type="checkbox" data-my-rating-toggle>
+            <span>My &#9733;</span>
+        </label>
+        <label class="title-matrix-option title-matrix-provider-option">
+            <span>Ratings</span>
+            <select data-title-matrix-provider-select>
+                <option value="imdb" {% if matrix.provider == 'imdb' %}selected{% endif %}>IMDb</option>
+                <option value="trakt" {% if matrix.provider == 'trakt' %}selected{% endif %}>Trakt</option>
+            </select>
+        </label>
+    </div>
+    <div class="title-matrix-legend" aria-label="IMDb rating legend">
+        {% for item in matrix.legend %}
+        <span class="title-matrix-legend-item">
+            <span class="title-matrix-legend-swatch" style="background: {{ item.color }};"></span>
+            <span class="title-matrix-legend-label">{{ item.label }}</span>
+        </span>
+        {% endfor %}
+    </div>
+    <div class="title-matrix-grid-wrap">
+        <table class="title-matrix-grid">
+            <thead>
+                <tr>
+                    <th scope="col">EP.</th>
+                    {% for season in matrix.seasons %}
+                    <th scope="col" data-matrix-season="{{ season.season }}" class="{% if season.season == 0 %}is-season-zero{% endif %}">{{ season.label }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                <tr class="title-matrix-avg-row">
+                    <th scope="row">AVG.</th>
+                    {% for season in matrix.seasons %}
+                    <td
+                        class="title-matrix-cell is-avg{% if season.avg_rating is not none %} is-rated{% endif %} {% if season.season == 0 %}is-season-zero{% endif %}"
+                        data-matrix-season="{{ season.season }}"
+                        data-imdb-display="{{ season.imdb_avg_display }}"
+                        data-imdb-state="{% if season.imdb_avg_rating is not none %}rated{% else %}unrated{% endif %}"
+                        data-imdb-color="{{ season.imdb_avg_color }}"
+                        data-trakt-display="{{ season.trakt_avg_display }}"
+                        data-trakt-state="{% if season.trakt_avg_rating is not none %}rated{% else %}unrated{% endif %}"
+                        data-trakt-color="{{ season.trakt_avg_color }}"
+                        data-my-display="{{ season.my_avg_display }}"
+                        data-my-state="{% if season.my_avg_rating is not none %}rated{% else %}unrated{% endif %}"
+                        data-my-color="{{ season.my_avg_color }}"
+                        {% if season.avg_color %}style="--matrix-cell-color: {{ season.avg_color }};"{% endif %}
+                    >
+                        <span>{{ season.avg_display }}</span>
+                    </td>
+                    {% endfor %}
+                </tr>
+                {% set episode_seasons = matrix.seasons[:-1] %}
+                <tr class="title-matrix-gap-row" aria-hidden="true">
+                    <td colspan="{{ matrix.seasons|length + 1 }}"></td>
+                </tr>
+                {% for row in matrix.rows %}
+                <tr>
+                    <th scope="row">{{ row.label }}</th>
+                    {% for cell in row.cells[:episode_seasons|length] %}
+                    <td
+                        class="title-matrix-cell is-{{ cell.state }} {% if cell.season == 0 %}is-season-zero{% endif %}{% if cell.imdb_url %} is-linkable{% endif %}"
+                        data-matrix-season="{{ cell.season }}"
+                        {% if cell.imdb_url %}data-imdb-url="{{ cell.imdb_url }}"{% endif %}
+                        data-imdb-display="{{ cell.imdb_display_value }}"
+                        data-imdb-state="{{ cell.imdb_state }}"
+                        data-imdb-color="{{ cell.imdb_color }}"
+                        data-imdb-tooltip="{{ cell.imdb_tooltip }}"
+                        data-trakt-display="{{ cell.trakt_display_value }}"
+                        data-trakt-state="{{ cell.trakt_state }}"
+                        data-trakt-color="{{ cell.trakt_color }}"
+                        data-trakt-tooltip="{{ cell.trakt_tooltip }}"
+                        data-my-display="{{ cell.my_display_value }}"
+                        data-my-state="{{ cell.my_state }}"
+                        data-my-color="{{ cell.my_color }}"
+                        {% if cell.tooltip %}data-matrix-tooltip="{{ cell.tooltip }}"{% endif %}
+                        {% if cell.color %}style="--matrix-cell-color: {{ cell.color }};"{% endif %}
+                    >
+                        <span>{{ cell.display_value }}</span>
+                    </td>
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="title-matrix-empty-state">
+    <p>
+        {% if matrix_error %}
+        Could not load the episode catalog right now.
+        {% else %}
+        Episode data is not available yet for this show.
+        {% endif %}
+    </p>
+    <button type="button" class="button ghost" data-title-matrix-retry>Retry</button>
+</div>
+{% endif %}

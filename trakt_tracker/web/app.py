@@ -317,7 +317,13 @@ def create_app() -> FastAPI:
     register_system_routes(app, render=render, template_filters=_TemplateFilters)
     register_progress_routes(app, render=render, progress_redirect=progress_redirect)
     register_history_routes(app, render=render, render_fragment=render_fragment)
-    register_catalog_routes(app, render=render, enrich_search_results=_enrich_search_results, schedule_search_enrichment=_schedule_search_enrichment)
+    register_catalog_routes(
+        app,
+        render=render,
+        render_fragment=render_fragment,
+        enrich_search_results=_enrich_search_results,
+        schedule_search_enrichment=_schedule_search_enrichment,
+    )
     return app
 
 

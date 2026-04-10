@@ -17,6 +17,7 @@ ASSET_KIND_POSTER = "poster"
 ASSET_KIND_STILL = "still"
 
 TRIGGER_VIEWPORT = "viewport"
+TRIGGER_PAGE_CONTEXT = "page_context"
 TRIGGER_VISIBLE_RATINGS_REFRESH = "visible_ratings_refresh"
 TRIGGER_SYNC_EVENT = "sync_event"
 TRIGGER_MANUAL_REPAIR = "manual_repair"
@@ -30,6 +31,9 @@ RATINGS_EMPTY_REFRESH_SECONDS = 21600
 RATINGS_RETRYABLE_FAILURE_BACKOFF_SECONDS = 1800
 ARTWORK_EMPTY_REFRESH_SECONDS = 604800
 ARTWORK_RETRYABLE_FAILURE_BACKOFF_SECONDS = 21600
+STILL_VISIBLE_EMPTY_REFRESH_SECONDS = 300
+STILL_RECENT_EMPTY_REFRESH_SECONDS = 3600
+STILL_RECENT_RELEASE_WINDOW_SECONDS = 1209600
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +60,7 @@ def normalize_refresh_trigger(value: str | None) -> str:
     normalized = (value or "").strip().lower()
     if normalized in {
         TRIGGER_VIEWPORT,
+        TRIGGER_PAGE_CONTEXT,
         TRIGGER_VISIBLE_RATINGS_REFRESH,
         TRIGGER_SYNC_EVENT,
         TRIGGER_MANUAL_REPAIR,
@@ -144,6 +149,7 @@ def metadata_refresh_due(
     last_checked_at: datetime | None,
     has_value: bool,
     trigger: str,
+    first_aired: datetime | None = None,
     now: datetime | None = None,
 ) -> MetadataRefreshDecision:
     normalized_trigger = normalize_refresh_trigger(trigger)
@@ -175,6 +181,7 @@ def metadata_refresh_due(
             last_checked_at=checked_at,
             has_value=has_value,
             trigger=normalized_trigger,
+            first_aired=normalize_datetime(first_aired),
             now=now_value,
         )
     return MetadataRefreshDecision(
@@ -249,9 +256,10 @@ def _artwork_refresh_due(
     last_checked_at: datetime | None,
     has_value: bool,
     trigger: str,
+    first_aired: datetime | None,
     now: datetime,
 ) -> MetadataRefreshDecision:
-    if trigger not in {TRIGGER_VIEWPORT, TRIGGER_SYNC_EVENT}:
+    if trigger not in {TRIGGER_VIEWPORT, TRIGGER_PAGE_CONTEXT, TRIGGER_SYNC_EVENT}:
         return MetadataRefreshDecision(asset_kind, trigger, False, "trigger_not_supported")
     if status == ENRICH_STATUS_UNKNOWN:
         return MetadataRefreshDecision(asset_kind, trigger, True, "status_unknown")
@@ -266,6 +274,17 @@ def _artwork_refresh_due(
             "retryable_failure_backoff_active",
         )
     if status == ENRICH_STATUS_CHECKED_NO_DATA:
+        if asset_kind == ASSET_KIND_STILL:
+            ttl, due_reason, not_due_reason = _still_checked_no_data_ttl(trigger, first_aired, now)
+            return _timed_refresh_decision(
+                asset_kind,
+                trigger,
+                last_checked_at,
+                ttl,
+                now,
+                due_reason,
+                not_due_reason,
+            )
         return _timed_refresh_decision(
             asset_kind,
             trigger,
@@ -278,6 +297,38 @@ def _artwork_refresh_due(
     if status == ENRICH_STATUS_READY or has_value:
         return MetadataRefreshDecision(asset_kind, trigger, False, "ready_artwork_not_rechecked")
     return MetadataRefreshDecision(asset_kind, trigger, True, "missing_value")
+
+
+def _still_checked_no_data_ttl(
+    trigger: str,
+    first_aired: datetime | None,
+    now: datetime,
+) -> tuple[timedelta, str, str]:
+    if _is_recently_released(first_aired, now):
+        if trigger == TRIGGER_VIEWPORT:
+            return (
+                timedelta(seconds=STILL_VISIBLE_EMPTY_REFRESH_SECONDS),
+                "checked_no_data_recent_visible_ttl_elapsed",
+                "checked_no_data_recent_visible_ttl_active",
+            )
+        return (
+            timedelta(seconds=STILL_RECENT_EMPTY_REFRESH_SECONDS),
+            "checked_no_data_recent_ttl_elapsed",
+            "checked_no_data_recent_ttl_active",
+        )
+    return (
+        timedelta(seconds=ARTWORK_EMPTY_REFRESH_SECONDS),
+        "checked_no_data_ttl_elapsed",
+        "checked_no_data_ttl_active",
+    )
+
+
+def _is_recently_released(first_aired: datetime | None, now: datetime) -> bool:
+    if first_aired is None:
+        return False
+    if first_aired > now:
+        return False
+    return now - first_aired <= timedelta(seconds=STILL_RECENT_RELEASE_WINDOW_SECONDS)
 
 
 def _timed_refresh_decision(

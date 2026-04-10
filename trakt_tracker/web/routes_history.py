@@ -19,6 +19,7 @@ from trakt_tracker.application.enrich_queue import (
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_EPISODE_RATINGS,
     ASSET_KIND_TITLE_RATINGS,
+    TRIGGER_PAGE_CONTEXT,
     TRIGGER_VIEWPORT,
     TRIGGER_VISIBLE_RATINGS_REFRESH,
 )
@@ -29,6 +30,7 @@ from trakt_tracker.web.viewmodels import (
     EPISODE_RATINGS_READY_REFRESH_SECONDS,
     HISTORY_PAGE_SIZE,
     TITLE_RATINGS_READY_REFRESH_SECONDS,
+    normalize_history_view,
     normalize_title_type,
     parse_bool_flag,
     ratings_refresh_due,
@@ -42,23 +44,40 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         type: str = "all",
         title: str = "",
         page: int = 1,
+        rated_only: str = "0",
         flash: str = "",
         rate_trakt_id: int | None = None,
         rate_type: str = "",
         rate_season: int | None = None,
         rate_episode: int | None = None,
         rate_title: str = "",
+        view: str = "episodes",
     ) -> HTMLResponse:
         services: ServiceContainer = request.app.state.services
         title_type = normalize_title_type(type)
+        history_view = normalize_history_view(view)
         current_page = max(1, page)
         title_filter = title.strip() or None
-        rows, has_next, grouped_days = _load_history_page_data(
-            services,
-            title_type=title_type,
-            title_filter=title_filter,
-            current_page=current_page,
-        )
+        only_rated_episodes = parse_bool_flag(rated_only)
+        rows: list[dict] = []
+        grouped_days: list[dict] = []
+        title_cards: list[dict] = []
+        if history_view == "titles":
+            title_cards, has_next = _load_history_title_page_data(
+                services,
+                title_type=title_type,
+                title_filter=title_filter,
+                current_page=current_page,
+                rated_only=only_rated_episodes,
+            )
+        else:
+            rows, has_next, grouped_days = _load_history_page_data(
+                services,
+                title_type=title_type,
+                title_filter=title_filter,
+                current_page=current_page,
+                rated_only=only_rated_episodes,
+            )
         title_options = services.history.history_titles(title_type=title_type)
         return render(
             request,
@@ -67,8 +86,11 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                 "page_title": "History",
                 "history_rows": rows,
                 "history_days": grouped_days,
+                "history_title_cards": title_cards,
                 "history_type": title_type or "all",
+                "history_view": history_view,
                 "history_title_filter": title.strip(),
+                "history_rated_only": only_rated_episodes,
                 "history_title_options": title_options,
                 "page": current_page,
                 "has_next": has_next,
@@ -113,6 +135,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         title_type = normalize_title_type(str(payload.get("type", "all") or "all"))
         title_filter_raw = str(payload.get("title_filter", "") or "")
         title_filter = title_filter_raw.strip() or None
+        rated_only = parse_bool_flag(str(payload.get("rated_only", "0") or "0"))
+        history_view = normalize_history_view(str(payload.get("view", "episodes") or "episodes"))
         try:
             current_page = max(1, int(payload.get("page", 1) or 1))
         except (TypeError, ValueError):
@@ -128,15 +152,27 @@ def register_history_routes(app, *, render, render_fragment) -> None:
             queue_after_revision = max(0, int(payload.get("queue_after_revision", 0) or 0))
         except (TypeError, ValueError):
             queue_after_revision = 0
-        rows, has_next, grouped_days = _load_history_page_data(
-            services,
-            title_type=title_type,
-            title_filter=title_filter,
-            current_page=current_page,
-        )
-        current_title_groups = _title_group_map(grouped_days)
+        if history_view == "titles":
+            rows, has_next = _load_history_title_page_data(
+                services,
+                title_type=title_type,
+                title_filter=title_filter,
+                current_page=current_page,
+                rated_only=rated_only,
+            )
+            current_title_groups = _title_card_map(rows)
+            rows_by_title_key = {str(row["title_key"]): [row] for row in rows if row.get("title_key")}
+        else:
+            rows, has_next, grouped_days = _load_history_page_data(
+                services,
+                title_type=title_type,
+                title_filter=title_filter,
+                current_page=current_page,
+                rated_only=rated_only,
+            )
+            current_title_groups = _title_group_map(grouped_days)
+            rows_by_title_key = _rows_by_title_key(rows, services.auth.config.utc_offset)
         current_page_keys = list(current_title_groups.keys())
-        rows_by_title_key = _rows_by_title_key(rows, services.auth.config.utc_offset)
         stale_visible_title_keys = _select_stale_history_rating_title_keys(
             rows_by_title_key,
             viewport_title_keys or page_title_keys or current_page_keys,
@@ -155,7 +191,7 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                     rows_by_title_key,
                     nearby_title_keys,
                     priority=2,
-                    trigger=TRIGGER_VIEWPORT,
+                    trigger=TRIGGER_PAGE_CONTEXT,
                 ),
                 page_tasks=[
                     *_build_history_bucket_tasks(
@@ -163,7 +199,7 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                         rows_by_title_key,
                         page_title_keys,
                         priority=3,
-                        trigger=TRIGGER_VIEWPORT,
+                        trigger=TRIGGER_PAGE_CONTEXT,
                     ),
                     *_build_history_bucket_tasks(
                         services,
@@ -190,6 +226,7 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                 if title_key in current_title_groups and title_key not in affected_title_keys:
                     affected_title_keys.append(title_key)
         rendered_groups = []
+        fragment_template = "history_title_mode_card.html" if history_view == "titles" else "history_title_card.html"
         for title_key in affected_title_keys:
             title_group = current_title_groups.get(title_key)
             if title_group is None:
@@ -199,11 +236,14 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                     "title_key": title_key,
                     "html": render_fragment(
                         request,
-                        "history_title_card.html",
+                        fragment_template,
                         {
                             "title_group": title_group,
+                            "title_card": title_group,
                             "history_type": title_type or "all",
+                            "history_view": history_view,
                             "history_title_filter": title_filter_raw,
+                            "history_rated_only": rated_only,
                             "page": current_page,
                         },
                     ),
@@ -227,23 +267,61 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         form = await request.form()
         history_type = normalize_title_type(str(form.get("type", "all") or "all")) or "all"
         title_filter = str(form.get("title_filter", "") or "")
+        rated_only = parse_bool_flag(str(form.get("rated_only", "0") or "0"))
+        history_view = normalize_history_view(str(form.get("view", "episodes") or "episodes"))
         try:
             page = max(1, int(str(form.get("page", "1") or "1")))
         except ValueError:
             page = 1
         if services.enrich_queue.is_running():
             flash = "History sync is waiting for current enrich tasks to finish."
-            redirect_url = f"/history?type={history_type}&title={quote(title_filter)}&page={page}&flash={quote(flash)}"
+            redirect_url = (
+                f"/history?type={history_type}&title={quote(title_filter)}&page={page}"
+                f"&rated_only={'1' if rated_only else '0'}&view={history_view}&flash={quote(flash)}"
+            )
             return RedirectResponse(url=redirect_url, status_code=303)
+        services.cache.clear_provider("images")
         started = bg_tasks.start(
             "history_sync",
             source="History sync (manual full)",
             operations=services.operations,
-            fn=services.sync.refresh_history,
+            fn=lambda: services.sync.refresh_history(force_full_assets=True),
         )
         flash = "History sync started." if started else "History sync is already running."
-        redirect_url = f"/history?type={history_type}&title={quote(title_filter)}&page={page}&flash={quote(flash)}"
+        redirect_url = (
+            f"/history?type={history_type}&title={quote(title_filter)}&page={page}"
+            f"&rated_only={'1' if rated_only else '0'}&view={history_view}&flash={quote(flash)}"
+        )
         return RedirectResponse(url=redirect_url, status_code=303)
+
+    @app.get("/history/sync-status")
+    async def history_sync_status(request: Request, after: int = 0) -> JSONResponse:
+        services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
+        raw_events = [
+            event
+            for event in services.operations.list_after(after)
+            if str(event.get("source", "")).startswith("History sync")
+        ]
+        latest_progress = ""
+        recent_events: list[dict] = []
+        seen_messages: set[str] = set()
+        for event in raw_events:
+            message = str(event.get("message", "") or "")
+            if "%" in message:
+                latest_progress = message
+                continue
+            if message in seen_messages:
+                continue
+            seen_messages.add(message)
+            recent_events.append(event)
+        return JSONResponse(
+            {
+                "running": bg_tasks.is_running("history_sync"),
+                "progress_message": latest_progress,
+                "events": recent_events[-6:],
+            }
+        )
 
     @app.post("/history/rate")
     async def history_rate(request: Request) -> RedirectResponse:
@@ -251,6 +329,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         form = await request.form()
         history_type = normalize_title_type(str(form.get("type", "all") or "all")) or "all"
         title_filter = str(form.get("title_filter", "") or "")
+        rated_only = parse_bool_flag(str(form.get("rated_only", "0") or "0"))
+        history_view = normalize_history_view(str(form.get("view", "episodes") or "episodes"))
         try:
             page = max(1, int(str(form.get("page", "1") or "1")))
         except ValueError:
@@ -278,7 +358,10 @@ def register_history_routes(app, *, render, render_fragment) -> None:
             )
         except Exception as exc:
             flash = f"Rating failed: {exc}"
-        redirect_url = f"/history?type={history_type}&title={quote(title_filter)}&page={page}&flash={quote(flash)}"
+        redirect_url = (
+            f"/history?type={history_type}&title={quote(title_filter)}&page={page}"
+            f"&rated_only={'1' if rated_only else '0'}&view={history_view}&flash={quote(flash)}"
+        )
         return RedirectResponse(url=redirect_url, status_code=303)
 
 
@@ -288,10 +371,12 @@ def _load_history_page_data(
     title_type: str | None,
     title_filter: str | None,
     current_page: int,
+    rated_only: bool,
 ) -> tuple[list[dict], bool, list[dict]]:
     rows = services.history.history(
         title_type=title_type,
         title_filter=title_filter,
+        rated_only=rated_only,
         limit=HISTORY_PAGE_SIZE + 1,
         offset=(current_page - 1) * HISTORY_PAGE_SIZE,
     )
@@ -299,6 +384,25 @@ def _load_history_page_data(
     rows = rows[:HISTORY_PAGE_SIZE]
     grouped_days = _group_history_rows(rows, services.auth.config.utc_offset)
     return rows, has_next, grouped_days
+
+
+def _load_history_title_page_data(
+    services: ServiceContainer,
+    *,
+    title_type: str | None,
+    title_filter: str | None,
+    current_page: int,
+    rated_only: bool,
+) -> tuple[list[dict], bool]:
+    rows = services.history.history_title_summaries(
+        title_type=title_type,
+        title_filter=title_filter,
+        rated_only=rated_only,
+        limit=HISTORY_PAGE_SIZE + 1,
+        offset=(current_page - 1) * HISTORY_PAGE_SIZE,
+    )
+    has_next = len(rows) > HISTORY_PAGE_SIZE
+    return rows[:HISTORY_PAGE_SIZE], has_next
 
 
 def _normalize_title_keys(raw_keys) -> list[str]:
@@ -375,6 +479,15 @@ def _title_group_map(grouped_days: list[dict]) -> OrderedDict[str, dict]:
             title_key = str(title_group.get("title_key", "") or "")
             if title_key:
                 result[title_key] = title_group
+    return result
+
+
+def _title_card_map(title_cards: list[dict]) -> OrderedDict[str, dict]:
+    result: OrderedDict[str, dict] = OrderedDict()
+    for title_card in title_cards:
+        title_key = str(title_card.get("title_key", "") or "")
+        if title_key:
+            result[title_key] = title_card
     return result
 
 

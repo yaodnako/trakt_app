@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel panel-hero search-toolbar-panel">
+    <form method="get" action="/search" class="filter-grid search-filter-grid">
+        <div class="search-query-field">
+            <input
+                type="text"
+                name="q"
+                value="{{ query }}"
+                placeholder="Search movie or show titles"
+                aria-label="Search query"
+            >
+        </div>
+        <label class="search-inline-field">
+            <span>Type</span>
+            <select name="type">
+                <option value="all" {% if search_type == 'all' %}selected{% endif %}>All</option>
+                <option value="movie" {% if search_type == 'movie' %}selected{% endif %}>Movies</option>
+                <option value="show" {% if search_type == 'show' %}selected{% endif %}>Shows</option>
+            </select>
+        </label>
+        <label class="search-inline-field">
+            <span>Sort</span>
+            <select name="sort">
+                {% for item in sort_modes %}
+                <option value="{{ item }}" {% if sort_mode == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <div class="search-submit-slot">
+            <button type="submit" class="button search-submit-button">Search</button>
+        </div>
+    </form>
+</section>
+
+{% if error_message %}
+<section class="banner error">{{ error_message }}</section>
+{% endif %}
+
+{% if results %}
+<section class="search-results-grid">
+    {% for item in results %}
+    {% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ item.slug if item.slug else ('/titles/' ~ item.title_type ~ '/' ~ item.trakt_id) %}
+    <article class="result-card search-result-card">
+        <div class="search-result-side">
+            <div class="search-result-title-stack">
+                <h3 class="search-result-title{% if item.title|length > 18 %} is-long{% endif %}{% if item.title|length > 28 %} is-xlong{% endif %}">
+                    <a href="{{ trakt_title_url }}" {% if item.slug %}target="_blank" rel="noreferrer"{% endif %}>{{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}</a>
+                </h3>
+            </div>
+            <div class="progress-poster-shell search-result-poster-shell">
+                <a class="progress-poster search-result-poster" href="{{ trakt_title_url }}" {% if item.slug %}target="_blank" rel="noreferrer"{% endif %}>
+                    {% if item.poster_url %}
+                    <img
+                        src="{{ item.poster_url|cached_image_url }}"
+                        alt="{{ item.title }} poster"
+                        loading="lazy"
+                        data-direct-src="{{ item.poster_url }}"
+                        onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+                    >
+                    {% else %}
+                    <div class="poster-fallback">No poster</div>
+                    {% endif %}
+                    {% if item.title_episode_avg_rating is defined and item.title_episode_avg_rating is not none %}
+                    <div class="history-rating-badge">
+                        {{ item.title_episode_avg_rating|round(1) }} &#9733;
+                    </div>
+                    {% endif %}
+                </a>
+                {% if item.title_type == 'show' %}
+                <button
+                    type="button"
+                    class="poster-chip progress-title-chip title-matrix-trigger search-title-ratings-chip"
+                    data-title-matrix-trigger
+                    data-title-matrix-title="{{ item.title }}"
+                    data-title-matrix-trakt-id="{{ item.trakt_id }}"
+                    data-title-matrix-url="/titles/show/{{ item.trakt_id }}/episode-ratings-matrix"
+                    aria-label="Open episode IMDb ratings matrix for {{ item.title }}"
+                >
+                    <span class="poster-chip-part">
+                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt">
+                        <span>{% if item.trakt_rating is not none %}{{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}{% else %}Loading{% endif %}</span>
+                    </span>
+                    <span class="poster-chip-part">
+                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="imdb">
+                        <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% else %}Loading{% endif %}</span>
+                    </span>
+                </button>
+                {% else %}
+                <div class="poster-chip progress-title-chip search-title-ratings-chip" aria-label="Title ratings">
+                    <span class="poster-chip-part">
+                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt">
+                        <span>{% if item.trakt_rating is not none %}{{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}{% else %}Loading{% endif %}</span>
+                    </span>
+                    <span class="poster-chip-part">
+                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="imdb">
+                        <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% else %}Loading{% endif %}</span>
+                    </span>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        <div class="search-result-body">
+            <p class="search-result-meta">
+                <span>{{ 'TV Series' if item.title_type == 'show' else 'Movie' }}</span>
+                {% if item.status %}<span>{{ item.status }}</span>{% endif %}
+            </p>
+            <p class="search-result-overview">{{ item.overview or "No overview yet." }}</p>
+        </div>
+    </article>
+    {% endfor %}
+</section>
+<div class="pager">
+    {% if page > 1 %}
+    <a class="button ghost" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page - 1 }}">Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a class="button" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page + 1 }}">Next</a>
+    {% endif %}
+</div>
+{% elif query and not error_message %}
+<section class="empty-state">
+    <h3>No matches</h3>
+    <p>Try a broader title, or change the type filter.</p>
+</section>
+{% endif %}
+
+{% if search_history %}
+<section class="panel">
+    <div class="section-head">
+        <h3>Recent queries</h3>
+        <p>Reuses the existing saved desktop search history.</p>
+    </div>
+    <div class="chip-row">
+        {% for item in search_history %}
+        <a class="chip" href="/search?q={{ item }}">{{ item }}</a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+{% endblock %}

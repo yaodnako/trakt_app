@@ -69,6 +69,12 @@
             <button type="button" class="button ghost" data-browse-notification-sound>Browse...</button>
             <button type="button" class="button ghost" data-test-notification-sound>Test sound</button>
         </div>
+        <div class="settings-inline-actions">
+            <button type="submit" class="button" formaction="/settings/full-sync" formmethod="post" formnovalidate>Full Sync</button>
+            <button type="submit" class="button ghost" formaction="/settings/sync-missing" formmethod="post" formnovalidate>Sync</button>
+            <button type="submit" class="button ghost" formaction="/settings/sync-timeout" formmethod="post" formnovalidate>Timeout Sync</button>
+            <button type="submit" class="button ghost" formaction="/settings/sync-repair" formmethod="post" formnovalidate>Repair Sync</button>
+        </div>
         <section
             class="settings-sync-status {% if not imdb_sync_running %}is-hidden{% endif %}"
             data-imdb-status
@@ -83,6 +89,20 @@
             <div class="settings-sync-progress" data-imdb-progress></div>
             <div class="settings-sync-log" data-imdb-log>
                 <div class="settings-sync-log-line">Preparing sync status...</div>
+            </div>
+        </section>
+        <section class="settings-sync-status" data-refresh-status>
+            <div class="settings-sync-head">
+                <strong>Refresh status</strong>
+                <span class="settings-sync-pill" data-refresh-running>Idle</span>
+            </div>
+            <p class="settings-sync-current" data-history-progress>History: n/a</p>
+            <p class="settings-sync-current" data-history-last>Last history: n/a</p>
+            <p class="settings-sync-current" data-progress-last>Last progress: n/a</p>
+            <p class="settings-sync-current" data-refresh-last>Last refresh: n/a</p>
+            <div class="settings-sync-log">
+                <div class="settings-sync-log-line" data-poster-stats>Posters: ...</div>
+                <div class="settings-sync-log-line" data-still-stats>Stills: ...</div>
             </div>
         </section>
         <label>
@@ -129,6 +149,14 @@
     let keepVisibleUntil = root.classList.contains("is-hidden") ? 0 : Date.now() + 15000;
     let lastProgressMessage = "";
     let recentMessages = [];
+    const refreshRoot = document.querySelector("[data-refresh-status]");
+    const refreshRunningNode = refreshRoot ? refreshRoot.querySelector("[data-refresh-running]") : null;
+    const historyProgressNode = refreshRoot ? refreshRoot.querySelector("[data-history-progress]") : null;
+    const historyLastNode = refreshRoot ? refreshRoot.querySelector("[data-history-last]") : null;
+    const progressLastNode = refreshRoot ? refreshRoot.querySelector("[data-progress-last]") : null;
+    const refreshLastNode = refreshRoot ? refreshRoot.querySelector("[data-refresh-last]") : null;
+    const posterStatsNode = refreshRoot ? refreshRoot.querySelector("[data-poster-stats]") : null;
+    const stillStatsNode = refreshRoot ? refreshRoot.querySelector("[data-still-stats]") : null;
 
     function renderLog() {
         if (!logNode) {
@@ -212,6 +240,70 @@
         });
     }
 
+    function formatStats(label, stats) {
+        if (!stats || typeof stats !== "object") {
+            return `${label}: n/a`;
+        }
+        return `${label}: ready ${stats.ready}/${stats.total}, no_data ${stats.checked_no_data}, retry ${stats.retryable_failure}, unknown ${stats.unknown}`;
+    }
+
+    async function pollRefreshStatus() {
+        if (!refreshRoot) {
+            return;
+        }
+        try {
+            const response = await fetch("/settings/refresh-status", {
+                headers: {"Accept": "application/json"},
+                cache: "no-store",
+            });
+            if (!response.ok) {
+                return;
+            }
+            const payload = await response.json();
+            const running = payload && payload.running ? payload.running : {};
+            const isRunning = Boolean(
+                running.history_sync
+                || running.progress_sync
+                || running.enrich_queue
+                || running.full_sync
+                || running.backfill_sync
+                || running.timeout_sync
+                || running.repair_sync
+            );
+            if (refreshRunningNode) {
+                refreshRunningNode.textContent = isRunning
+                    ? `Running${running.history_sync ? " history" : ""}${running.progress_sync ? " progress" : ""}${running.enrich_queue ? " queue" : ""}${running.full_sync ? " full" : ""}${running.backfill_sync ? " backfill" : ""}${running.timeout_sync ? " timeout" : ""}${running.repair_sync ? " repair" : ""}`
+                    : "Idle";
+                refreshRunningNode.classList.toggle("is-running", isRunning);
+            }
+            if (historyProgressNode) {
+                const progressText = payload && payload.history && payload.history.progress_message
+                    ? payload.history.progress_message
+                    : "n/a";
+                historyProgressNode.textContent = `History: ${progressText}`;
+            }
+            if (historyLastNode) {
+                const message = payload && payload.history && payload.history.last_message ? payload.history.last_message : "n/a";
+                historyLastNode.textContent = `Last history: ${message}`;
+            }
+            if (progressLastNode) {
+                const message = payload && payload.progress && payload.progress.last_message ? payload.progress.last_message : "n/a";
+                progressLastNode.textContent = `Last progress: ${message}`;
+            }
+            if (refreshLastNode) {
+                const message = payload && payload.refresh && payload.refresh.last_message ? payload.refresh.last_message : "n/a";
+                refreshLastNode.textContent = `Last refresh: ${message}`;
+            }
+            if (posterStatsNode) {
+                posterStatsNode.textContent = formatStats("Posters", payload ? payload.posters : null);
+            }
+            if (stillStatsNode) {
+                stillStatsNode.textContent = formatStats("Stills", payload ? payload.stills : null);
+            }
+        } catch (_error) {
+        }
+    }
+
     if (browseSoundButton && soundPickerInput && soundPathInput) {
         browseSoundButton.addEventListener("click", () => {
             soundPickerInput.click();
@@ -248,7 +340,9 @@
 
     renderLog();
     pollStatus();
+    pollRefreshStatus();
     window.setInterval(pollStatus, 1200);
+    window.setInterval(pollRefreshStatus, 2000);
 })();
 </script>
 {% endblock %}

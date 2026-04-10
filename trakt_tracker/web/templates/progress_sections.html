@@ -1,0 +1,28 @@
+{% macro render_progress_card(item, is_new=False) %}
+{% set progress_item = item %}
+{% set progress_is_new = is_new %}
+{% include "progress_card.html" %}
+{% endmacro %}
+
+{% set all_progress_items = (new_items or []) + (progress_items or []) %}
+{% if all_progress_items %}
+<section class="progress-section" data-progress-section="main">
+    <section class="progress-grid">
+        {% for item in all_progress_items %}
+        {{ render_progress_card(item, item in (new_items or [])) }}
+        {% endfor %}
+    </section>
+</section>
+{% else %}
+<section class="empty-state panel" data-progress-empty-state>
+    <h3>No progress cards</h3>
+    {% if hide_upcoming or show_dropped or use_year_filter %}
+    <p>Current filters hide all cards.</p>
+    <div class="chip-row">
+        <a class="button ghost" href="/progress?hide_upcoming=0&show_dropped=0&use_year_filter=0">Clear filters</a>
+    </div>
+    {% else %}
+    <p>Try syncing, toggling filters, or use the desktop app to import and enrich more watch progress.</p>
+    {% endif %}
+</section>
+{% endif %}

@@ -6,10 +6,13 @@
         <form method="post" action="/history/sync" class="history-sync-form">
             <input type="hidden" name="type" value="{{ history_type }}">
             <input type="hidden" name="title_filter" value="{{ history_title_filter }}">
+            <input type="hidden" name="rated_only" value="{{ '1' if history_rated_only else '0' }}">
             <input type="hidden" name="page" value="{{ page }}">
+            <input type="hidden" name="view" value="{{ history_view }}">
             <button type="submit" class="button">Sync</button>
         </form>
         <form method="get" action="/history" class="history-filter-form">
+            <input type="hidden" name="view" value="{{ history_view }}">
             <select name="type" class="history-type-select">
                 <option value="all" {% if history_type == 'all' %}selected{% endif %}>All</option>
                 <option value="movie" {% if history_type == 'movie' %}selected{% endif %}>Movies</option>
@@ -21,8 +24,28 @@
                 <option value="{{ item }}">
                 {% endfor %}
             </datalist>
+            <label class="toggle-chip">
+                <input type="checkbox" name="rated_only" value="1" {% if history_rated_only %}checked{% endif %}>
+                Rated ★
+            </label>
             <button type="submit" class="button">Apply</button>
         </form>
+        <a
+            class="button ghost history-view-toggle"
+            href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page=1&view={{ 'episodes' if history_view == 'titles' else 'titles' }}"
+        >
+            {{ 'Episodes' if history_view == 'titles' else 'Titles' }}
+        </a>
+    </div>
+    <div id="history-sync-status" class="history-sync-status{% if not history_sync_running %} is-hidden{% endif %}">
+        <div class="history-sync-head">
+            <strong>History Sync</strong>
+            <span id="history-sync-pill" class="history-sync-pill{% if history_sync_running %} is-running{% endif %}">
+                {% if history_sync_running %}Running{% else %}Idle{% endif %}
+            </span>
+        </div>
+        <p id="history-sync-progress" class="history-sync-progress{% if not history_sync_running %} is-hidden{% endif %}"></p>
+        <div id="history-sync-log" class="history-sync-log"></div>
     </div>
 </section>
 
@@ -39,7 +62,9 @@
         <form method="post" action="/history/rate" class="rate-form">
             <input type="hidden" name="type" value="{{ history_type }}">
             <input type="hidden" name="title_filter" value="{{ history_title_filter }}">
+            <input type="hidden" name="rated_only" value="{{ '1' if history_rated_only else '0' }}">
             <input type="hidden" name="page" value="{{ page }}">
+            <input type="hidden" name="view" value="{{ history_view }}">
             <input type="hidden" name="trakt_id" value="{{ rate_trakt_id }}">
             <input type="hidden" name="rating_type" value="{{ rate_type }}">
             <input type="hidden" name="season" value="{{ rate_season or '' }}">
@@ -55,7 +80,7 @@
             </label>
             <div class="rate-actions">
                 <button type="submit" class="button">Save Rating</button>
-                <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page }}">Cancel</a>
+                <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page }}&view={{ history_view }}">Cancel</a>
             </div>
         </form>
     </div>
@@ -67,14 +92,31 @@
     id="history-page-root"
     data-history-type="{{ history_type }}"
     data-history-title-filter="{{ history_title_filter }}"
+    data-history-rated-only="{{ '1' if history_rated_only else '0' }}"
     data-history-page="{{ page }}"
+    data-history-view="{{ history_view }}"
 >
     <div class="section-head">
-        <h3>Watch history</h3>
+        <h3>{{ 'Watched titles' if history_view == 'titles' else 'Watch history' }}</h3>
         <p>Page {{ page }}{% if has_next %}, more items available{% endif %}</p>
     </div>
 
-    {% if history_days %}
+    {% if history_view == 'titles' and history_title_cards %}
+    <section class="history-title-mode-grid" data-history-title-mode-grid>
+        {% for title_card in history_title_cards %}
+        {% include "history_title_mode_card.html" %}
+        {% endfor %}
+    </section>
+
+    <div class="pager">
+        {% if page > 1 %}
+        <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page - 1 }}&view={{ history_view }}">Previous</a>
+        {% endif %}
+        {% if has_next %}
+        <a class="button" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page + 1 }}&view={{ history_view }}">Next</a>
+        {% endif %}
+    </div>
+    {% elif history_view != 'titles' and history_days %}
     <section class="history-day-grid" data-history-day-grid>
         {% for day in history_days %}
         <article class="history-day-card" data-history-day-card>
@@ -93,10 +135,10 @@
 
     <div class="pager">
         {% if page > 1 %}
-        <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page - 1 }}">Previous</a>
+        <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page - 1 }}&view={{ history_view }}">Previous</a>
         {% endif %}
         {% if has_next %}
-        <a class="button" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&page={{ page + 1 }}">Next</a>
+        <a class="button" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page + 1 }}&view={{ history_view }}">Next</a>
         {% endif %}
     </div>
     {% else %}
@@ -114,6 +156,17 @@
     if (!window.fetch) {
         return;
     }
+    const filterForm = document.querySelector(".history-filter-form");
+    const ratedOnlyToggle = filterForm ? filterForm.querySelector('input[name="rated_only"]') : null;
+    if (filterForm && ratedOnlyToggle) {
+        ratedOnlyToggle.addEventListener("change", () => {
+            if (typeof filterForm.requestSubmit === "function") {
+                filterForm.requestSubmit();
+                return;
+            }
+            filterForm.submit();
+        });
+    }
 
     class HistoryRefreshController {
         constructor(root) {
@@ -121,6 +174,8 @@
             this.page = Number(root.dataset.historyPage || "1") || 1;
             this.historyType = root.dataset.historyType || "all";
             this.titleFilter = root.dataset.historyTitleFilter || "";
+            this.ratedOnly = root.dataset.historyRatedOnly || "0";
+            this.historyView = root.dataset.historyView || "episodes";
             this.shouldAutoSync = this.page === 1;
             this.idleRefreshIntervalMs = 300000;
             this.viewportRefreshDebounceMs = 180;
@@ -140,6 +195,11 @@
             this.nearbyTitleKeys = new Set();
             this.viewportObserver = null;
             this.nearbyObserver = null;
+            this.syncStatusAfter = 0;
+            this.syncStatusRoot = document.getElementById("history-sync-status");
+            this.syncProgressNode = document.getElementById("history-sync-progress");
+            this.syncPillNode = document.getElementById("history-sync-pill");
+            this.syncLogNode = document.getElementById("history-sync-log");
             this.setupObservers();
         }
 
@@ -216,10 +276,19 @@
             if (!this.viewportObserver || !this.nearbyObserver) {
                 return;
             }
+            const currentKeys = new Set(
+                Array.from(this.root.querySelectorAll("[data-history-title-key]"))
+                    .map((node) => node.dataset.historyTitleKey || "")
+                    .filter((value) => value)
+            );
+            this.viewportTitleKeys = new Set(
+                Array.from(this.viewportTitleKeys).filter((key) => currentKeys.has(key))
+            );
+            this.nearbyTitleKeys = new Set(
+                Array.from(this.nearbyTitleKeys).filter((key) => currentKeys.has(key))
+            );
             this.viewportObserver.disconnect();
             this.nearbyObserver.disconnect();
-            this.viewportTitleKeys.clear();
-            this.nearbyTitleKeys.clear();
             for (const card of this.root.querySelectorAll("[data-history-title-key]")) {
                 this.viewportObserver.observe(card);
                 this.nearbyObserver.observe(card);
@@ -257,6 +326,9 @@
         }
 
         requestVisibleRefresh() {
+            if (this.page !== 1) {
+                return;
+            }
             if (this.viewportRefreshTimer !== null) {
                 window.clearTimeout(this.viewportRefreshTimer);
             }
@@ -346,6 +418,7 @@
             this.pollInFlight = true;
             this.pollAttempts += 1;
             try {
+                await this.pollSyncStatus();
                 const forceVisibleRefresh = this.forceVisibleRefresh;
                 this.forceVisibleRefresh = false;
                 const response = await fetch("/history/refresh", {
@@ -357,7 +430,9 @@
                     cache: "no-store",
                     body: JSON.stringify({
                         type: this.historyType,
+                        view: this.historyView,
                         title_filter: this.titleFilter,
+                        rated_only: this.ratedOnly,
                         page: this.page,
                         viewport_title_keys: this.viewportKeys(),
                         nearby_title_keys: this.nearbyKeys(),
@@ -390,6 +465,64 @@
                 }
             } finally {
                 this.pollInFlight = false;
+            }
+        }
+
+        applySyncStatus(payload) {
+            if (!payload || !this.syncStatusRoot) {
+                return;
+            }
+            const running = Boolean(payload.running);
+            this.historySyncRunning = running;
+            this.syncStatusRoot.classList.toggle("is-hidden", !running);
+            if (this.syncPillNode) {
+                this.syncPillNode.textContent = running ? "Running" : "Idle";
+                this.syncPillNode.classList.toggle("is-running", running);
+            }
+            if (this.syncProgressNode) {
+                const progressMessage = String(payload.progress_message || "");
+                this.syncProgressNode.textContent = progressMessage;
+                this.syncProgressNode.classList.toggle("is-hidden", !progressMessage);
+            }
+            if (this.syncLogNode) {
+                const events = Array.isArray(payload.events) ? payload.events : [];
+                const fragment = document.createDocumentFragment();
+                for (const event of events.slice(-4)) {
+                    const line = document.createElement("div");
+                    line.className = "history-sync-log-line";
+                    line.textContent = String(event && event.message ? event.message : "");
+                    if (line.textContent) {
+                        fragment.appendChild(line);
+                    }
+                    if (event && Number.isFinite(event.seq)) {
+                        this.syncStatusAfter = Math.max(this.syncStatusAfter, Number(event.seq));
+                    }
+                }
+                const progressMessage = String(payload.progress_message || "");
+                if (progressMessage) {
+                    const line = document.createElement("div");
+                    line.className = "history-sync-log-line";
+                    line.textContent = progressMessage;
+                    fragment.appendChild(line);
+                }
+                if (fragment.childNodes.length) {
+                    this.syncLogNode.replaceChildren(fragment);
+                }
+            }
+        }
+
+        async pollSyncStatus() {
+            try {
+                const response = await fetch(`/history/sync-status?after=${this.syncStatusAfter}`, {
+                    headers: {"Accept": "application/json"},
+                    cache: "no-store",
+                });
+                if (!response.ok) {
+                    return;
+                }
+                const payload = await response.json();
+                this.applySyncStatus(payload);
+            } catch (_error) {
             }
         }
 
@@ -428,9 +561,10 @@
         return;
     }
     const controller = new HistoryRefreshController(root);
-    if (controller.pageTitleKeys().length || controller.hasRunningJobs()) {
+    if ((controller.page === 1 && controller.pageTitleKeys().length) || controller.hasRunningJobs()) {
         controller.startPolling();
     }
+    controller.pollSyncStatus();
     controller.scheduleIdlePoll();
     controller.autoSync();
 })();

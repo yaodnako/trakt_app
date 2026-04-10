@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.metadata_refresh_policy import ASSET_KIND_POSTER, ASSET_KIND_STILL, TRIGGER_SYNC_EVENT
+from trakt_tracker.application.metadata_refresh_policy import TRIGGER_MANUAL_REPAIR
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.sync_policy import SyncPolicy
 from trakt_tracker.application.trakt_payload_cache import (
@@ -51,8 +52,8 @@ class HistorySyncWorkflow:
         ratings = self._fetch_all_ratings(client)
         self._sync_history_and_ratings(history_items, ratings)
 
-    def refresh_history(self) -> None:
-        self.sync_updates()
+    def refresh_history(self, *, force_full_assets: bool = False, status_callback=None) -> None:
+        self.sync_updates(force_full_assets=force_full_assets, status_callback=status_callback)
 
     def maybe_refresh_history(self) -> bool:
         if not self._auth.is_authorized():
@@ -82,18 +83,31 @@ class HistorySyncWorkflow:
         self.sync_updates()
         return True
 
-    def sync_updates(self) -> None:
+    def sync_updates(self, *, force_full_assets: bool = False, status_callback=None) -> None:
+        def report(message: str) -> None:
+            self._operations.publish("History sync", message)
+            if status_callback is not None:
+                status_callback(message)
+
         self._operations.publish("History sync", "Fetching recent history updates and ratings.")
         client = self._auth.get_client()
         client.clear_cache()
+        report("Preparing sync (5%)")
         history_items = self._fetch_recent_history_updates(client)
+        report("Fetched recent history updates (15%)")
         ratings = self._fetch_all_ratings(client)
+        report("Fetched ratings (25%)")
         self._sync_history_and_ratings(history_items, ratings)
+        report("Merged history and ratings (55%)")
+        if force_full_assets:
+            self._force_refresh_all_assets(status_callback=status_callback)
+            report("Force artwork refresh completed (95%)")
         signature = self._current_history_activity_signature()
         if signature:
             with self._db.session() as session:
                 self._sync_state.set_value(session, SyncPolicy.HISTORY_SIGNATURE_KEY, signature)
                 self._sync_state.set_value(session, SyncPolicy.HISTORY_LAST_SYNC_KEY, datetime.now(tz=UTC).isoformat())
+        report("Finalizing sync (100%)")
         self._operations.publish("History sync", f"Imported {len(history_items)} history item(s) and {len(ratings)} rating item(s).")
 
     def repair_legacy_episode_history(self) -> bool:
@@ -251,6 +265,54 @@ class HistorySyncWorkflow:
                 trigger=TRIGGER_SYNC_EVENT,
                 requested_parts=(ASSET_KIND_STILL,),
             )
+
+    def _force_refresh_all_assets(self, *, status_callback=None) -> None:
+        with self._db.session() as session:
+            all_titles = self._titles.list_titles(session)
+            all_show_ids = self._episode_repo.list_cached_show_ids(session)
+        self._operations.publish(
+            "History sync",
+            f"Force refreshing artwork for {len(all_titles)} title(s) and {len(all_show_ids)} show cache(s).",
+        )
+        total_steps = len(all_titles) + len(all_show_ids)
+        completed_steps = 0
+        last_percent = -1.0
+
+        def emit(message: str) -> None:
+            self._operations.publish("History sync", message)
+            if status_callback is not None:
+                status_callback(message)
+
+        def report_progress() -> None:
+            nonlocal last_percent
+            if total_steps <= 0:
+                return
+            percent = round((completed_steps * 100.0) / total_steps, 1)
+            if percent == last_percent:
+                return
+            last_percent = percent
+            emit(f"Artwork refresh {completed_steps}/{total_steps} ({percent:.1f}%)")
+
+        if self._catalog is not None:
+            for title in all_titles:
+                try:
+                    self._catalog.enrich_title_key(
+                        int(title.trakt_id),
+                        str(title.title_type),
+                        trigger=TRIGGER_MANUAL_REPAIR,
+                        requested_parts=(ASSET_KIND_POSTER,),
+                    )
+                except Exception as exc:
+                    emit(f"Poster refresh failed for {title.title_type}:{title.trakt_id}: {exc}")
+                completed_steps += 1
+                report_progress()
+        for show_trakt_id in all_show_ids:
+            try:
+                self._episode_metadata.force_refresh_show_stills(int(show_trakt_id))
+            except Exception as exc:
+                emit(f"Still refresh failed for show:{show_trakt_id}: {exc}")
+            completed_steps += 1
+            report_progress()
 
     def _import_history_item(self, session, item: dict) -> dict | None:
         raw_type = item.get("type")

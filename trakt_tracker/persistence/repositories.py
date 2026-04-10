@@ -144,6 +144,21 @@ class TitleRepository:
     def list_titles(self, session: Session) -> list[Title]:
         return list(session.scalars(select(Title).order_by(Title.title)))
 
+    def list_title_targets(
+        self,
+        session: Session,
+        *,
+        statuses: tuple[str, ...] | None = None,
+        include_missing_url: bool = False,
+    ) -> list[tuple[int, str]]:
+        stmt = select(Title)
+        if statuses:
+            stmt = stmt.where(Title.poster_status.in_(statuses))
+        if include_missing_url:
+            stmt = stmt.where(or_(Title.poster_url == "", Title.poster_url.is_(None)))
+        rows = list(session.scalars(stmt))
+        return [(int(row.trakt_id), str(row.title_type)) for row in rows]
+
 
 class UserStateRepository:
     def ensure_state(self, session: Session, title_id: int) -> UserTitleState:
@@ -332,6 +347,27 @@ class HistoryRepository:
                 continue
             rated_map[key] = row.rating
         return rated_map
+
+    def latest_show_episode_ratings(self, session: Session, show_trakt_id: int) -> dict[tuple[int, int], int]:
+        rows = session.scalars(
+            select(HistoryEvent)
+            .where(HistoryEvent.title_type == "show")
+            .where(HistoryEvent.title_trakt_id == show_trakt_id)
+            .where(HistoryEvent.season.is_not(None))
+            .where(HistoryEvent.episode.is_not(None))
+            .where(HistoryEvent.rating.is_not(None))
+            .where(HistoryEvent.action.in_(("rated", "watched")))
+            .order_by(desc(HistoryEvent.watched_at), desc(HistoryEvent.id))
+        )
+        result: dict[tuple[int, int], int] = {}
+        for row in rows:
+            if row.season is None or row.episode is None or row.rating is None:
+                continue
+            key = (int(row.season), int(row.episode))
+            if key in result:
+                continue
+            result[key] = int(row.rating)
+        return result
 
     def apply_rating_to_latest_watch(
         self,
@@ -747,6 +783,7 @@ class EpisodeRepository:
                 "still_missing": bool(row.still_missing or row.still_status == ENRICH_STATUS_CHECKED_NO_DATA),
                 "still_status": row.still_status or ENRICH_STATUS_UNKNOWN,
                 "still_refreshed_at": row.still_refreshed_at,
+                "first_aired": row.first_aired,
                 "trakt_rating": row.trakt_rating,
                 "trakt_votes": row.trakt_votes,
                 "trakt_details_status": row.trakt_details_status or ENRICH_STATUS_UNKNOWN,
@@ -756,6 +793,53 @@ class EpisodeRepository:
                 "imdb_votes": row.imdb_votes,
             }
         return result
+
+    def list_show_episode_metadata(self, session: Session, show_trakt_id: int) -> list[dict]:
+        rows = session.scalars(
+            select(EpisodeCache)
+            .where(EpisodeCache.show_trakt_id == show_trakt_id)
+            .order_by(EpisodeCache.season, EpisodeCache.number)
+        )
+        return [
+            {
+                "episode_trakt_id": row.episode_trakt_id,
+                "season": row.season,
+                "number": row.number,
+                "title": row.title,
+                "still_url": row.still_url,
+                "still_missing": bool(row.still_missing or row.still_status == ENRICH_STATUS_CHECKED_NO_DATA),
+                "still_status": row.still_status or ENRICH_STATUS_UNKNOWN,
+                "still_refreshed_at": row.still_refreshed_at,
+                "trakt_rating": row.trakt_rating,
+                "trakt_votes": row.trakt_votes,
+                "trakt_details_status": row.trakt_details_status or ENRICH_STATUS_UNKNOWN,
+                "trakt_details_refreshed_at": row.trakt_details_refreshed_at,
+                "imdb_id": row.imdb_id,
+                "imdb_rating": row.imdb_rating,
+                "imdb_votes": row.imdb_votes,
+                "first_aired": row.first_aired,
+            }
+            for row in rows
+        ]
+
+    def list_cached_show_ids(self, session: Session) -> list[int]:
+        stmt = select(EpisodeCache.show_trakt_id).distinct().order_by(EpisodeCache.show_trakt_id)
+        return [int(show_id) for show_id in session.scalars(stmt)]
+
+    def list_episode_keys(
+        self,
+        session: Session,
+        *,
+        statuses: tuple[str, ...] | None = None,
+        include_missing_still: bool = False,
+    ) -> list[tuple[int, int, int]]:
+        stmt = select(EpisodeCache)
+        if statuses:
+            stmt = stmt.where(EpisodeCache.still_status.in_(statuses))
+        if include_missing_still:
+            stmt = stmt.where(or_(EpisodeCache.still_url == "", EpisodeCache.still_url.is_(None)))
+        rows = list(session.scalars(stmt))
+        return [(int(row.show_trakt_id), int(row.season), int(row.number)) for row in rows]
 
     def update_still_enrich_state(
         self,

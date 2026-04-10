@@ -12,9 +12,11 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
 )
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
+from trakt_tracker.application.episode_ratings_matrix import EpisodeRatingsMatrixService, rating_bucket_color
 from trakt_tracker.application.history import HistoryService
 from trakt_tracker.application.history_read_model import HistoryReadModelService
 from trakt_tracker.application.interactions import InteractionService
+from trakt_tracker.application.metadata_refresh_policy import TRIGGER_PAGE_CONTEXT, TRIGGER_VIEWPORT
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
 from trakt_tracker.application.services import build_services
@@ -100,6 +102,9 @@ class _FakeTmdbClient:
     def enrich_title(self, title: TitleSummary) -> TitleSummary:
         return replace(title, poster_url="https://tmdb.example/poster.jpg", status="released")
 
+    def get_episode_still_url(self, show_tmdb_id: int, season: int, episode: int) -> str:
+        return "https://tmdb.example/still.jpg"
+
 
 class _FakeImdbClient:
     def enrich_title(self, title: TitleSummary) -> TitleSummary:
@@ -107,6 +112,15 @@ class _FakeImdbClient:
 
     def is_ready(self) -> bool:
         return False
+
+    def enrich_episode(self, episode: EpisodeSummary) -> EpisodeSummary:
+        return episode
+
+    def lookup_episode_imdb_id(self, show_imdb_id: str, season_number: int, episode_number: int) -> str:
+        return ""
+
+    def lookup_episode_imdb_id_by_title(self, show_imdb_id: str, episode_title: str) -> str:
+        return ""
 
 
 class _FakeHistoryService:
@@ -238,6 +252,54 @@ class ApplicationServiceTests(unittest.TestCase):
         )
         self.assertEqual(service.history_titles(title_type="movie"), ["Arrival"])
 
+    def test_history_title_summaries_aggregate_by_latest_watch(self) -> None:
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=1, title_type="show", title="Severance"))
+            self.titles.upsert_title(session, TitleSummary(trakt_id=2, title_type="movie", title="Dune"))
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=101,
+                title_trakt_id=1,
+                title="Severance",
+                title_type="show",
+                action="watched",
+                watched_at=datetime(2026, 4, 4, 12, 0, tzinfo=UTC),
+                season=1,
+                episode=2,
+                rating=6,
+            )
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=100,
+                title_trakt_id=1,
+                title="Severance",
+                title_type="show",
+                action="watched",
+                watched_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+                season=1,
+                episode=1,
+                rating=8,
+            )
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=200,
+                title_trakt_id=2,
+                title="Dune",
+                title_type="movie",
+                action="watched",
+                watched_at=datetime(2026, 4, 2, 12, 0, tzinfo=UTC),
+                rating=9,
+            )
+
+        rows = self.history_read_model.history_title_summaries()
+
+        self.assertEqual([row["title_key"] for row in rows], ["show:1", "movie:2"])
+        self.assertEqual(rows[0]["watched_count"], 2)
+        self.assertEqual(rows[0]["my_rating"], 7.0)
+        self.assertEqual(rows[0]["latest_season"], 1)
+        self.assertEqual(rows[0]["latest_episode"], 2)
+        self.assertEqual(rows[1]["my_rating"], 9)
+
     def test_interaction_service_marks_progress_episode_watched(self) -> None:
         history = _FakeHistoryService()
         notifications = _FakeNotificationService()
@@ -299,7 +361,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertTrue(services.sync.maybe_sync_imdb_dataset(3))
         self.assertFalse(services.sync.should_auto_sync_imdb_dataset(3))
         self.assertFalse(services.sync.maybe_sync_imdb_dataset(3))
-        self.assertEqual(sync_calls, [False])
+        self.assertEqual(sync_calls, [True])
 
     def test_history_service_enriches_visible_episode_details_only_when_missing(self) -> None:
         service = HistoryService(
@@ -379,6 +441,159 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertFalse(
             service.has_missing_visible_episode_details(
                 [{"title_trakt_id": 138748, "type": "show", "season": 3, "episode": 4}]
+            )
+        )
+
+    def test_enrich_episode_stills_empty_result_marks_checked_no_data(self) -> None:
+        class _EmptyStillTmdbClient(_FakeTmdbClient):
+            def get_episode_still_url(self, show_tmdb_id: int, season: int, episode: int) -> str:
+                return ""
+
+        episode_metadata = EpisodeMetadataService(
+            self.db,
+            self.episode_repo,
+            self.imdb,
+            self.titles,
+            self.auth,
+            lambda _config: _EmptyStillTmdbClient(),
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=138748,
+                    title_type="show",
+                    title="The Capture",
+                    tmdb_id=250487,
+                ),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=301, season=2, number=6, title="Episode 6"),
+            )
+        changed = episode_metadata.enrich_episode_stills(
+            [(138748, 2, 6)],
+            trigger="manual_repair",
+            requested_parts=("still",),
+        )
+        self.assertFalse(changed)
+        with self.db.session() as session:
+            row = self.episode_repo.find_episode(session, 138748, 2, 6)
+            self.assertEqual(row.still_status, ENRICH_STATUS_CHECKED_NO_DATA)
+
+    def test_enrich_episode_stills_missing_show_tmdb_id_marks_checked_no_data(self) -> None:
+        class _EmptyStillTmdbClient(_FakeTmdbClient):
+            def get_episode_still_url(self, show_tmdb_id: int, season: int, episode: int) -> str:
+                return ""
+
+        episode_metadata = EpisodeMetadataService(
+            self.db,
+            self.episode_repo,
+            self.imdb,
+            self.titles,
+            self.auth,
+            lambda _config: _EmptyStillTmdbClient(),
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=138748,
+                    title_type="show",
+                    title="The Capture",
+                ),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=301, season=2, number=6, title="Episode 6"),
+            )
+        changed = episode_metadata.enrich_episode_stills(
+            [(138748, 2, 6)],
+            trigger="manual_repair",
+            requested_parts=("still",),
+        )
+        self.assertFalse(changed)
+        with self.db.session() as session:
+            row = self.episode_repo.find_episode(session, 138748, 2, 6)
+            self.assertEqual(row.still_status, ENRICH_STATUS_CHECKED_NO_DATA)
+
+    def test_recent_released_checked_no_data_still_requeues_for_viewport(self) -> None:
+        with self.db.session() as session:
+            row = self.episode_repo.upsert_episode(
+                session,
+                139960,
+                EpisodeSummary(
+                    trakt_id=12138429,
+                    season=5,
+                    number=1,
+                    title="Fifteen Inches of Sheer Dynamite",
+                    first_aired=datetime.now(tz=UTC) - timedelta(days=1),
+                ),
+            )
+            row.still_status = ENRICH_STATUS_CHECKED_NO_DATA
+            row.still_missing = True
+            row.still_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None) - timedelta(minutes=6)
+        self.assertTrue(
+            self.episode_metadata.episode_key_needs_enrich(
+                139960,
+                5,
+                1,
+                trigger=TRIGGER_VIEWPORT,
+                requested_parts=("still",),
+            )
+        )
+
+    def test_recent_released_checked_no_data_still_requeues_for_page_context(self) -> None:
+        with self.db.session() as session:
+            row = self.episode_repo.upsert_episode(
+                session,
+                139960,
+                EpisodeSummary(
+                    trakt_id=12138430,
+                    season=5,
+                    number=2,
+                    title="Teenage Kix",
+                    first_aired=datetime.now(tz=UTC) - timedelta(days=1),
+                ),
+            )
+            row.still_status = ENRICH_STATUS_CHECKED_NO_DATA
+            row.still_missing = True
+            row.still_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None) - timedelta(minutes=61)
+        self.assertTrue(
+            self.episode_metadata.episode_key_needs_enrich(
+                139960,
+                5,
+                2,
+                trigger=TRIGGER_PAGE_CONTEXT,
+                requested_parts=("still",),
+            )
+        )
+
+    def test_old_checked_no_data_still_does_not_requeue_outside_recent_window(self) -> None:
+        with self.db.session() as session:
+            row = self.episode_repo.upsert_episode(
+                session,
+                139960,
+                EpisodeSummary(
+                    trakt_id=12138431,
+                    season=4,
+                    number=1,
+                    title="Old Episode",
+                    first_aired=datetime.now(tz=UTC) - timedelta(days=30),
+                ),
+            )
+            row.still_status = ENRICH_STATUS_CHECKED_NO_DATA
+            row.still_missing = True
+            row.still_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None) - timedelta(hours=2)
+        self.assertFalse(
+            self.episode_metadata.episode_key_needs_enrich(
+                139960,
+                4,
+                1,
+                trigger=TRIGGER_PAGE_CONTEXT,
+                requested_parts=("still",),
             )
         )
 
@@ -525,6 +740,146 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(items[0].next_episode.still_url, "https://still.example/capture.jpg")
         self.assertEqual(self.trakt_client.title_details_calls, [])
         self.assertEqual(self.trakt_client.episode_details_calls, [])
+
+    def test_episode_ratings_matrix_builds_grid_and_season_avgs(self) -> None:
+        self.trakt_client.get_show_episodes = lambda trakt_id: [
+            EpisodeSummary(trakt_id=101, season=1, number=1, title="E1", imdb_rating=9.2, imdb_votes=1134),
+            EpisodeSummary(trakt_id=102, season=1, number=2, title="E2"),
+            EpisodeSummary(trakt_id=201, season=2, number=1, title="E1", imdb_rating=7.4, imdb_votes=90),
+        ]
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=138748,
+                    title_type="show",
+                    title="The Capture",
+                    imdb_id="tt8201186",
+                ),
+            )
+        matrix = service.load_show_matrix(138748)
+        self.assertTrue(matrix.has_episodes)
+        self.assertEqual([season.label for season in matrix.seasons], ["S1", "S2", "ALL"])
+        self.assertEqual([row.label for row in matrix.rows], ["E1", "E2"])
+        self.assertEqual(matrix.rows[0].cells[0].display_value, "9.2")
+        self.assertEqual(matrix.rows[0].cells[0].color, rating_bucket_color(9.2))
+        self.assertEqual(matrix.rows[0].cells[1].display_value, "7.4")
+        self.assertEqual(matrix.rows[1].cells[0].display_value, "?")
+        self.assertEqual(matrix.rows[1].cells[0].state, "unrated")
+        self.assertEqual(matrix.rows[1].cells[1].state, "empty")
+        self.assertEqual(matrix.rows[0].cells[0].tooltip, "E1\nS01 E01\n1 134 votes")
+        self.assertEqual([season.avg_display for season in matrix.seasons], ["9.2", "7.4", "8.3"])
+
+    def test_episode_ratings_matrix_builds_trakt_values_and_averages(self) -> None:
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=138748, title_type="show", title="The Capture"))
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=101, season=1, number=1, title="E1", trakt_rating=8.2, trakt_votes=2300, imdb_rating=9.2, imdb_votes=1134),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=102, season=1, number=2, title="E2", trakt_rating=6.8, trakt_votes=1200, imdb_rating=7.2, imdb_votes=900),
+            )
+        matrix = service.load_show_matrix(138748, provider="trakt")
+        self.assertEqual(matrix.provider, "trakt")
+        self.assertEqual(matrix.rows[0].cells[0].display_value, "8.2")
+        self.assertEqual(matrix.rows[0].cells[0].trakt_display_value, "8.2")
+        self.assertEqual(matrix.rows[0].cells[0].trakt_color, rating_bucket_color(8.2))
+        self.assertEqual(matrix.rows[0].cells[0].tooltip, "E1\nS01 E01\n2 300 votes")
+        self.assertEqual([season.avg_display for season in matrix.seasons], ["7.5", "7.5"])
+
+    def test_episode_ratings_matrix_refreshes_missing_trakt_values(self) -> None:
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=138748, title_type="show", title="The Capture"))
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=101, season=1, number=1, title="E1", imdb_rating=9.2, imdb_votes=1134),
+            )
+        matrix = service.load_show_matrix(138748, provider="trakt", refresh_missing=True)
+        self.assertEqual(self.trakt_client.episode_details_calls, [(138748, 1, 1)])
+        self.assertEqual(matrix.rows[0].cells[0].display_value, "7.9")
+        self.assertEqual(matrix.rows[0].cells[0].trakt_votes, 321)
+
+    def test_episode_ratings_matrix_overall_excludes_season_zero(self) -> None:
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=138748, title_type="show", title="The Capture"))
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=11, season=0, number=1, title="Special", trakt_rating=0.0, trakt_votes=5, imdb_rating=0.0, imdb_votes=5),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=12, season=1, number=1, title="Main", trakt_rating=7.2, trakt_votes=500, imdb_rating=7.0, imdb_votes=400),
+            )
+        trakt_matrix = service.load_show_matrix(138748, provider="trakt")
+        imdb_matrix = service.load_show_matrix(138748, provider="imdb")
+        self.assertEqual(trakt_matrix.seasons[-1].label, "ALL")
+        self.assertEqual(trakt_matrix.seasons[-1].avg_display, "7.2")
+        self.assertEqual(imdb_matrix.seasons[-1].avg_display, "7.0")
+
+    def test_episode_ratings_matrix_hides_trakt_ratings_for_unreleased_episodes(self) -> None:
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=138748, title_type="show", title="The Capture"))
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(
+                    trakt_id=21,
+                    season=1,
+                    number=1,
+                    title="Released",
+                    trakt_rating=7.0,
+                    trakt_votes=100,
+                    first_aired=datetime.now(tz=UTC) - timedelta(days=1),
+                ),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(
+                    trakt_id=22,
+                    season=1,
+                    number=2,
+                    title="Future",
+                    trakt_rating=9.5,
+                    trakt_votes=999,
+                    first_aired=datetime.now(tz=UTC) + timedelta(days=7),
+                ),
+            )
+        trakt_matrix = service.load_show_matrix(138748, provider="trakt")
+        self.assertEqual(trakt_matrix.rows[1].cells[0].display_value, "?")
+        self.assertEqual(trakt_matrix.rows[1].cells[0].trakt_state, "unrated")
+        self.assertEqual(trakt_matrix.rows[1].cells[0].tooltip, "Future\nS01 E02\nn/a votes")
+        self.assertEqual(trakt_matrix.seasons[0].avg_display, "7.0")
+        self.assertEqual(trakt_matrix.seasons[-1].avg_display, "7.0")
+
+    def test_episode_ratings_matrix_uses_cached_rows_without_network_fetch(self) -> None:
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=138748, title_type="show", title="The Capture"),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=101, season=0, number=1, title="Special", imdb_rating=8.1, imdb_votes=12),
+            )
+        self.trakt_client.get_show_episodes = lambda trakt_id: (_ for _ in ()).throw(RuntimeError("network must not be used"))
+        matrix = service.load_show_matrix(138748)
+        self.assertTrue(matrix.has_episodes)
+        self.assertEqual([season.label for season in matrix.seasons], ["S0", "ALL"])
 
 
 if __name__ == "__main__":

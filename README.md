@@ -13,10 +13,13 @@
 
 ## Что читать в новом чате
 
-1. `README.md`
-2. `ARCHITECTURE.md`
-3. `STATE.md`
-4. `FEATURES.md`
+1. `AGENTS.md` - short mandatory bootstrap for agents.
+2. `README.md` - run / restart / screenshot commands when needed.
+3. `ARCHITECTURE.md` - read only for architecture or shared-core questions.
+4. `STATE.md` - read only for current behavior, policy, or fix history.
+5. `FEATURES.md` - read only for product/UI scope.
+
+Do not load all docs by default; choose the detailed file only when the task needs it.
 
 ## Запуск
 
@@ -68,6 +71,46 @@ Visual checks:
   - visible ratings в `History` и `Progress` получили stale-by-time refresh policy
   - entering viewport триггерит быстрый patch refresh для видимых cards/groups
   - posters / stills больше не должны периодически перепроверяться как ratings
+  - refresh policy для ratings / poster / still централизована в shared core, а не размазана по `History` / `Progress`
+  - queue tasks теперь несут `trigger + requested_parts`, а не грубый `force_refresh`
+  - для artwork добавлены SQLite timestamps:
+    - `titles.poster_refreshed_at`
+    - `episodes_cache.still_refreshed_at`
+  - stale visible refresh теперь обновляет только ratings/details; artwork не уходит в частый polling
+  - sync-driven artwork recheck работает только как targeted event path:
+    - новый title/show после sync
+    - новый episode / смена `next_episode`
+    - manual repair / targeted repair path
+
+## Что добавлено поверх базовой стабилизации
+
+- для web добавлен встроенный `episode ratings matrix overlay`:
+  - открывается по клику на `title-level` rating chip у show cards
+  - работает в `History` и `Progress`
+  - не уводит на отдельный route
+  - не ломает patch-only refresh
+- matrix overlay читает show episode metadata из shared SQLite `episodes_cache`
+- open path для matrix overlay теперь `DB-first`:
+  - если episode rows уже есть в SQLite, overlay открывается без обязательного network hydrate
+  - forced refresh идет только по явному retry-path
+- в matrix overlay доступны:
+  - IMDb episode heatmap/matrix по сезонам и эпизодам
+  - строка `AVG.` по сезонам
+  - toggle `Hide season 0`
+  - tooltip по ячейке:
+    - episode title
+    - `Sxx Exx`
+    - IMDb votes
+  - click по episode cell -> IMDb episode page, если у row есть `imdb_id`
+- в `Settings` для web теперь есть несколько режимов artwork sync:
+  - `Full Sync`
+  - `Sync`
+  - `Timeout Sync`
+  - `Repair Sync`
+- `Repair Sync` добавлен как отдельный path для проблемных artwork rows:
+  - `poster checked_no_data / retryable_failure`
+  - `still checked_no_data / retryable_failure`
+  - идет через `manual_repair`, а не через обычный sync-event refresh
 
 ## Что важно помнить
 
@@ -76,12 +119,18 @@ Visual checks:
 - `History` и `Progress` читают metadata из одних и тех же таблиц:
   - `titles`
   - `episodes_cache`
+- matrix overlay для show-level ratings тоже читает из тех же shared tables, а не строит отдельный web-only cache
 - decision о refresh теперь принимается не только по `status`, но и по refresh timestamps для ratings
+- decision о refresh теперь централизованно принимается по:
+  - `status`
+  - `trigger`
+  - `requested_parts`
+  - `last_checked_at`
 - file caches теперь только provider response caches, а не decision authority
 - если что-то визуально выглядит не так, сначала надо проверять:
   - что лежит в SQLite
   - какой enrich status у row
-  - какой refresh timestamp у ratings row
+  - какой refresh timestamp у ratings / poster / still row
   - не крутится ли queue в `retryable_failure`
 
 ## Как работать дальше
@@ -90,4 +139,23 @@ Visual checks:
 - сначала проверять фактическое состояние в `STATE.md`
 - для архитектурных решений сначала проверять `ARCHITECTURE.md`
 - для UI-правок обязательно делать локальный screenshot check
+- screenshot check считается завершенным только если:
+  - скрин действительно просмотрен и визуально сопоставлен с запросом / референсом
+  - результат явно оценен, а не просто сохранен
+  - при расхождении UI дорабатывается до повторной проверки
 - если возникает новый баг, описывать его как отдельный дефект, а не смешивать с предыдущими ветками
+## 2026 Search + Matrix Notes
+
+- Search web cards now use shared SQLite-cached title metadata for poster / IMDb / Trakt values instead of relying only on raw Trakt search payload.
+- Search `IMDb votes` sorting now runs on enriched IMDb values available at SSR time.
+- Search poster images now use the same direct-image fallback pattern as `History` / `Progress`.
+- Search show cards can open the same show-level episode ratings matrix overlay as `History` / `Progress`.
+- Episode ratings matrix UI now renders the `AVG.` line as the first line of the matrix; `ALL` stays only in that average line.
+
+## 2026 Episode Still Retry Notes
+
+- Episode still retry is now release-aware and visibility-aware in shared core policy:
+  - visible `checked_no_data` for recent released episodes retries every 5 minutes
+  - non-visible page context / sync path for recent released episodes retries every 1 hour
+  - old / unknown / unreleased episodes keep the long fallback TTL
+- Web routes now use a dedicated non-visible trigger (`page_context`) for `nearby` and `page` buckets, so aggressive retry is reserved for real viewport-visible placeholders.

@@ -32,7 +32,9 @@ Core уже не монолитный. Ключевые куски вынесе�
 - [history.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history.py)
 - [history_read_model.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/history_read_model.py)
 - [episode_metadata.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/episode_metadata.py)
+- [episode_ratings_matrix.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/episode_ratings_matrix.py)
 - [enrich_queue.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/enrich_queue.py)
+- [metadata_refresh_policy.py](/D:/CodexProjects/Trakt_app/trakt_tracker/application/metadata_refresh_policy.py)
 - [routes_history.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_history.py)
 - [routes_progress.py](/D:/CodexProjects/Trakt_app/trakt_tracker/web/routes_progress.py)
 
@@ -45,15 +47,22 @@ Core уже не монолитный. Ключевые куски вынесе�
   - poster
   - title-level ratings
   - enrich statuses для title metadata
-  - ratings refresh timestamps для title-level ratings
+  - refresh timestamps для title-level ratings
+  - refresh timestamps для poster artwork
 - `episodes_cache` хранит:
   - still
   - episode Trakt details / ratings
   - episode IMDb metadata
   - enrich statuses для episode metadata
   - refresh timestamps для episode ratings/details
+  - refresh timestamps для still artwork
 - `History` и `Progress` читают одни и те же shared metadata tables
-- decision о том, нужен ли enrich, принимается по SQLite statuses и refresh timestamps
+- `episode ratings matrix overlay` для show cards тоже собирается из shared `episodes_cache`
+- decision о том, нужен ли enrich, принимается централизованно по:
+  - SQLite statuses
+  - SQLite refresh timestamps
+  - refresh trigger
+  - requested refresh parts
 
 ## Queue model
 
@@ -65,6 +74,7 @@ Shared queue primitives живут в `application`, а не в web routes:
   - visible-first priorities
   - ограничение concurrency
   - structured updates для polling
+  - merge scoped refresh intents по одному task key
 - `History` и `Progress` используют один и тот же queue service
 - route-level background start для enrich больше не является основной моделью
 
@@ -77,8 +87,36 @@ Shared queue primitives живут в `application`, а не в web routes:
 - клиент делает patch-only refresh affected cards/groups
 - `History` и `Progress` используют JSON refresh endpoints и queue revisions
 - entering viewport триггерит быстрый debounce refresh для видимых cards/groups
-- visible ratings могут быть force-refreshed по stale policy без whole-page reload
+- visible ratings могут быть stale-refreshed без whole-page reload
+- stale visible refresh обновляет только ratings/details
 - posters / stills не должны жить на частом periodic refresh path после успешного resolve
+- artwork recheck разрешен только на редких event-driven triggers:
+  - first-seen missing artwork
+  - sync event для новых identity
+  - `next_episode` change
+  - manual repair
+
+## Web overlay model
+
+- show-level rating chip в `History` / `Progress` может открывать встроенный overlay
+- overlay живет на уровне `base.html`, а не внутри конкретного page fragment
+- patch replace карточек не должен ломать overlay trigger, потому что trigger binding делается delegated event handling
+- overlay matrix route:
+  - `GET /titles/show/{trakt_id}/episode-ratings-matrix`
+  - возвращает HTML fragment, а не full page
+- matrix service использует `DB-first` path:
+  - сначала читает `episodes_cache`
+  - hydrate через `get_show_episodes()` делает только если данных нет или идет explicit retry
+- episode cell может вести на IMDb title page эпизода, если у row есть `imdb_id`
+
+## Repair sync model
+
+- обычные `sync event` / `viewport` refresh paths не обязаны массово разбирать старые artwork rows в `checked_no_data` / `retryable_failure`
+- для этого добавлен отдельный web-triggered `Repair Sync`
+- `Repair Sync` использует `manual_repair` trigger и проходит по:
+  - title posters со статусами `checked_no_data` / `retryable_failure`
+  - episode stills со статусами `checked_no_data` / `retryable_failure`
+- это отдельный maintenance path, а не замена обычному `Full Sync` / `Sync` / `Timeout Sync`
 
 ## Что еще остается тяжелым
 
@@ -100,3 +138,19 @@ Shared queue primitives живут в `application`, а не в web routes:
   - данные потерялись
   - данные есть, но экран их неверно показывает
   - данные есть, но queue/retry/status застрял
+## 2026 Search Notes
+
+- Web `Search` is no longer a raw Trakt-only render path.
+- Search SSR merges existing SQLite title metadata before rendering result cards, so cached poster / IMDb / Trakt values can be shown immediately.
+- Search poster loading now follows the same cached-image -> direct-image fallback pattern already used by `History` / `Progress`.
+- Search show cards reuse the same base-level episode ratings matrix overlay trigger and route as other web screens.
+
+## 2026 Episode Still Retry Architecture Notes
+
+- Shared refresh policy now distinguishes visible and non-visible artwork requests using triggers:
+  - `viewport` for visible cards/groups
+  - `page_context` for nearby/page buckets
+- `ASSET_KIND_STILL` `checked_no_data` decisions now use `first_aired` from shared episode metadata:
+  - recent released episodes get short retry windows (5m visible, 1h non-visible)
+  - old/unknown/unreleased episodes keep long fallback TTL
+- This avoids web-only branching and keeps retry behavior in shared application policy.

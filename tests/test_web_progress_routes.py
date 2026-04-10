@@ -12,6 +12,11 @@ from fastapi.templating import Jinja2Templates
 from fastapi.testclient import TestClient
 
 from trakt_tracker.application.enrich_queue import TASK_STATUS_COMPLETED
+from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_STILL,
+    TRIGGER_PAGE_CONTEXT,
+    metadata_refresh_due,
+)
 from trakt_tracker.domain import EpisodeSummary, ProgressSnapshot
 from trakt_tracker.web.routes_progress import register_progress_routes
 from trakt_tracker.web.viewmodels import (
@@ -50,12 +55,22 @@ class _FakeProgressService:
         for item in items:
             if item.next_episode is None:
                 continue
-            if (
-                item.next_episode.still_status in {"unknown", "retryable_failure"}
-                or item.next_episode.trakt_details_status in {"unknown", "retryable_failure"}
+            wants_still = not requested_parts or "still" in requested_parts
+            wants_ratings = not requested_parts or "episode_ratings" in requested_parts
+            still_due = wants_still and metadata_refresh_due(
+                ASSET_KIND_STILL,
+                status=item.next_episode.still_status,
+                last_checked_at=getattr(item.next_episode, "still_refreshed_at", None),
+                has_value=bool(getattr(item.next_episode, "still_url", "")),
+                trigger=trigger,
+                first_aired=getattr(item.next_episode, "first_aired", None),
+            ).should_refresh
+            ratings_due = wants_ratings and (
+                item.next_episode.trakt_details_status in {"unknown", "retryable_failure"}
                 or (requested_parts and "episode_ratings" in requested_parts and item.next_episode.trakt_details_status == "ready")
                 or item.next_episode.imdb_status in {"unknown", "retryable_failure"}
-            ):
+            )
+            if still_due or ratings_due:
                 result.append((int(item.trakt_id), int(item.next_episode.season), int(item.next_episode.number)))
         return result
 
@@ -172,10 +187,11 @@ class ProgressRouteTests(unittest.TestCase):
         ]
         self.progress = _FakeProgressService(items)
         self.queue = _FakeEnrichQueueService()
+        self.unseen_episode_ids: set[int] = set()
         self.app.state.services = SimpleNamespace(
             progress=self.progress,
             enrich_queue=self.queue,
-            notifications=SimpleNamespace(unseen_episode_ids=lambda: set()),
+            notifications=SimpleNamespace(unseen_episode_ids=lambda: self.unseen_episode_ids),
             auth=SimpleNamespace(
                 config=SimpleNamespace(
                     hide_upcoming_in_progress=False,
@@ -239,10 +255,12 @@ class ProgressRouteTests(unittest.TestCase):
         html = response.text
         self.assertIn("poster-loading", html)
         self.assertIn("progress-episode-preview", html)
+        self.assertIn('data-title-matrix-url="/titles/show/1/episode-ratings-matrix"', html)
         self.assertIn("Loading", html)
         self.assertIn("No poster", html)
         self.assertIn("No preview", html)
         self.assertGreaterEqual(html.count("n/a"), 2)
+        self.assertNotIn(">New</h3>", html)
 
     def test_progress_refresh_queues_ratings_only_requests_for_stale_visible_cards(self) -> None:
         self.progress.items = [
@@ -288,6 +306,107 @@ class ProgressRouteTests(unittest.TestCase):
             sorted(tuple(task.payload["refresh_requests"][0]["requested_parts"]) for task in ratings_only),
             [("episode_ratings",), ("title_ratings",)],
         )
+
+    def test_progress_refresh_returns_sections_html_when_page_changes(self) -> None:
+        self.unseen_episode_ids = {99}
+        self.progress.items = [
+            ProgressSnapshot(
+                trakt_id=3,
+                title="The Boys",
+                completed=32,
+                aired=34,
+                percent_completed=94.0,
+                next_episode=EpisodeSummary(
+                    trakt_id=99,
+                    season=5,
+                    number=1,
+                    title="Fifteen Inches of Sheer Dynamite",
+                    still_status="checked_no_data",
+                    trakt_details_status="checked_no_data",
+                    imdb_status="checked_no_data",
+                ),
+                poster_status="checked_no_data",
+                title_ratings_status="checked_no_data",
+            ),
+        ]
+        response = self.client.post(
+            "/progress/refresh",
+            json={
+                "hide_upcoming": "0",
+                "show_dropped": "0",
+                "min_year": "",
+                "use_year_filter": "0",
+                "viewport_card_keys": [],
+                "nearby_card_keys": [],
+                "page_card_keys": ["progress:1", "progress:2"],
+                "queue_after_revision": 0,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["page_changed"])
+        self.assertIn("The Boys", payload["sections_html"])
+        self.assertIn("data-progress-card-key=\"progress:3\"", payload["sections_html"])
+        self.assertIn("progress-new-badge", payload["sections_html"])
+
+    def test_progress_refresh_queues_recent_checked_no_data_still_for_visible_card(self) -> None:
+        self.progress.items = [
+            ProgressSnapshot(
+                trakt_id=139960,
+                title="The Boys",
+                completed=32,
+                aired=34,
+                percent_completed=94.0,
+                next_episode=EpisodeSummary(
+                    trakt_id=12138429,
+                    season=5,
+                    number=1,
+                    title="Fifteen Inches of Sheer Dynamite",
+                    still_status="checked_no_data",
+                    still_refreshed_at=datetime.now(tz=UTC) - timedelta(minutes=6),
+                    first_aired=datetime.now(tz=UTC) - timedelta(days=1),
+                    trakt_details_status="ready",
+                    imdb_status="ready",
+                ),
+                poster_status="ready",
+                title_ratings_status="ready",
+            ),
+        ]
+        response = self.client.post(
+            "/progress/refresh",
+            json={
+                "hide_upcoming": "0",
+                "show_dropped": "0",
+                "min_year": "",
+                "use_year_filter": "0",
+                "viewport_card_keys": ["progress:139960"],
+                "nearby_card_keys": [],
+                "page_card_keys": ["progress:139960"],
+                "queue_after_revision": 0,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        viewport_tasks = self.queue.submissions[0]["viewport"]
+        self.assertIn("episode:139960:5:1", [task.task_key for task in viewport_tasks])
+        self.assertTrue(all(task.payload["refresh_requests"][0]["trigger"] == "viewport" for task in viewport_tasks))
+
+    def test_progress_refresh_uses_page_context_for_non_visible_buckets(self) -> None:
+        response = self.client.post(
+            "/progress/refresh",
+            json={
+                "hide_upcoming": "0",
+                "show_dropped": "0",
+                "min_year": "",
+                "use_year_filter": "0",
+                "viewport_card_keys": [],
+                "nearby_card_keys": ["progress:1"],
+                "page_card_keys": ["progress:1"],
+                "queue_after_revision": 0,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(all(task.payload["refresh_requests"][0]["trigger"] == TRIGGER_PAGE_CONTEXT for task in self.queue.submissions[0]["nearby"]))
+        self.assertTrue(all(task.payload["refresh_requests"][0]["trigger"] == TRIGGER_PAGE_CONTEXT for task in self.queue.submissions[0]["page"]))
 
 
 if __name__ == "__main__":

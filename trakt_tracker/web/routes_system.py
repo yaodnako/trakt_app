@@ -7,12 +7,15 @@ from threading import Lock, Thread
 from urllib.parse import quote
 from urllib.request import Request as UrlRequest, urlopen
 
+from sqlalchemy import func, select
+
 from fastapi import Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from trakt_tracker.application.services import ServiceContainer
 from trakt_tracker.config import ConfigStore, get_app_data_dir, normalize_utc_offset
 from trakt_tracker.infrastructure.cache import BinaryCache
+from trakt_tracker.persistence.models import EpisodeCache, Title
 from trakt_tracker.web.app_shared import image_cache_suffix
 from trakt_tracker.web.viewmodels import parse_bool_flag
 
@@ -139,6 +142,71 @@ def register_system_routes(app, *, render, template_filters) -> None:
         flash = "IMDb sync started." if started else "IMDb sync is already running."
         return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
 
+    @app.post("/settings/full-sync")
+    async def settings_full_sync(request: Request) -> RedirectResponse:
+        services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
+        if services.enrich_queue.is_running() or bg_tasks.is_running("history_sync") or bg_tasks.is_running("progress_sync"):
+            flash = "Sync is waiting for current background tasks to finish."
+            return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
+        services.cache.clear_provider("images")
+        started = bg_tasks.start(
+            "settings_full_sync",
+            source="Full sync",
+            operations=services.operations,
+            fn=lambda: services.sync.sync_assets_full(),
+        )
+        flash = "Full sync started." if started else "Full sync is already running."
+        return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
+
+    @app.post("/settings/sync-missing")
+    async def settings_sync_missing(request: Request) -> RedirectResponse:
+        services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
+        if services.enrich_queue.is_running() or bg_tasks.is_running("history_sync") or bg_tasks.is_running("progress_sync"):
+            flash = "Sync is waiting for current background tasks to finish."
+            return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
+        started = bg_tasks.start(
+            "settings_backfill_sync",
+            source="Backfill sync",
+            operations=services.operations,
+            fn=lambda: services.sync.sync_assets_backfill(),
+        )
+        flash = "Sync started." if started else "Sync is already running."
+        return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
+
+    @app.post("/settings/sync-timeout")
+    async def settings_sync_timeout(request: Request) -> RedirectResponse:
+        services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
+        if services.enrich_queue.is_running() or bg_tasks.is_running("history_sync") or bg_tasks.is_running("progress_sync"):
+            flash = "Sync is waiting for current background tasks to finish."
+            return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
+        started = bg_tasks.start(
+            "settings_timeout_sync",
+            source="Timeout sync",
+            operations=services.operations,
+            fn=lambda: services.sync.sync_assets_timeout_only(),
+        )
+        flash = "Timeout sync started." if started else "Timeout sync is already running."
+        return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
+
+    @app.post("/settings/sync-repair")
+    async def settings_sync_repair(request: Request) -> RedirectResponse:
+        services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
+        if services.enrich_queue.is_running() or bg_tasks.is_running("history_sync") or bg_tasks.is_running("progress_sync"):
+            flash = "Sync is waiting for current background tasks to finish."
+            return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
+        started = bg_tasks.start(
+            "settings_repair_sync",
+            source="Repair sync",
+            operations=services.operations,
+            fn=lambda: services.sync.sync_assets_repair(),
+        )
+        flash = "Repair sync started." if started else "Repair sync is already running."
+        return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
+
     @app.get("/settings/imdb-sync-status")
     async def settings_imdb_sync_status(request: Request, after: int = 0) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
@@ -166,6 +234,121 @@ def register_system_routes(app, *, render, template_filters) -> None:
                 "status": services.sync.imdb_dataset_status(),
                 "progress_message": latest_progress,
                 "events": recent_events[-6:],
+            }
+        )
+
+    @app.get("/settings/refresh-status")
+    async def settings_refresh_status(request: Request) -> JSONResponse:
+        services: ServiceContainer = request.app.state.services
+        bg_tasks = request.app.state.bg_tasks
+        raw_events = services.operations.list_after(0)
+        history_events = [event for event in raw_events if str(event.get("source", "")).startswith("History sync")]
+        progress_events = [event for event in raw_events if str(event.get("source", "")).startswith("Progress sync")]
+        refresh_events = [
+            event
+            for event in raw_events
+            if str(event.get("source", "")).startswith(("Full sync", "Backfill sync", "Timeout sync", "Repair sync"))
+        ]
+        last_history_progress = ""
+        last_history_message = ""
+        for event in history_events:
+            message = str(event.get("message", "") or "")
+            if "%" in message:
+                last_history_progress = message
+            if message:
+                last_history_message = message
+        last_progress_message = ""
+        for event in progress_events:
+            message = str(event.get("message", "") or "")
+            if message:
+                last_progress_message = message
+        last_refresh_message = ""
+        for event in refresh_events:
+            message = str(event.get("message", "") or "")
+            if message:
+                last_refresh_message = message
+        db = services.sync._db
+        with db.session() as session:
+            title_poster_base = select(Title).where(Title.title_type.in_(("show", "movie")))
+            title_total = int(session.scalar(select(func.count()).select_from(title_poster_base.subquery())) or 0)
+            poster_ready = int(
+                session.scalar(
+                    select(func.count()).select_from(Title).where(
+                        Title.title_type.in_(("show", "movie")),
+                        Title.poster_status == "ready",
+                        Title.poster_url != "",
+                    )
+                )
+                or 0
+            )
+            poster_no_data = int(
+                session.scalar(
+                    select(func.count()).select_from(Title).where(
+                        Title.title_type.in_(("show", "movie")),
+                        Title.poster_status == "checked_no_data",
+                    )
+                )
+                or 0
+            )
+            poster_retry = int(
+                session.scalar(
+                    select(func.count()).select_from(Title).where(
+                        Title.title_type.in_(("show", "movie")),
+                        Title.poster_status == "retryable_failure",
+                    )
+                )
+                or 0
+            )
+            episode_total = int(session.scalar(select(func.count()).select_from(EpisodeCache)) or 0)
+            still_ready = int(
+                session.scalar(
+                    select(func.count()).select_from(EpisodeCache).where(EpisodeCache.still_status == "ready", EpisodeCache.still_url != "")
+                )
+                or 0
+            )
+            still_no_data = int(
+                session.scalar(select(func.count()).select_from(EpisodeCache).where(EpisodeCache.still_status == "checked_no_data")) or 0
+            )
+            still_retry = int(
+                session.scalar(select(func.count()).select_from(EpisodeCache).where(EpisodeCache.still_status == "retryable_failure")) or 0
+            )
+        poster_unknown = max(0, title_total - poster_ready - poster_no_data - poster_retry)
+        still_unknown = max(0, episode_total - still_ready - still_no_data - still_retry)
+        return JSONResponse(
+            {
+                "running": {
+                    "history_sync": bg_tasks.is_running("history_sync"),
+                    "progress_sync": bg_tasks.is_running("progress_sync"),
+                    "enrich_queue": services.enrich_queue.is_running(),
+                    "full_sync": bg_tasks.is_running("settings_full_sync"),
+                    "backfill_sync": bg_tasks.is_running("settings_backfill_sync"),
+                    "timeout_sync": bg_tasks.is_running("settings_timeout_sync"),
+                    "repair_sync": bg_tasks.is_running("settings_repair_sync"),
+                },
+                "history": {
+                    "progress_message": last_history_progress,
+                    "last_message": last_history_message,
+                },
+                "progress": {
+                    "last_message": last_progress_message,
+                },
+                "refresh": {
+                    "last_message": last_refresh_message,
+                },
+                "posters": {
+                    "total": title_total,
+                    "ready": poster_ready,
+                    "checked_no_data": poster_no_data,
+                    "retryable_failure": poster_retry,
+                    "unknown": poster_unknown,
+                },
+                "stills": {
+                    "total": episode_total,
+                    "ready": still_ready,
+                    "checked_no_data": still_no_data,
+                    "retryable_failure": still_retry,
+                    "unknown": still_unknown,
+                },
             }
         )
 

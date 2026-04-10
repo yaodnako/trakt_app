@@ -3,13 +3,11 @@
 {% block content %}
 <section class="panel panel-hero">
     <div>
-        <p class="eyebrow">Local-first search UX</p>
         <h2>Search</h2>
-        <p class="lede">Repeated searches reuse the last saved result set first, which matches the desktop behavior but fits a normal web page flow.</p>
     </div>
     <form method="get" action="/search" class="filter-grid">
         <label>
-            <span>Query</span>
+            <span>Search query</span>
             <input type="text" name="q" value="{{ query }}" placeholder="Search movie or show titles">
         </label>
         <label>
@@ -46,17 +44,18 @@
 {% if results %}
 <section class="search-results-grid">
     {% for item in results %}
+    {% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ item.slug if item.slug else ('/titles/' ~ item.title_type ~ '/' ~ item.trakt_id) %}
     <article class="result-card">
-        <div class="poster-shell">
+        <a class="poster-shell search-result-poster" href="{{ trakt_title_url }}" {% if item.slug %}target="_blank" rel="noreferrer"{% endif %}>
             {% if item.poster_url %}
             <img src="{{ item.poster_url|cached_image_url }}" alt="{{ item.title }} poster" loading="lazy">
             {% else %}
             <div class="poster-fallback">No poster</div>
             {% endif %}
-        </div>
+        </a>
         <div class="result-body">
             <p class="meta">{{ item.title_type|upper }}{% if item.year %} · {{ item.year }}{% endif %}</p>
-            <h3><a href="/titles/{{ item.title_type }}/{{ item.trakt_id }}">{{ item.title }}</a></h3>
+            <h3><a href="{{ trakt_title_url }}" {% if item.slug %}target="_blank" rel="noreferrer"{% endif %}>{{ item.title }}</a></h3>
             <p class="ratings">Trakt {{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}</p>
             <p class="ratings">IMDb {{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}</p>
             <p class="overview">{{ item.overview or "No overview yet." }}</p>

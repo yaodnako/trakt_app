@@ -15,6 +15,7 @@ from trakt_tracker.application.enrich_queue import (
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_EPISODE_RATINGS,
     ASSET_KIND_TITLE_RATINGS,
+    TRIGGER_PAGE_CONTEXT,
     TRIGGER_VIEWPORT,
     TRIGGER_VISIBLE_RATINGS_REFRESH,
 )
@@ -154,7 +155,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                     items_by_key,
                     nearby_card_keys,
                     priority=2,
-                    trigger=TRIGGER_VIEWPORT,
+                    trigger=TRIGGER_PAGE_CONTEXT,
                 ),
                 page_tasks=[
                     *_build_progress_bucket_tasks(
@@ -162,7 +163,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                         items_by_key,
                         page_card_keys,
                         priority=3,
-                        trigger=TRIGGER_VIEWPORT,
+                        trigger=TRIGGER_PAGE_CONTEXT,
                     ),
                     *_build_progress_bucket_tasks(
                         services,
@@ -217,6 +218,22 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                 "progress_sync_running": request.app.state.bg_tasks.is_running("progress_sync"),
                 "queue": queue,
                 "page_changed": bool(page_card_keys) and page_card_keys != current_page_keys,
+                "sections_html": (
+                    request.app.state.render_fragment(
+                        request,
+                        "progress_sections.html",
+                        {
+                            "new_items": new_items,
+                            "progress_items": progress_items,
+                            "hide_upcoming": hide_upcoming_value,
+                            "show_dropped": show_dropped_value,
+                            "min_year": min_year_value,
+                            "use_year_filter": use_year_filter_value,
+                        },
+                    )
+                    if bool(page_card_keys) and page_card_keys != current_page_keys
+                    else ""
+                ),
             }
         )
 
@@ -237,11 +254,15 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                 use_year_filter=use_year_filter_value,
                 flash="Progress sync is waiting for current enrich tasks to finish.",
             )
+        services.cache.clear_provider("images")
         started = bg_tasks.start(
             "progress_sync",
             source="Progress sync (manual full)",
             operations=services.operations,
-            fn=lambda: services.progress.sync_progress(dropped_only=show_dropped_value),
+            fn=lambda: services.progress.sync_progress(
+                dropped_only=show_dropped_value,
+                force_full_assets=True,
+            ),
         )
         return progress_redirect(
             hide_upcoming=hide_upcoming_value,

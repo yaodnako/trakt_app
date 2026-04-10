@@ -1,11 +1,5 @@
 {% extends "base.html" %}
 
-{% macro render_progress_card(item, is_new=False) %}
-{% set progress_item = item %}
-{% set progress_is_new = is_new %}
-{% include "progress_card.html" %}
-{% endmacro %}
-
 {% block content %}
 <section
     class="panel panel-hero"
@@ -90,40 +84,9 @@
 </section>
 {% endif %}
 
-{% if new_items %}
-<section class="progress-section" data-progress-section="new">
-    <div class="section-head">
-        <h3>New</h3>
-    </div>
-    <section class="progress-grid">
-        {% for item in new_items %}
-        {{ render_progress_card(item, True) }}
-        {% endfor %}
-    </section>
-</section>
-{% endif %}
-
-{% if progress_items %}
-<section class="progress-section" data-progress-section="main">
-    <section class="progress-grid">
-        {% for item in progress_items %}
-        {{ render_progress_card(item, False) }}
-        {% endfor %}
-    </section>
-</section>
-{% elif not new_items %}
-<section class="empty-state panel" data-progress-empty-state>
-    <h3>No progress cards</h3>
-    {% if hide_upcoming or show_dropped or use_year_filter %}
-    <p>Current filters hide all cards.</p>
-    <div class="chip-row">
-        <a class="button ghost" href="/progress?hide_upcoming=0&show_dropped=0&use_year_filter=0">Clear filters</a>
-    </div>
-    {% else %}
-    <p>Try syncing, toggling filters, or use the desktop app to import and enrich more watch progress.</p>
-    {% endif %}
-</section>
-{% endif %}
+<div id="progress-sections-root">
+{% include "progress_sections.html" %}
+</div>
 <script>
     (() => {
         if (window.traktDebugMode && window.pushFlashToast) {
@@ -351,16 +314,25 @@
         }
 
         refreshSections() {
-            document.querySelectorAll("[data-progress-section]").forEach((section) => {
+            document.querySelectorAll("#progress-sections-root [data-progress-section]").forEach((section) => {
                 const hasCards = section.querySelectorAll("[data-progress-card-key]").length > 0;
                 section.hidden = !hasCards;
             });
-            const emptyState = document.querySelector("[data-progress-empty-state]");
+            const emptyState = document.querySelector("#progress-sections-root [data-progress-empty-state]");
             if (emptyState) {
                 emptyState.hidden = this.pageCardKeys().length > 0;
             }
             this.observeCards();
             this.bindInteractions();
+        }
+
+        replaceSections(html) {
+            const root = document.getElementById("progress-sections-root");
+            if (!root || !html) {
+                return;
+            }
+            root.innerHTML = html;
+            this.refreshSections();
         }
 
         applyRefresh(payload) {
@@ -392,9 +364,13 @@
                 }
             }
 
-            this.refreshSections();
+            if (payload && payload.sections_html) {
+                this.replaceSections(String(payload.sections_html || ""));
+            } else {
+                this.refreshSections();
+            }
 
-            if (payload && payload.page_changed && !this.pageChangeNotified && window.pushFlashToast) {
+            if (payload && payload.page_changed && !payload.sections_html && !this.pageChangeNotified && window.pushFlashToast) {
                 window.pushFlashToast("Progress updated; refresh page to show new items/order.", 4200);
                 this.pageChangeNotified = true;
             }

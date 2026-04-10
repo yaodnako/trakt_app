@@ -20,6 +20,13 @@ DEFAULT_SEARCH_SORT_MODE = "IMDb votes"
 HISTORY_PAGE_SIZE = 50
 
 
+def normalize_history_view(value: str | None) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"title", "titles"}:
+        return "titles"
+    return "episodes"
+
+
 def normalize_title_type(value: str | None) -> str | None:
     normalized = (value or "").strip().lower()
     if normalized in {"movie", "show"}:

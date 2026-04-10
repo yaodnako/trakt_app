@@ -161,6 +161,7 @@ class CatalogService:
         self._remember_search_query(query)
         client = self._auth.get_client()
         results = client.search_titles(query, title_type)
+        results = self._merge_cached_title_metadata(results)
         self.save_last_search_state(query, title_type, results)
         with self._db.session() as session:
             for title in results:
@@ -169,13 +170,49 @@ class CatalogService:
 
     def enrich_title_with_tmdb(self, title: TitleSummary) -> TitleSummary:
         tmdb = self._tmdb_factory(self._auth.config)
-        enriched = title
+        enriched = self._merge_cached_title_metadata([title])[0]
         if tmdb.is_configured():
             enriched = tmdb.enrich_title(enriched)
         enriched = self._imdb_client.enrich_title(enriched)
+        enriched = self._merge_cached_title_metadata([enriched])[0]
         with self._db.session() as session:
             self._titles.upsert_title(session, enriched)
         return enriched
+
+    def _merge_cached_title_metadata(self, titles: list[TitleSummary]) -> list[TitleSummary]:
+        if not titles:
+            return []
+        merged: list[TitleSummary] = []
+        with self._db.session() as session:
+            for title in titles:
+                stored = self._titles.get_title(session, int(title.trakt_id))
+                if stored is None:
+                    merged.append(title)
+                    continue
+                if not title.poster_url and stored.poster_url:
+                    title.poster_url = str(stored.poster_url or "")
+                if not title.status and stored.status:
+                    title.status = str(stored.status or "")
+                if not title.slug and stored.slug:
+                    title.slug = str(stored.slug or "")
+                if title.trakt_rating is None and stored.trakt_rating is not None:
+                    title.trakt_rating = stored.trakt_rating
+                if title.trakt_votes is None and stored.trakt_votes is not None:
+                    title.trakt_votes = stored.trakt_votes
+                if title.tmdb_id is None and stored.tmdb_id is not None:
+                    title.tmdb_id = stored.tmdb_id
+                if title.tmdb_rating is None and stored.tmdb_rating is not None:
+                    title.tmdb_rating = stored.tmdb_rating
+                if title.tmdb_votes is None and stored.tmdb_votes is not None:
+                    title.tmdb_votes = stored.tmdb_votes
+                if not title.imdb_id and stored.imdb_id:
+                    title.imdb_id = str(stored.imdb_id or "")
+                if title.imdb_rating is None and stored.imdb_rating is not None:
+                    title.imdb_rating = stored.imdb_rating
+                if title.imdb_votes is None and stored.imdb_votes is not None:
+                    title.imdb_votes = stored.imdb_votes
+                merged.append(title)
+        return merged
 
     def save_last_search_state(self, query: str, title_type: str | None, results: list[TitleSummary]) -> None:
         payload = {

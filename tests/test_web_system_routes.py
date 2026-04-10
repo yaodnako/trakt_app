@@ -37,13 +37,15 @@ class WebSystemRouteTests(unittest.TestCase):
                 is_authorized=lambda: True,
                 is_configured=lambda: True,
             ),
-            sync=SimpleNamespace(imdb_dataset_status=lambda: "ready"),
+            sync=SimpleNamespace(imdb_dataset_status=lambda: "ready", sync_assets_repair=lambda: None),
             notifications=SimpleNamespace(poll_upcoming=lambda send_native=False: []),
             operations=SimpleNamespace(list_after=lambda after=0: []),
+            enrich_queue=SimpleNamespace(is_running=lambda: False),
         )
+        self.started: list[tuple[str, str]] = []
         self.app.state.bg_tasks = SimpleNamespace(
             is_running=lambda key: False,
-            start=lambda key, source, operations, fn: False,
+            start=lambda key, source, operations, fn: self.started.append((key, source)) or True,
         )
         self.app.state.image_cache = BinaryCache("images_test_routes")
 
@@ -78,6 +80,12 @@ class WebSystemRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 307)
         self.assertEqual(response.headers["location"], "https://example.com/image.jpg")
         self.assertEqual(called, ["https://example.com/image.jpg"])
+
+    def test_settings_sync_repair_starts_background_task(self) -> None:
+        response = self.client.post("/settings/sync-repair", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/settings?flash=Repair%20sync%20started.", response.headers["location"])
+        self.assertEqual(self.started, [("settings_repair_sync", "Repair sync")])
 
 
 if __name__ == "__main__":
