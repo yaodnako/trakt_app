@@ -16,6 +16,9 @@ from trakt_tracker.domain import DashboardState, EpisodeSummary, TitleSummary
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 
 
+WATCH_HISTORY_STREAM_TYPES = (None, "movie")
+
+
 class HistorySyncWorkflow:
     def __init__(
         self,
@@ -506,15 +509,17 @@ class HistorySyncWorkflow:
     @staticmethod
     def _fetch_all_watch_history(client, page_size: int = 100) -> list[dict]:
         items: list[dict] = []
-        page = 1
-        while True:
-            batch = client.get_watch_history(limit=page_size, page=page)
-            if not batch:
-                break
-            items.extend(batch)
-            if len(batch) < page_size:
-                break
-            page += 1
+        seen_history_ids: set[int] = set()
+        for title_type in WATCH_HISTORY_STREAM_TYPES:
+            page = 1
+            while True:
+                batch = client.get_watch_history(title_type=title_type, limit=page_size, page=page)
+                if not batch:
+                    break
+                HistorySyncWorkflow._extend_unique_history_items(items, batch, seen_history_ids)
+                if len(batch) < page_size:
+                    break
+                page += 1
         return items
 
     @staticmethod
@@ -553,18 +558,31 @@ class HistorySyncWorkflow:
         if not known_ids:
             return self._fetch_all_watch_history(client, page_size=page_size)
         items: list[dict] = []
-        page = 1
-        while True:
-            batch = client.get_watch_history(limit=page_size, page=page)
-            if not batch:
-                break
-            unseen = [item for item in batch if item.get("id") not in known_ids]
-            if unseen:
-                items.extend(unseen)
-            if not unseen or len(batch) < page_size:
-                break
-            page += 1
+        seen_history_ids: set[int] = set()
+        for title_type in WATCH_HISTORY_STREAM_TYPES:
+            page = 1
+            while True:
+                batch = client.get_watch_history(title_type=title_type, limit=page_size, page=page)
+                if not batch:
+                    break
+                unseen = [item for item in batch if item.get("id") not in known_ids]
+                if unseen:
+                    self._extend_unique_history_items(items, unseen, seen_history_ids)
+                if not unseen or len(batch) < page_size:
+                    break
+                page += 1
         return items
+
+    @staticmethod
+    def _extend_unique_history_items(target: list[dict], batch: list[dict], seen_history_ids: set[int]) -> None:
+        for item in batch:
+            history_id = item.get("id")
+            if history_id is not None:
+                history_id = int(history_id)
+                if history_id in seen_history_ids:
+                    continue
+                seen_history_ids.add(history_id)
+            target.append(item)
 
     def _current_history_activity_signature(self) -> str:
         client = self._auth.get_client()

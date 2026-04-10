@@ -321,7 +321,6 @@ def create_app() -> FastAPI:
         app,
         render=render,
         render_fragment=render_fragment,
-        enrich_search_results=_enrich_search_results,
         schedule_search_enrichment=_schedule_search_enrichment,
     )
     return app

@@ -422,6 +422,14 @@
                 return String(value || "").toLowerCase() === "trakt" ? "trakt" : "imdb";
             }
 
+            function normalizeTitleMatrixMode(value) {
+                const normalized = String(value || "").toLowerCase();
+                if (normalized === "trakt" || normalized === "my") {
+                    return normalized;
+                }
+                return "imdb";
+            }
+
             function titleMatrixCacheKey(provider) {
                 return `${titleMatrixUrl}|provider=${normalizeTitleMatrixProvider(provider)}`;
             }
@@ -439,33 +447,49 @@
             }
 
             function getSelectedTitleMatrixProvider(fragmentRoot) {
-                const select = titleMatrixBody ? titleMatrixBody.querySelector("[data-title-matrix-provider-select]") : null;
-                if (select) {
-                    return normalizeTitleMatrixProvider(select.value);
+                const activeToggle = titleMatrixBody
+                    ? titleMatrixBody.querySelector("[data-title-matrix-provider-toggle][data-title-matrix-provider].is-active")
+                    : null;
+                if (activeToggle) {
+                    return normalizeTitleMatrixProvider(activeToggle.getAttribute("data-title-matrix-provider"));
                 }
                 return normalizeTitleMatrixProvider(fragmentRoot ? fragmentRoot.getAttribute("data-matrix-provider") : titleMatrixProvider);
             }
 
-            function syncTitleMatrixProviderSelect(fragmentRoot, provider) {
-                const select = titleMatrixBody ? titleMatrixBody.querySelector("[data-title-matrix-provider-select]") : null;
-                if (!select) {
+            function getSelectedTitleMatrixMode(fragmentRoot) {
+                const activeToggle = titleMatrixBody
+                    ? titleMatrixBody.querySelector("[data-title-matrix-rating-mode].is-active")
+                    : null;
+                if (activeToggle) {
+                    return normalizeTitleMatrixMode(activeToggle.getAttribute("data-title-matrix-rating-mode"));
+                }
+                return normalizeTitleMatrixProvider(fragmentRoot ? fragmentRoot.getAttribute("data-matrix-provider") : titleMatrixProvider);
+            }
+
+            function syncTitleMatrixModeToggles(mode) {
+                if (!titleMatrixBody) {
                     return;
                 }
-                select.value = normalizeTitleMatrixProvider(provider || (fragmentRoot ? fragmentRoot.getAttribute("data-matrix-provider") : titleMatrixProvider));
+                const selectedMode = normalizeTitleMatrixMode(mode);
+                for (const toggle of titleMatrixBody.querySelectorAll("[data-title-matrix-rating-mode]")) {
+                    const toggleMode = normalizeTitleMatrixMode(toggle.getAttribute("data-title-matrix-rating-mode"));
+                    const isActive = toggleMode === selectedMode;
+                    toggle.classList.toggle("is-active", isActive);
+                    toggle.setAttribute("aria-pressed", isActive ? "true" : "false");
+                }
             }
 
             function getTitleMatrixControlState() {
                 if (!titleMatrixBody) {
                     return {
                         hideSeasonZero: true,
-                        useMyRatings: false,
+                        ratingMode: "imdb",
                     };
                 }
                 const hideToggle = titleMatrixBody.querySelector("[data-hide-season-zero-toggle]");
-                const myToggle = titleMatrixBody.querySelector("[data-my-rating-toggle]");
                 return {
                     hideSeasonZero: hideToggle ? Boolean(hideToggle.checked) : true,
-                    useMyRatings: myToggle ? Boolean(myToggle.checked) : false,
+                    ratingMode: getSelectedTitleMatrixMode(null),
                 };
             }
 
@@ -474,23 +498,21 @@
                     return;
                 }
                 const hideToggle = titleMatrixBody.querySelector("[data-hide-season-zero-toggle]");
-                const myToggle = titleMatrixBody.querySelector("[data-my-rating-toggle]");
                 if (hideToggle) {
                     hideToggle.checked = Boolean(state.hideSeasonZero);
                 }
-                if (myToggle) {
-                    myToggle.checked = Boolean(state.useMyRatings);
-                }
             }
 
-            function applyTitleMatrixMode(fragmentRoot, useMyRatings, provider = null) {
+            function applyTitleMatrixMode(fragmentRoot, mode = null) {
                 if (!fragmentRoot) {
                     return;
                 }
-                const externalProvider = normalizeTitleMatrixProvider(provider || getSelectedTitleMatrixProvider(fragmentRoot));
-                titleMatrixProvider = externalProvider;
-                syncTitleMatrixProviderSelect(fragmentRoot, externalProvider);
-                const displayMode = useMyRatings ? "my" : externalProvider;
+                const displayMode = normalizeTitleMatrixMode(mode || getSelectedTitleMatrixMode(fragmentRoot));
+                const externalProvider = displayMode === "my" ? getSelectedTitleMatrixProvider(fragmentRoot) : normalizeTitleMatrixProvider(displayMode);
+                if (displayMode !== "my") {
+                    titleMatrixProvider = externalProvider;
+                }
+                syncTitleMatrixModeToggles(displayMode);
                 for (const cell of fragmentRoot.querySelectorAll(".title-matrix-cell[data-imdb-display]")) {
                     const displayValue = cell.getAttribute(`data-${displayMode}-display`) || "?";
                     const state = cell.getAttribute(`data-${displayMode}-state`) || "unrated";
@@ -523,7 +545,7 @@
                             cell.setAttribute("data-imdb-url-original", imdbUrl);
                         }
                     }
-                    if (useMyRatings || displayMode !== "imdb") {
+                    if (displayMode !== "imdb") {
                         cell.removeAttribute("data-imdb-url");
                         cell.classList.remove("is-linkable");
                     } else if (originalImdbUrl) {
@@ -532,10 +554,10 @@
                     }
                 }
                 if (titleMatrixSubtitle) {
-                    const subtitle = useMyRatings
+                    const subtitle = displayMode === "my"
                         ? (fragmentRoot.getAttribute("data-matrix-my-subtitle") || "My episode ratings by season")
                         : (
-                            externalProvider === "trakt"
+                            displayMode === "trakt"
                                 ? (fragmentRoot.getAttribute("data-matrix-trakt-subtitle") || "Trakt episode ratings by season")
                                 : (fragmentRoot.getAttribute("data-matrix-imdb-subtitle") || "IMDb episode ratings by season")
                         );
@@ -550,8 +572,7 @@
                 }
                 const hideToggle = titleMatrixBody.querySelector("[data-hide-season-zero-toggle]");
                 applySeasonZeroVisibility(fragmentRoot, Boolean(hideToggle && hideToggle.checked));
-                const myToggle = titleMatrixBody.querySelector("[data-my-rating-toggle]");
-                applyTitleMatrixMode(fragmentRoot, Boolean(myToggle && myToggle.checked), getSelectedTitleMatrixProvider(fragmentRoot));
+                applyTitleMatrixMode(fragmentRoot, getSelectedTitleMatrixMode(fragmentRoot));
             }
 
             function syncTitleMatrixHorizontalScroll(fragmentRoot) {
@@ -605,8 +626,8 @@
                     titleMatrixBody.innerHTML = titleMatrixCache.get(cacheKey);
                     const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
                     restoreTitleMatrixControlState(controlState);
-                    syncTitleMatrixProviderSelect(fragmentRoot, normalizedProvider);
-                    applyTitleMatrixToggles(fragmentRoot);
+                    applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
+                    applyTitleMatrixMode(fragmentRoot, normalizedProvider);
                     return;
                 }
                 if (titleMatrixRequest) {
@@ -637,8 +658,8 @@
                     }
                     const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
                     restoreTitleMatrixControlState(controlState);
-                    syncTitleMatrixProviderSelect(fragmentRoot, normalizedProvider);
-                    applyTitleMatrixToggles(fragmentRoot);
+                    applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
+                    applyTitleMatrixMode(fragmentRoot, normalizedProvider);
                 } catch (error) {
                     if (error && error.name === "AbortError") {
                         return;
@@ -756,6 +777,30 @@
                     loadTitleMatrixOverlay({forceRefresh: true, provider: titleMatrixProvider});
                     return;
                 }
+                const providerToggle = event.target.closest("[data-title-matrix-provider-toggle]");
+                if (providerToggle && titleMatrixBody) {
+                    event.preventDefault();
+                    const mode = normalizeTitleMatrixMode(providerToggle.getAttribute("data-title-matrix-rating-mode"));
+                    if (mode === "my") {
+                        const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
+                        applyTitleMatrixMode(fragmentRoot, "my");
+                        return;
+                    }
+                    const provider = normalizeTitleMatrixProvider(providerToggle.getAttribute("data-title-matrix-provider"));
+                    titleMatrixProvider = provider;
+                    const cacheKey = titleMatrixCacheKey(provider);
+                    if (titleMatrixCache.has(cacheKey)) {
+                        const controlState = getTitleMatrixControlState();
+                        titleMatrixBody.innerHTML = titleMatrixCache.get(cacheKey);
+                        const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
+                        restoreTitleMatrixControlState(controlState);
+                        applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
+                        applyTitleMatrixMode(fragmentRoot, provider);
+                    } else {
+                        loadTitleMatrixOverlay({provider, refreshMissing: provider === "trakt"});
+                    }
+                    return;
+                }
                 const imdbCell = event.target.closest(".title-matrix-cell[data-imdb-url]");
                 if (imdbCell) {
                     const imdbUrl = imdbCell.getAttribute("data-imdb-url") || "";
@@ -765,24 +810,7 @@
                 }
             });
             document.addEventListener("change", (event) => {
-                const providerSelect = event.target.closest("[data-title-matrix-provider-select]");
-                if (providerSelect && titleMatrixBody) {
-                    const provider = normalizeTitleMatrixProvider(providerSelect.value);
-                    titleMatrixProvider = provider;
-                    const cacheKey = titleMatrixCacheKey(provider);
-                    if (titleMatrixCache.has(cacheKey)) {
-                        const controlState = getTitleMatrixControlState();
-                        titleMatrixBody.innerHTML = titleMatrixCache.get(cacheKey);
-                        const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
-                        restoreTitleMatrixControlState(controlState);
-                        syncTitleMatrixProviderSelect(fragmentRoot, provider);
-                        applyTitleMatrixToggles(fragmentRoot);
-                    } else {
-                        loadTitleMatrixOverlay({provider, refreshMissing: provider === "trakt"});
-                    }
-                    return;
-                }
-                const toggle = event.target.closest("[data-hide-season-zero-toggle], [data-my-rating-toggle]");
+                const toggle = event.target.closest("[data-hide-season-zero-toggle]");
                 if (!toggle || !titleMatrixBody) {
                     return;
                 }

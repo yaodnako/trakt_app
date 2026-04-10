@@ -18,7 +18,7 @@ from trakt_tracker.web.viewmodels import (
 SEARCH_PAGE_SIZE = 24
 
 
-def register_catalog_routes(app, *, render, render_fragment, enrich_search_results, schedule_search_enrichment) -> None:
+def register_catalog_routes(app, *, render, render_fragment, schedule_search_enrichment) -> None:
     @app.get("/search", response_class=HTMLResponse)
     async def search_page(
         request: Request,
@@ -45,29 +45,11 @@ def register_catalog_routes(app, *, render, render_fragment, enrich_search_resul
                 if saved_search_matches(saved_state, query, title_type):
                     results = list(saved_state.get("results", []))
                     source_label = "Local cached result set"
-                    results, enriched = await asyncio.to_thread(
-                        enrich_search_results,
-                        services,
-                        list(results),
-                        query=query,
-                        title_type=title_type,
-                    )
-                    if enriched:
-                        source_label += " with metadata enrichment"
                     if schedule_search_enrichment(request.app, results=results, query=query, title_type=title_type):
                         source_label += " with background metadata refresh"
                 else:
                     results = await asyncio.to_thread(services.catalog.search_titles, query, title_type)
                     source_label = "Fresh Trakt search"
-                    results, enriched = await asyncio.to_thread(
-                        enrich_search_results,
-                        services,
-                        list(results),
-                        query=query,
-                        title_type=title_type,
-                    )
-                    if enriched:
-                        source_label += " with metadata enrichment"
                     if schedule_search_enrichment(request.app, results=results, query=query, title_type=title_type):
                         source_label += " with background metadata enrichment"
             except Exception as exc:
@@ -83,15 +65,6 @@ def register_catalog_routes(app, *, render, render_fragment, enrich_search_resul
                     if normalize_title_type(getattr(item, "title_type", None)) == effective_title_type
                 ]
             source_label = "Last saved search"
-            results, enriched = await asyncio.to_thread(
-                enrich_search_results,
-                services,
-                list(results),
-                query=query,
-                title_type=effective_title_type,
-            )
-            if enriched:
-                source_label += " with metadata enrichment"
             if schedule_search_enrichment(request.app, results=results, query=query, title_type=effective_title_type):
                 source_label += " with background metadata refresh"
 

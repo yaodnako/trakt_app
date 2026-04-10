@@ -156,3 +156,27 @@ Additional current UI details:
 - `History` and `Progress` now share release-aware retry for episode stills when status is `checked_no_data`.
 - Visible placeholders retry frequently (about every 5 minutes), while non-visible page-context retries are slower (about every 1 hour) for recent released episodes.
 - Old / unknown / unreleased episode still negatives remain on long retry intervals to avoid unnecessary TMDb polling.
+
+## 2026 Matrix Provider Behavior
+
+- Episode ratings matrix now uses one-click icon buttons for `IMDb`, `Trakt`, and `My ★`.
+- First switch to `Trakt` triggers quick missing Trakt-details refresh for unresolved episode rows.
+- Matrix `ALL` average excludes season `0`.
+- In `Trakt` mode, unreleased episodes and zero-vote Trakt ratings are shown as unrated (`?`) and excluded from Trakt averages.
+- Matrix tooltips now follow the currently displayed source values.
+
+## 2026 History Title Card Rating Fallback
+
+- For title-level chips in `History` cards (`episodes` and `titles` views):
+  - if rating value exists: show rating
+  - if status is `checked_no_data` or `ready` but value is missing: show `n/a`
+  - `Loading` is reserved for unresolved states only
+- History filters apply without an `Apply` button:
+  - type / rated-only changes submit immediately
+  - title text filter submits after a short debounce
+
+## 2026 Sync And Image Loading Notes
+
+- History sync reads both the general watch-history stream and the movie watch-history stream, then dedupes by Trakt history id.
+- Search page metadata enrichment now runs in the background instead of blocking initial render.
+- Cached web images now try to fetch and return bytes on first cache miss before falling back to external redirect.

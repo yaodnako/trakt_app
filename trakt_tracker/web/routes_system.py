@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import shutil
 from pathlib import Path
@@ -43,6 +44,10 @@ def register_system_routes(app, *, render, template_filters) -> None:
         stale_payload = cache.get_any_bytes(target_url)
         if stale_payload is not None:
             return Response(content=stale_payload, media_type=media_type or "image/jpeg")
+        fetched = await asyncio.to_thread(_fetch_and_cache_image, cache, target_url, 5)
+        if fetched is not None:
+            payload, content_type = fetched
+            return Response(content=payload, media_type=content_type or media_type or "image/jpeg")
         _warm_image_cache_in_background(cache, target_url, timeout=5)
         return RedirectResponse(url=target_url, status_code=307)
 
@@ -385,18 +390,7 @@ def _warm_image_cache_in_background(cache: BinaryCache, target_url: str, *, time
 
     def runner() -> None:
         try:
-            upstream_request = UrlRequest(
-                target_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                },
-            )
-            with urlopen(upstream_request, timeout=timeout) as upstream_response:
-                fetched = upstream_response.read()
-                content_type = upstream_response.headers.get("Content-Type", "")
-            if fetched:
-                cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(target_url, content_type))
+            _fetch_and_cache_image(cache, target_url, timeout)
         except Exception:
             pass
         finally:
@@ -404,3 +398,23 @@ def _warm_image_cache_in_background(cache: BinaryCache, target_url: str, *, time
                 _image_warm_running.discard(target_url)
 
     Thread(target=runner, daemon=True).start()
+
+
+def _fetch_and_cache_image(cache: BinaryCache, target_url: str, timeout: int) -> tuple[bytes, str] | None:
+    try:
+        upstream_request = UrlRequest(
+            target_url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            },
+        )
+        with urlopen(upstream_request, timeout=timeout) as upstream_response:
+            fetched = upstream_response.read()
+            content_type = upstream_response.headers.get("Content-Type", "")
+        if not fetched:
+            return None
+        cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(target_url, content_type))
+        return fetched, content_type
+    except Exception:
+        return None

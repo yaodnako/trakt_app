@@ -63,7 +63,7 @@
                 <span>
                     {% if title_card.title_trakt_rating is not none %}
                     {{ title_card.title_trakt_rating|rating_with_votes(title_card.title_trakt_votes) }}
-                    {% elif title_card.title_ratings_status == 'checked_no_data' %}
+                    {% elif title_card.title_ratings_status in ('checked_no_data', 'ready') %}
                     n/a
                     {% else %}
                     Loading
@@ -79,7 +79,7 @@
                 <span>
                     {% if title_card.title_imdb_rating is not none %}
                     {{ title_card.title_imdb_rating|rating_with_votes(title_card.title_imdb_votes) }}
-                    {% elif title_card.title_ratings_status == 'checked_no_data' %}
+                    {% elif title_card.title_ratings_status in ('checked_no_data', 'ready') %}
                     n/a
                     {% else %}
                     Loading

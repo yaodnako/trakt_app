@@ -159,3 +159,15 @@ Visual checks:
   - non-visible page context / sync path for recent released episodes retries every 1 hour
   - old / unknown / unreleased episodes keep the long fallback TTL
 - Web routes now use a dedicated non-visible trigger (`page_context`) for `nearby` and `page` buckets, so aggressive retry is reserved for real viewport-visible placeholders.
+
+## 2026 Matrix Provider + Rating Rendering Notes
+
+- Episode ratings matrix supports one-click source switching: `IMDb` (default) / `Trakt` / `My ★`.
+- First switch to `Trakt` can request quick missing Trakt details refresh for unresolved episode rows.
+- Matrix `ALL` excludes season `0`.
+- In `Trakt` mode, unreleased episodes and zero-vote Trakt ratings are displayed as unrated (`?`) and excluded from Trakt averages.
+- History title rating chips now render `n/a` when rating status is already resolved (`ready` / `checked_no_data`) but a concrete provider value is missing; `Loading` is kept for unresolved states only.
+- Current sync scope note: history ratings sync currently imports `episode` / `show` / `movie` ratings; `season` ratings are outside that import path.
+- History filter controls auto-apply: type and rated-only changes submit immediately, title text submits after debounce.
+- History watch sync fetches the movie watch-history stream in addition to the general stream, because Trakt can expose watched movies there even when recent general history is episode-only.
+- Search page metadata enrichment is background-only for initial render, and `/cached-image` tries to return newly fetched bytes before redirect fallback.

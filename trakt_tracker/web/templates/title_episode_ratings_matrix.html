@@ -11,17 +11,56 @@
             <input type="checkbox" data-hide-season-zero-toggle checked>
             <span>Hide season 0</span>
         </label>
-        <label class="title-matrix-option">
-            <input type="checkbox" data-my-rating-toggle>
-            <span>My &#9733;</span>
-        </label>
-        <label class="title-matrix-option title-matrix-provider-option">
+        <div class="title-matrix-option title-matrix-provider-option">
             <span>Ratings</span>
-            <select data-title-matrix-provider-select>
-                <option value="imdb" {% if matrix.provider == 'imdb' %}selected{% endif %}>IMDb</option>
-                <option value="trakt" {% if matrix.provider == 'trakt' %}selected{% endif %}>Trakt</option>
-            </select>
-        </label>
+            <div class="title-matrix-provider-group" role="group" aria-label="Ratings provider">
+                <button
+                    type="button"
+                    class="title-matrix-provider-toggle{% if matrix.provider == 'imdb' %} is-active{% endif %}"
+                    data-title-matrix-provider-toggle
+                    data-title-matrix-rating-mode="imdb"
+                    data-title-matrix-provider="imdb"
+                    aria-pressed="{% if matrix.provider == 'imdb' %}true{% else %}false{% endif %}"
+                    aria-label="Use IMDb ratings"
+                >
+                    <img
+                        class="title-matrix-provider-icon"
+                        src="{{ request.url_for('static', path='imdb_icon.png') }}"
+                        alt=""
+                        aria-hidden="true"
+                    >
+                    <span class="visually-hidden">IMDb</span>
+                </button>
+                <button
+                    type="button"
+                    class="title-matrix-provider-toggle{% if matrix.provider == 'trakt' %} is-active{% endif %}"
+                    data-title-matrix-provider-toggle
+                    data-title-matrix-rating-mode="trakt"
+                    data-title-matrix-provider="trakt"
+                    aria-pressed="{% if matrix.provider == 'trakt' %}true{% else %}false{% endif %}"
+                    aria-label="Use Trakt ratings"
+                >
+                    <img
+                        class="title-matrix-provider-icon"
+                        src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
+                        alt=""
+                        aria-hidden="true"
+                    >
+                    <span class="visually-hidden">Trakt</span>
+                </button>
+                <button
+                    type="button"
+                    class="title-matrix-provider-toggle"
+                    data-title-matrix-provider-toggle
+                    data-title-matrix-rating-mode="my"
+                    aria-pressed="false"
+                    aria-label="Use my ratings"
+                >
+                    <span class="title-matrix-provider-star" aria-hidden="true">&#9733;</span>
+                    <span class="visually-hidden">My ratings</span>
+                </button>
+            </div>
+        </div>
     </div>
     <div class="title-matrix-legend" aria-label="IMDb rating legend">
         {% for item in matrix.legend %}

@@ -117,21 +117,6 @@ class CatalogRouteTests(unittest.TestCase):
             self.app,
             render=render,
             render_fragment=render_fragment,
-            enrich_search_results=lambda services, results, **kwargs: (
-                [
-                    TitleSummary(
-                        trakt_id=item.trakt_id,
-                        title_type=item.title_type,
-                        title=item.title,
-                        trakt_rating=item.trakt_rating,
-                        trakt_votes=item.trakt_votes,
-                        imdb_rating=(9.5 if item.trakt_id == 2 else 7.1),
-                        imdb_votes=(500 if item.trakt_id == 2 else 100),
-                    )
-                    for item in results
-                ],
-                True,
-            ),
             schedule_search_enrichment=lambda *args, **kwargs: False,
         )
         self.client = TestClient(self.app)
@@ -144,10 +129,14 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("S1", html)
         self.assertIn("E1", html)
         self.assertIn("AVG.", html)
-        self.assertIn('data-title-matrix-provider-select', html)
-        self.assertIn('<option value="imdb" selected>IMDb</option>', html)
-        self.assertIn('<option value="trakt" >Trakt</option>', html)
-        self.assertIn('data-my-rating-toggle', html)
+        self.assertIn('data-title-matrix-provider-toggle', html)
+        self.assertIn('data-title-matrix-provider="imdb"', html)
+        self.assertIn('data-title-matrix-provider="trakt"', html)
+        self.assertIn('data-title-matrix-rating-mode="my"', html)
+        self.assertIn("imdb_icon.png", html)
+        self.assertIn("trakt_logo_bw.svg", html)
+        self.assertIn("My ratings", html)
+        self.assertNotIn('data-my-rating-toggle', html)
 
     def test_show_matrix_fragment_route_accepts_trakt_provider_refresh_missing(self) -> None:
         response = self.client.get("/titles/show/138748/episode-ratings-matrix?provider=trakt&refresh_missing=1")
@@ -162,12 +151,11 @@ class CatalogRouteTests(unittest.TestCase):
             },
         )
 
-    def test_search_page_renders_synchronously_enriched_imdb_values(self) -> None:
+    def test_search_page_renders_without_waiting_for_metadata_enrichment(self) -> None:
         response = self.client.get("/search?q=test&type=all&sort=IMDb+votes")
         self.assertEqual(response.status_code, 200)
         html = response.text
-        self.assertIn("9.5 (500)", html)
-        self.assertIn("7.1 (100)", html)
+        self.assertIn("Loading", html)
         self.assertLess(html.index("Movie B"), html.index("Movie A"))
 
 

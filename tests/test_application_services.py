@@ -15,6 +15,7 @@ from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.episode_ratings_matrix import EpisodeRatingsMatrixService, rating_bucket_color
 from trakt_tracker.application.history import HistoryService
 from trakt_tracker.application.history_read_model import HistoryReadModelService
+from trakt_tracker.application.history_sync import HistorySyncWorkflow
 from trakt_tracker.application.interactions import InteractionService
 from trakt_tracker.application.metadata_refresh_policy import TRIGGER_PAGE_CONTEXT, TRIGGER_VIEWPORT
 from trakt_tracker.application.operations import OperationLog
@@ -251,6 +252,61 @@ class ApplicationServiceTests(unittest.TestCase):
             9,
         )
         self.assertEqual(service.history_titles(title_type="movie"), ["Arrival"])
+
+    def test_history_sync_fetches_movie_watch_history_stream(self) -> None:
+        class _HistoryClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str | None, int]] = []
+
+            def get_watch_history(self, title_type: str | None = None, limit: int = 100, page: int = 1) -> list[dict]:
+                self.calls.append((title_type, page))
+                if title_type is None:
+                    return [
+                        {
+                            "id": 10,
+                            "type": "episode",
+                            "watched_at": "2026-04-09T15:54:00.000Z",
+                            "show": {"ids": {"trakt": 1}, "title": "Show"},
+                            "episode": {"ids": {"trakt": 101}, "season": 1, "number": 1, "title": "Pilot"},
+                        }
+                    ]
+                if title_type == "movie":
+                    return [
+                        {
+                            "id": 20,
+                            "type": "movie",
+                            "watched_at": "2026-04-10T12:42:32.000Z",
+                            "movie": {"ids": {"trakt": 2}, "title": "Movie"},
+                        }
+                    ]
+                return []
+
+        client = _HistoryClient()
+
+        items = HistorySyncWorkflow._fetch_all_watch_history(client)
+
+        self.assertEqual([item["type"] for item in items], ["episode", "movie"])
+        self.assertIn((None, 1), client.calls)
+        self.assertIn(("movie", 1), client.calls)
+
+    def test_history_sync_dedupes_movie_if_all_stream_includes_it(self) -> None:
+        class _HistoryClient:
+            def get_watch_history(self, title_type: str | None = None, limit: int = 100, page: int = 1) -> list[dict]:
+                movie = {
+                    "id": 20,
+                    "type": "movie",
+                    "watched_at": "2026-04-10T12:42:32.000Z",
+                    "movie": {"ids": {"trakt": 2}, "title": "Movie"},
+                }
+                if title_type is None:
+                    return [movie]
+                if title_type == "movie":
+                    return [movie]
+                return []
+
+        items = HistorySyncWorkflow._fetch_all_watch_history(_HistoryClient())
+
+        self.assertEqual([item["id"] for item in items], [20])
 
     def test_history_title_summaries_aggregate_by_latest_watch(self) -> None:
         with self.db.session() as session:
@@ -863,6 +919,43 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(trakt_matrix.rows[1].cells[0].tooltip, "Future\nS01 E02\nn/a votes")
         self.assertEqual(trakt_matrix.seasons[0].avg_display, "7.0")
         self.assertEqual(trakt_matrix.seasons[-1].avg_display, "7.0")
+
+    def test_episode_ratings_matrix_ignores_zero_vote_trakt_ratings_in_cells_and_averages(self) -> None:
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=135985, title_type="show", title="That Time I Got Reincarnated as a Slime"))
+            self.episode_repo.upsert_episode(
+                session,
+                135985,
+                EpisodeSummary(
+                    trakt_id=401,
+                    season=4,
+                    number=1,
+                    title="Rated",
+                    trakt_rating=7.6,
+                    trakt_votes=120,
+                    first_aired=datetime.now(tz=UTC) - timedelta(days=1),
+                ),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                135985,
+                EpisodeSummary(
+                    trakt_id=402,
+                    season=4,
+                    number=2,
+                    title="Zero votes",
+                    trakt_rating=0.0,
+                    trakt_votes=0,
+                    first_aired=datetime.now(tz=UTC) - timedelta(days=1),
+                ),
+            )
+        trakt_matrix = service.load_show_matrix(135985, provider="trakt")
+        self.assertEqual(trakt_matrix.rows[0].cells[0].display_value, "7.6")
+        self.assertEqual(trakt_matrix.rows[1].cells[0].display_value, "?")
+        self.assertEqual(trakt_matrix.rows[1].cells[0].trakt_state, "unrated")
+        self.assertEqual(trakt_matrix.seasons[0].avg_display, "7.6")
+        self.assertEqual(trakt_matrix.seasons[-1].avg_display, "7.6")
 
     def test_episode_ratings_matrix_uses_cached_rows_without_network_fetch(self) -> None:
         service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)

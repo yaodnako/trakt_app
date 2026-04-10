@@ -378,6 +378,9 @@ class HistoryRouteTests(unittest.TestCase):
         html = response.text
         self.assertIn('data-history-page="2"', html)
         self.assertIn("/history/refresh", html)
+        self.assertIn('historyTypeSelect.addEventListener("change", submitFilters)', html)
+        self.assertIn('titleFilterInput.addEventListener("input"', html)
+        self.assertNotIn(">Apply</button>", html)
         self.assertNotIn("window.location.reload()", html)
         self.assertNotIn("history_enrich_initial_seq", html)
         self.assertNotIn("reloadGuardKey", html)
@@ -457,6 +460,23 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertIn("No poster", html)
         self.assertIn("No preview", html)
         self.assertGreaterEqual(html.count("n/a"), 4)
+
+    def test_history_title_mode_shows_na_for_ready_status_without_imdb_value(self) -> None:
+        self.history.rows = [
+            {
+                **self._row("show", 1, "Severance", watched_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC)),
+                "title_trakt_rating": 8.4,
+                "title_trakt_votes": 1234,
+                "title_imdb_rating": None,
+                "title_imdb_votes": None,
+                "title_ratings_status": "ready",
+            }
+        ]
+        response = self.client.get("/history?view=titles&page=1")
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn("8.4", html)
+        self.assertIn("n/a", html)
 
     def test_history_refresh_queues_recent_checked_no_data_still_for_visible_row(self) -> None:
         self.history.rows = [

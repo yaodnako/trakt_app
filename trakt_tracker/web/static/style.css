@@ -1595,6 +1595,56 @@ tbody tr:hover {
     font-size: 0.78rem;
 }
 
+.title-matrix-provider-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.title-matrix-provider-toggle {
+    width: 26px;
+    height: 26px;
+    border: 1px solid rgba(148, 163, 184, 0.45);
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #475569;
+    display: inline-grid;
+    place-items: center;
+    padding: 1px;
+    cursor: pointer;
+    transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.title-matrix-provider-toggle:hover {
+    border-color: rgba(71, 85, 105, 0.55);
+}
+
+.title-matrix-provider-toggle:focus-visible {
+    outline: none;
+    border-color: rgba(14, 116, 144, 0.85);
+    box-shadow: 0 0 0 2px rgba(14, 116, 144, 0.2);
+}
+
+.title-matrix-provider-toggle.is-active {
+    border-color: rgba(15, 118, 110, 0.8);
+    background: rgba(15, 118, 110, 0.12);
+    color: #0f172a;
+    box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.38);
+}
+
+.title-matrix-provider-icon {
+    width: 22px;
+    height: 22px;
+    display: block;
+    object-fit: contain;
+}
+
+.title-matrix-provider-star {
+    font-size: 1rem;
+    line-height: 1;
+    color: #344055;
+}
+
 .title-matrix-inline-note {
     padding: 8px 10px;
     border-radius: 10px;

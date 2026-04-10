@@ -28,7 +28,6 @@
                 <input type="checkbox" name="rated_only" value="1" {% if history_rated_only %}checked{% endif %}>
                 Rated ★
             </label>
-            <button type="submit" class="button">Apply</button>
         </form>
         <a
             class="button ghost history-view-toggle"
@@ -157,15 +156,40 @@
         return;
     }
     const filterForm = document.querySelector(".history-filter-form");
+    const historyTypeSelect = filterForm ? filterForm.querySelector('select[name="type"]') : null;
+    const titleFilterInput = filterForm ? filterForm.querySelector('input[name="title"]') : null;
     const ratedOnlyToggle = filterForm ? filterForm.querySelector('input[name="rated_only"]') : null;
-    if (filterForm && ratedOnlyToggle) {
-        ratedOnlyToggle.addEventListener("change", () => {
+    if (filterForm) {
+        let titleFilterTimer = null;
+        const submitFilters = () => {
             if (typeof filterForm.requestSubmit === "function") {
                 filterForm.requestSubmit();
                 return;
             }
             filterForm.submit();
-        });
+        };
+        if (historyTypeSelect) {
+            historyTypeSelect.addEventListener("change", submitFilters);
+        }
+        if (ratedOnlyToggle) {
+            ratedOnlyToggle.addEventListener("change", submitFilters);
+        }
+        if (titleFilterInput) {
+            let lastSubmittedTitle = titleFilterInput.value;
+            titleFilterInput.addEventListener("input", () => {
+                if (titleFilterTimer !== null) {
+                    window.clearTimeout(titleFilterTimer);
+                }
+                titleFilterTimer = window.setTimeout(() => {
+                    titleFilterTimer = null;
+                    if (titleFilterInput.value === lastSubmittedTitle) {
+                        return;
+                    }
+                    lastSubmittedTitle = titleFilterInput.value;
+                    submitFilters();
+                }, 500);
+            });
+        }
     }
 
     class HistoryRefreshController {

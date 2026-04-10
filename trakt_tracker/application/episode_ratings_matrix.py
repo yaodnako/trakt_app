@@ -270,11 +270,11 @@ class EpisodeRatingsMatrixService:
             ]
             season_averages[season] = (sum(ratings) / len(ratings)) if ratings else None
             trakt_ratings = [
-                float(row["trakt_rating"])
+                visible_trakt_rating
                 for row in episode_rows
+                for visible_trakt_rating, _visible_votes in [self._visible_trakt_rating(row, now_utc)]
                 if int(row.get("season") or 0) == season
-                and row.get("trakt_rating") is not None
-                and self._is_episode_released(row, now_utc)
+                and visible_trakt_rating is not None
             ]
             season_trakt_averages[season] = (sum(trakt_ratings) / len(trakt_ratings)) if trakt_ratings else None
             my_values = [
@@ -297,11 +297,11 @@ class EpisodeRatingsMatrixService:
         ]
         overall_imdb_average = (sum(overall_imdb_values) / len(overall_imdb_values)) if overall_imdb_values else None
         overall_trakt_values = [
-            float(row["trakt_rating"])
+            visible_trakt_rating
             for row in episode_rows
+            for visible_trakt_rating, _visible_votes in [self._visible_trakt_rating(row, now_utc)]
             if int(row.get("season") or 0) != 0
-            and row.get("trakt_rating") is not None
-            and self._is_episode_released(row, now_utc)
+            and visible_trakt_rating is not None
         ]
         overall_trakt_average = (sum(overall_trakt_values) / len(overall_trakt_values)) if overall_trakt_values else None
         overall_my_average = (sum(overall_my_values) / len(overall_my_values)) if overall_my_values else None
@@ -322,15 +322,11 @@ class EpisodeRatingsMatrixService:
                     continue
                 imdb_rating = row.get("imdb_rating")
                 imdb_votes = int(row["imdb_votes"]) if row.get("imdb_votes") is not None else None
-                trakt_rating = row.get("trakt_rating")
-                trakt_votes = int(row["trakt_votes"]) if row.get("trakt_votes") is not None else None
+                trakt_rating, trakt_votes = self._visible_trakt_rating(row, now_utc)
                 imdb_id = str(row.get("imdb_id", "") or "")
                 episode_title = str(row.get("title", "") or "")
                 imdb_rating_value = float(imdb_rating) if imdb_rating is not None else None
                 trakt_rating_value = float(trakt_rating) if trakt_rating is not None else None
-                if not self._is_episode_released(row, now_utc):
-                    trakt_rating_value = None
-                    trakt_votes = None
                 my_rating_value = float(my_ratings[(season, episode_number)]) if (season, episode_number) in my_ratings else None
                 imdb_display_value = f"{imdb_rating_value:.1f}" if imdb_rating_value is not None else "?"
                 trakt_display_value = f"{trakt_rating_value:.1f}" if trakt_rating_value is not None else "?"
@@ -459,6 +455,19 @@ class EpisodeRatingsMatrixService:
         else:
             first_aired = first_aired.astimezone(UTC)
         return first_aired <= now_utc
+
+    @classmethod
+    def _visible_trakt_rating(cls, row: dict, now_utc: datetime) -> tuple[float | None, int | None]:
+        if not cls._is_episode_released(row, now_utc):
+            return None, None
+        raw_votes = row.get("trakt_votes")
+        votes = int(raw_votes) if raw_votes is not None else None
+        if votes is None or votes <= 0:
+            return None, None
+        raw_rating = row.get("trakt_rating")
+        if raw_rating is None:
+            return None, None
+        return float(raw_rating), votes
 
     @staticmethod
     def _legend_items() -> list[EpisodeMatrixLegendItem]:

@@ -80,3 +80,28 @@ For History/Progress metadata bugs:
 - Fresh `checked_no_data` stills no longer wait 7 days when the episode is already released and visible.
 - The confirmed The Boys S05E01/S05E02 stale negative case was resolved through the shared policy path.
 - Episode ratings matrix overlay is DB-first and reads from shared `episodes_cache`.
+
+## 2026 Matrix State Notes
+
+- Matrix rating source is selectable with one-click buttons: `IMDb` (default) / `Trakt` / `My ★`.
+- First switch to `Trakt` can trigger quick missing Trakt-details fetch (`refresh_missing=1`) for unresolved episode rows.
+- Matrix `ALL` average excludes season `0`.
+- In `Trakt` mode, unreleased episodes and zero-vote Trakt ratings are treated as unrated (`?`) and are excluded from Trakt averages.
+- Matrix tooltip votes follow the active display source.
+
+## 2026 History Card Rating Rendering Notes
+
+- `History` title chips now render `n/a` when `title_ratings_status` is `ready` or `checked_no_data` but a specific provider value is absent.
+- `Loading` is now limited to unresolved states (for example `unknown` / retry in progress), to avoid sticky loading labels.
+- History filter controls auto-apply without the old `Apply` button.
+
+## Current Limitation: History Ratings Sync Scope
+
+- History rating import currently fetches Trakt ratings for `episode`, `show`, and `movie` types.
+- `season` ratings are not currently imported by the history ratings sync path.
+
+## 2026 Sync / Image Runtime Notes
+
+- Watch-history sync fetches both the general history stream and the movie-specific history stream, then dedupes by Trakt history id.
+- Search no longer blocks first render on TMDb / IMDb metadata enrichment.
+- `/cached-image` returns freshly fetched bytes on cache miss when possible; redirect to the external image remains the fallback path.
