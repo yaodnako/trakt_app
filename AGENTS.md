@@ -23,7 +23,7 @@ Use the larger docs only when the task needs that specific detail:
 - Patch-only for manual edits.
 - Do not revert unrelated dirty worktree changes.
 - If Python web code changes and verification needs it, restart the web server yourself with `restart_trakt_tracker_web.bat`.
-- After UI or visible behavior changes, run screenshot workflow with `capture_web_ui.bat`, inspect the screenshots, and iterate if the result is wrong.
+- After UI or visible behavior changes, prefer targeted screenshot / HTML checks for the affected surface; run full `capture_web_ui.bat` when the change affects broad page layout or targeted checks are insufficient. Inspect the relevant output and iterate if the result is wrong.
 - Keep responses concise.
 
 ## Refresh And Queue Model
