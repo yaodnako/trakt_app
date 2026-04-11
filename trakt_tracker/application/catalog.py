@@ -13,6 +13,7 @@ from trakt_tracker.application.enrich_state import (
 )
 from trakt_tracker.application.enrich_queue import TASK_RESULT_SKIPPED_ALREADY_RESOLVED
 from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_BACKDROP,
     ASSET_KIND_POSTER,
     ASSET_KIND_TITLE_RATINGS,
     TITLE_ALLOWED_PARTS,
@@ -101,6 +102,15 @@ class CatalogService:
             self._title_record_value(record, "title_poster_status", "poster_status") or ENRICH_STATUS_UNKNOWN
         )
         poster_refreshed_at = self._title_record_value(record, "title_poster_refreshed_at", "poster_refreshed_at")
+        backdrop_url = str(self._title_record_value(record, "backdrop_url", "backdrop_url") or "")
+        backdrop_status = str(
+            self._title_record_value(record, "title_backdrop_status", "backdrop_status") or ENRICH_STATUS_UNKNOWN
+        )
+        backdrop_refreshed_at = self._title_record_value(
+            record,
+            "title_backdrop_refreshed_at",
+            "backdrop_refreshed_at",
+        )
         ratings_status = str(
             self._title_record_value(record, "title_ratings_status", "ratings_status") or ENRICH_STATUS_UNKNOWN
         )
@@ -124,6 +134,16 @@ class CatalogService:
                 )
                 if poster_decision.should_refresh:
                     parts[ASSET_KIND_POSTER] = poster_decision.reason
+            if ASSET_KIND_BACKDROP in requested and title_type == "movie" and can_enrich_posters:
+                backdrop_decision = metadata_refresh_due(
+                    ASSET_KIND_BACKDROP,
+                    status=backdrop_status,
+                    last_checked_at=backdrop_refreshed_at,
+                    has_value=bool(backdrop_url),
+                    trigger=request.trigger,
+                )
+                if backdrop_decision.should_refresh:
+                    parts[ASSET_KIND_BACKDROP] = backdrop_decision.reason
             if ASSET_KIND_TITLE_RATINGS in requested:
                 ratings_decision = metadata_refresh_due(
                     ASSET_KIND_TITLE_RATINGS,
@@ -191,6 +211,8 @@ class CatalogService:
                     continue
                 if not title.poster_url and stored.poster_url:
                     title.poster_url = str(stored.poster_url or "")
+                if not title.backdrop_url and stored.backdrop_url:
+                    title.backdrop_url = str(stored.backdrop_url or "")
                 if not title.status and stored.status:
                     title.status = str(stored.status or "")
                 if not title.slug and stored.slug:
@@ -273,25 +295,38 @@ class CatalogService:
         *,
         use_cache: bool = True,
         refresh_posters: bool = True,
+        refresh_backdrops: bool = True,
         refresh_ratings: bool = True,
     ) -> TitleSummary:
         client = self._auth.get_client()
         title = client.get_title_details(trakt_id, title_type, use_cache=use_cache)
+        title = self._merge_cached_title_metadata([title])[0]
         poster_status = ENRICH_STATUS_UNKNOWN
+        backdrop_status = ENRICH_STATUS_UNKNOWN
         ratings_status = ENRICH_STATUS_UNKNOWN
         tmdb = self._tmdb_factory(self._auth.config)
-        if title.poster_url:
-            poster_status = ENRICH_STATUS_READY
-        elif refresh_posters and tmdb.is_configured():
+        tmdb_error = False
+        if (refresh_posters or refresh_backdrops) and tmdb.is_configured():
             if title.tmdb_id is None:
-                poster_status = ENRICH_STATUS_CHECKED_NO_DATA
-            else:
+                if refresh_posters and not title.poster_url:
+                    poster_status = ENRICH_STATUS_CHECKED_NO_DATA
+                if refresh_backdrops and title_type == "movie":
+                    backdrop_status = ENRICH_STATUS_CHECKED_NO_DATA
+            elif (refresh_posters and not title.poster_url) or (refresh_backdrops and title_type == "movie"):
                 try:
                     title = tmdb.enrich_title(title)
                 except Exception:
-                    poster_status = ENRICH_STATUS_RETRYABLE_FAILURE
-                else:
-                    poster_status = ENRICH_STATUS_READY if title.poster_url else ENRICH_STATUS_CHECKED_NO_DATA
+                    tmdb_error = True
+        if refresh_posters:
+            if tmdb_error and not title.poster_url:
+                poster_status = ENRICH_STATUS_RETRYABLE_FAILURE
+            else:
+                poster_status = ENRICH_STATUS_READY if title.poster_url else ENRICH_STATUS_CHECKED_NO_DATA
+        if refresh_backdrops and title_type == "movie":
+            if tmdb_error and not title.backdrop_url:
+                backdrop_status = ENRICH_STATUS_RETRYABLE_FAILURE
+            else:
+                backdrop_status = ENRICH_STATUS_READY if title.backdrop_url else ENRICH_STATUS_CHECKED_NO_DATA
         if refresh_ratings and self._imdb_client.is_ready():
             if title.imdb_id:
                 title = self._imdb_client.enrich_title(title)
@@ -310,6 +345,13 @@ class CatalogService:
                     trakt_id,
                     status=poster_status,
                     poster_url=title.poster_url,
+                )
+            if refresh_backdrops and title_type == "movie":
+                self._titles.update_backdrop_enrich_state(
+                    session,
+                    trakt_id,
+                    status=backdrop_status,
+                    backdrop_url=title.backdrop_url,
                 )
             if refresh_ratings:
                 self._titles.update_ratings_enrich_state(
@@ -385,6 +427,7 @@ class CatalogService:
             row = self._titles.get_title(session, trakt_id)
             due_parts = self._title_refresh_parts(row, title_type, normalized_requests)
         refresh_posters = ASSET_KIND_POSTER in due_parts
+        refresh_backdrops = ASSET_KIND_BACKDROP in due_parts
         refresh_ratings = ASSET_KIND_TITLE_RATINGS in due_parts
         force_network = refresh_ratings or any(
             request.trigger in {TRIGGER_VISIBLE_RATINGS_REFRESH, TRIGGER_SYNC_EVENT, TRIGGER_MANUAL_REPAIR}
@@ -396,6 +439,7 @@ class CatalogService:
                 title_type,
                 use_cache=not force_network,
                 refresh_posters=refresh_posters,
+                refresh_backdrops=refresh_backdrops,
                 refresh_ratings=refresh_ratings,
             )
         except Exception:
@@ -404,6 +448,8 @@ class CatalogService:
                 if row is not None:
                     if refresh_posters:
                         self._titles.update_poster_enrich_state(session, trakt_id, status=ENRICH_STATUS_RETRYABLE_FAILURE)
+                    if refresh_backdrops:
+                        self._titles.update_backdrop_enrich_state(session, trakt_id, status=ENRICH_STATUS_RETRYABLE_FAILURE)
                     if refresh_ratings:
                         self._titles.update_ratings_enrich_state(session, trakt_id, status=ENRICH_STATUS_RETRYABLE_FAILURE)
             return ENRICH_STATUS_RETRYABLE_FAILURE
@@ -416,8 +462,14 @@ class CatalogService:
                 return ENRICH_STATUS_RETRYABLE_FAILURE
             if (
                 (refresh_posters and row.poster_url)
+                or (refresh_backdrops and row.backdrop_url)
                 or (refresh_ratings and (row.trakt_rating is not None or row.imdb_rating is not None))
-                or (not refresh_posters and not refresh_ratings and (row.poster_url or row.trakt_rating is not None or row.imdb_rating is not None))
+                or (
+                    not refresh_posters
+                    and not refresh_backdrops
+                    and not refresh_ratings
+                    and (row.poster_url or row.backdrop_url or row.trakt_rating is not None or row.imdb_rating is not None)
+                )
             ):
                 return ENRICH_STATUS_READY
         return ENRICH_STATUS_CHECKED_NO_DATA

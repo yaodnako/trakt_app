@@ -8,6 +8,11 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
     ENRICH_STATUS_RETRYABLE_FAILURE,
 )
+from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_EPISODE_RATINGS,
+    TRIGGER_VISIBLE_RATINGS_REFRESH,
+    metadata_refresh_due,
+)
 from trakt_tracker.domain import EpisodeSummary
 
 
@@ -136,9 +141,13 @@ class EpisodeRatingsMatrixService:
             with self._db.session() as session:
                 episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
                 my_ratings = self._history.latest_show_episode_ratings(session, trakt_id)
-        if normalized_provider == "trakt" and refresh_missing and episode_rows:
+        if normalized_provider == "trakt" and (refresh_missing or force_refresh) and episode_rows:
             try:
-                self._refresh_missing_trakt_ratings(trakt_id, episode_rows)
+                self._refresh_due_trakt_ratings(
+                    trakt_id,
+                    episode_rows,
+                    force_refresh=force_refresh,
+                )
             except Exception as exc:
                 error_message = str(exc)
             with self._db.session() as session:
@@ -183,20 +192,37 @@ class EpisodeRatingsMatrixService:
         if episode.imdb_id:
             self._imdb_client.enrich_episode(episode)
 
-    def _refresh_missing_trakt_ratings(self, show_trakt_id: int, episode_rows: list[dict]) -> None:
-        missing_keys = [
-            (int(row["season"]), int(row["number"]))
-            for row in episode_rows
-            if row.get("season") is not None
-            and row.get("number") is not None
-            and (row.get("trakt_rating") is None or row.get("trakt_votes") is None)
-        ]
-        if not missing_keys:
+    def _refresh_due_trakt_ratings(
+        self,
+        show_trakt_id: int,
+        episode_rows: list[dict],
+        *,
+        force_refresh: bool,
+    ) -> None:
+        due_keys: list[tuple[int, int]] = []
+        for row in episode_rows:
+            if row.get("season") is None or row.get("number") is None:
+                continue
+            season = int(row["season"])
+            episode = int(row["number"])
+            if force_refresh:
+                due_keys.append((season, episode))
+                continue
+            due = metadata_refresh_due(
+                ASSET_KIND_EPISODE_RATINGS,
+                status=str(row.get("trakt_details_status") or ""),
+                last_checked_at=row.get("trakt_details_refreshed_at"),
+                has_value=(row.get("trakt_rating") is not None and row.get("trakt_votes") is not None),
+                trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
+            )
+            if due.should_refresh:
+                due_keys.append((season, episode))
+        if not due_keys:
             return
         client = self._auth.get_client()
         first_error: Exception | None = None
         with self._db.session() as session:
-            for season, episode in missing_keys:
+            for season, episode in due_keys:
                 try:
                     details = client.get_episode_details(show_trakt_id, season, episode, use_cache=False)
                 except Exception as exc:

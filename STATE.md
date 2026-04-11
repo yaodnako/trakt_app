@@ -32,9 +32,15 @@ they need current behavior or policy details.
   - `checked_no_data`: 6 hours
   - `retryable_failure`: 30 minutes
 - `episode_ratings`:
-  - `ready`: 5 minutes on visible stale refresh
-  - `checked_no_data`: 6 hours
-  - `retryable_failure`: 30 minutes
+  - matrix foreground (`visible_ratings_refresh`):
+    - released within 10 days: 5 minutes
+    - older than 10 days: background-only, not matrix-polled
+  - background sweep (`background_sweep`):
+    - 10-60 days: 6 hours
+    - 60-180 days: 48 hours
+    - 180-720 days: 14 days
+    - 720+ days / unknown air date: 60 days
+  - `retryable_failure`: 30 minutes backoff
 - `poster`:
   - `ready`: not rechecked by normal viewport/sync; only manual repair
   - `checked_no_data`: 7 days
@@ -53,6 +59,7 @@ they need current behavior or policy details.
 - `visible_ratings_refresh`: ratings/details stale refresh only.
 - `sync_event`: targeted sync-driven refresh.
 - `manual_repair`: explicit repair override.
+- `background_sweep`: periodic web background sweep for age-bucketed Trakt episode ratings.
 
 ## Current Web Features
 
@@ -84,10 +91,11 @@ For History/Progress metadata bugs:
 ## 2026 Matrix State Notes
 
 - Matrix rating source is selectable with one-click buttons: `IMDb` (default) / `Trakt` / `My ★`.
-- First switch to `Trakt` can trigger quick missing Trakt-details fetch (`refresh_missing=1`) for unresolved episode rows.
+- First switch to `Trakt` rechecks due episode Trakt ratings through the shared policy, not only missing rows.
 - Matrix `ALL` average excludes season `0`.
 - In `Trakt` mode, unreleased episodes and zero-vote Trakt ratings are treated as unrated (`?`) and are excluded from Trakt averages.
 - Matrix tooltip votes follow the active display source.
+- Web runs a periodic background sweep that enqueues due older episode Trakt-rating refreshes through the shared enrich queue.
 
 ## 2026 History Card Rating Rendering Notes
 

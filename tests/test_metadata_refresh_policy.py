@@ -11,14 +11,21 @@ from trakt_tracker.application.enrich_state import (
 from trakt_tracker.application.metadata_refresh_policy import (
     ARTWORK_EMPTY_REFRESH_SECONDS,
     ARTWORK_RETRYABLE_FAILURE_BACKOFF_SECONDS,
+    ASSET_KIND_EPISODE_RATINGS,
     ASSET_KIND_POSTER,
     ASSET_KIND_STILL,
     ASSET_KIND_TITLE_RATINGS,
+    EPISODE_RATINGS_BACKGROUND_BUCKET_10_TO_60_SECONDS,
+    EPISODE_RATINGS_BACKGROUND_BUCKET_180_TO_720_SECONDS,
+    EPISODE_RATINGS_BACKGROUND_BUCKET_60_TO_180_SECONDS,
+    EPISODE_RATINGS_BACKGROUND_BUCKET_720_PLUS_SECONDS,
+    EPISODE_RATINGS_FOREGROUND_WINDOW_SECONDS,
     RATINGS_EMPTY_REFRESH_SECONDS,
     RATINGS_RETRYABLE_FAILURE_BACKOFF_SECONDS,
     STILL_RECENT_EMPTY_REFRESH_SECONDS,
     STILL_RECENT_RELEASE_WINDOW_SECONDS,
     STILL_VISIBLE_EMPTY_REFRESH_SECONDS,
+    TRIGGER_BACKGROUND_SWEEP,
     TITLE_RATINGS_READY_REFRESH_SECONDS,
     TRIGGER_MANUAL_REPAIR,
     TRIGGER_PAGE_CONTEXT,
@@ -55,6 +62,104 @@ class MetadataRefreshPolicyTests(unittest.TestCase):
         )
         self.assertTrue(due.should_refresh)
         self.assertEqual(due.reason, "checked_no_data_ttl_elapsed")
+
+    def test_recent_episode_trakt_ready_refreshes_in_foreground_after_five_minutes(self) -> None:
+        now = datetime.now(tz=UTC)
+        due = metadata_refresh_due(
+            ASSET_KIND_EPISODE_RATINGS,
+            status=ENRICH_STATUS_READY,
+            last_checked_at=now - timedelta(seconds=TITLE_RATINGS_READY_REFRESH_SECONDS + 1),
+            has_value=True,
+            trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
+            first_aired=now - timedelta(days=5),
+            now=now,
+        )
+        self.assertTrue(due.should_refresh)
+        self.assertEqual(due.reason, "ready_ttl_elapsed")
+
+    def test_old_episode_trakt_ready_skips_foreground_refresh(self) -> None:
+        now = datetime.now(tz=UTC)
+        due = metadata_refresh_due(
+            ASSET_KIND_EPISODE_RATINGS,
+            status=ENRICH_STATUS_READY,
+            last_checked_at=now - timedelta(seconds=TITLE_RATINGS_READY_REFRESH_SECONDS + 1),
+            has_value=True,
+            trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
+            first_aired=now - timedelta(days=30),
+            now=now,
+        )
+        self.assertFalse(due.should_refresh)
+        self.assertEqual(due.reason, "background_refresh_window")
+
+    def test_episode_trakt_background_10_to_60_day_bucket(self) -> None:
+        now = datetime.now(tz=UTC)
+        due = metadata_refresh_due(
+            ASSET_KIND_EPISODE_RATINGS,
+            status=ENRICH_STATUS_READY,
+            last_checked_at=now - timedelta(seconds=EPISODE_RATINGS_BACKGROUND_BUCKET_10_TO_60_SECONDS + 1),
+            has_value=True,
+            trigger=TRIGGER_BACKGROUND_SWEEP,
+            first_aired=now - timedelta(days=30),
+            now=now,
+        )
+        self.assertTrue(due.should_refresh)
+        self.assertEqual(due.reason, "background_10_60_ttl_elapsed")
+
+    def test_episode_trakt_background_60_to_180_day_bucket(self) -> None:
+        now = datetime.now(tz=UTC)
+        due = metadata_refresh_due(
+            ASSET_KIND_EPISODE_RATINGS,
+            status=ENRICH_STATUS_READY,
+            last_checked_at=now - timedelta(seconds=EPISODE_RATINGS_BACKGROUND_BUCKET_60_TO_180_SECONDS + 1),
+            has_value=True,
+            trigger=TRIGGER_BACKGROUND_SWEEP,
+            first_aired=now - timedelta(days=120),
+            now=now,
+        )
+        self.assertTrue(due.should_refresh)
+        self.assertEqual(due.reason, "background_60_180_ttl_elapsed")
+
+    def test_episode_trakt_background_180_to_720_day_bucket(self) -> None:
+        now = datetime.now(tz=UTC)
+        due = metadata_refresh_due(
+            ASSET_KIND_EPISODE_RATINGS,
+            status=ENRICH_STATUS_READY,
+            last_checked_at=now - timedelta(seconds=EPISODE_RATINGS_BACKGROUND_BUCKET_180_TO_720_SECONDS + 1),
+            has_value=True,
+            trigger=TRIGGER_BACKGROUND_SWEEP,
+            first_aired=now - timedelta(days=300),
+            now=now,
+        )
+        self.assertTrue(due.should_refresh)
+        self.assertEqual(due.reason, "background_180_720_ttl_elapsed")
+
+    def test_episode_trakt_background_720_plus_day_bucket(self) -> None:
+        now = datetime.now(tz=UTC)
+        due = metadata_refresh_due(
+            ASSET_KIND_EPISODE_RATINGS,
+            status=ENRICH_STATUS_READY,
+            last_checked_at=now - timedelta(seconds=EPISODE_RATINGS_BACKGROUND_BUCKET_720_PLUS_SECONDS + 1),
+            has_value=True,
+            trigger=TRIGGER_BACKGROUND_SWEEP,
+            first_aired=now - timedelta(days=900),
+            now=now,
+        )
+        self.assertTrue(due.should_refresh)
+        self.assertEqual(due.reason, "background_720_plus_ttl_elapsed")
+
+    def test_episode_trakt_background_skips_foreground_window(self) -> None:
+        now = datetime.now(tz=UTC)
+        due = metadata_refresh_due(
+            ASSET_KIND_EPISODE_RATINGS,
+            status=ENRICH_STATUS_READY,
+            last_checked_at=now - timedelta(seconds=EPISODE_RATINGS_BACKGROUND_BUCKET_10_TO_60_SECONDS + 1),
+            has_value=True,
+            trigger=TRIGGER_BACKGROUND_SWEEP,
+            first_aired=now - timedelta(seconds=EPISODE_RATINGS_FOREGROUND_WINDOW_SECONDS - 60),
+            now=now,
+        )
+        self.assertFalse(due.should_refresh)
+        self.assertEqual(due.reason, "background_foreground_window_active")
 
     def test_artwork_ready_is_not_refreshed_on_sync_event(self) -> None:
         now = datetime.now(tz=UTC)

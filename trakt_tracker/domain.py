@@ -16,6 +16,7 @@ class TitleSummary:
     year: int | None = None
     overview: str = ""
     poster_url: str = ""
+    backdrop_url: str = ""
     status: str = ""
     slug: str = ""
     trakt_rating: float | None = None
@@ -27,6 +28,7 @@ class TitleSummary:
     imdb_rating: float | None = None
     imdb_votes: int | None = None
     poster_refreshed_at: datetime | None = None
+    backdrop_refreshed_at: datetime | None = None
 
 
 @dataclass(slots=True)

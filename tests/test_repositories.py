@@ -218,6 +218,29 @@ class RepositoryTests(unittest.TestCase):
         self.assertIsNotNone(title_row.poster_refreshed_at)
         self.assertIsNotNone(episode_row.still_refreshed_at)
 
+    def test_update_poster_enrich_state_preserves_existing_poster_on_empty_refresh(self) -> None:
+        title_repo = TitleRepository()
+        with self.db.session() as session:
+            title_repo.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=89,
+                    title_type="movie",
+                    title="Poster target",
+                    poster_url="https://image.example/poster.jpg",
+                ),
+            )
+            title_repo.update_poster_enrich_state(
+                session,
+                89,
+                status=ENRICH_STATUS_CHECKED_NO_DATA,
+                poster_url="",
+            )
+            title_row = title_repo.get_title(session, 89)
+        self.assertEqual(title_row.poster_url, "https://image.example/poster.jpg")
+        self.assertEqual(title_row.poster_status, ENRICH_STATUS_READY)
+        self.assertIsNotNone(title_row.poster_refreshed_at)
+
     def test_database_backfills_status_columns_from_existing_values(self) -> None:
         with self.db.session() as session:
             TitleRepository().upsert_title(

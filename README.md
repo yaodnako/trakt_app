@@ -163,7 +163,9 @@ Visual checks:
 ## 2026 Matrix Provider + Rating Rendering Notes
 
 - Episode ratings matrix supports one-click source switching: `IMDb` (default) / `Trakt` / `My ★`.
-- First switch to `Trakt` can request quick missing Trakt details refresh for unresolved episode rows.
+- First switch to `Trakt` rechecks due episode Trakt ratings through shared policy, not only unresolved rows:
+  - released within 10 days: foreground 5-minute TTL while opening the matrix
+  - older rows: background-only age-bucketed refresh
 - Matrix `ALL` excludes season `0`.
 - In `Trakt` mode, unreleased episodes and zero-vote Trakt ratings are displayed as unrated (`?`) and excluded from Trakt averages.
 - History title rating chips now render `n/a` when rating status is already resolved (`ready` / `checked_no_data`) but a concrete provider value is missing; `Loading` is kept for unresolved states only.
@@ -171,3 +173,8 @@ Visual checks:
 - History filter controls auto-apply: type and rated-only changes submit immediately, title text submits after debounce.
 - History watch sync fetches the movie watch-history stream in addition to the general stream, because Trakt can expose watched movies there even when recent general history is episode-only.
 - Search page metadata enrichment is background-only for initial render, and `/cached-image` tries to return newly fetched bytes before redirect fallback.
+- Web also runs a periodic background sweep that enqueues older due episode Trakt-rating refreshes through the shared enrich queue:
+  - 10-60 days: 6 hours
+  - 60-180 days: 48 hours
+  - 180-720 days: 14 days
+  - 720+ days / unknown air date: 60 days

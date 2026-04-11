@@ -6,16 +6,19 @@ from typing import Callable
 
 from trakt_tracker.application.catalog import CatalogService
 from trakt_tracker.application.episode_ratings_matrix import EpisodeRatingsMatrixService
-from trakt_tracker.application.enrich_queue import EnrichQueueService
+from trakt_tracker.application.enrich_queue import EnrichQueueService, build_history_episode_task
 from trakt_tracker.application.history import HistoryService
 from trakt_tracker.application.interactions import InteractionService
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.history_sync import HistorySyncWorkflow
 from trakt_tracker.application.metadata_refresh_policy import (
+    ASSET_KIND_EPISODE_RATINGS,
     ASSET_KIND_POSTER,
     ASSET_KIND_STILL,
     TRIGGER_MANUAL_REPAIR,
+    TRIGGER_BACKGROUND_SWEEP,
+    metadata_refresh_due,
 )
 from trakt_tracker.application.history_read_model import HistoryReadModelService
 from trakt_tracker.application.notification_refresh import NotificationRefreshWorkflow
@@ -174,6 +177,7 @@ class ProgressService:
         operations: OperationLog,
         episode_metadata: EpisodeMetadataService,
         catalog: CatalogService | None = None,
+        enrich_queue: EnrichQueueService | None = None,
     ) -> None:
         self._workflow = ProgressSyncWorkflow(
             db,
@@ -309,8 +313,10 @@ class SyncService:
         operations: OperationLog,
         episode_metadata: EpisodeMetadataService,
         catalog: CatalogService | None = None,
+        enrich_queue: EnrichQueueService | None = None,
     ) -> None:
         self._db = db
+        self._auth = auth_service
         self._sync_state = sync_state
         self._imdb_client = IMDbDatasetClient()
         self._titles = titles
@@ -318,6 +324,7 @@ class SyncService:
         self._catalog = catalog
         self._operations = operations
         self._episode_metadata = episode_metadata
+        self._enrich_queue = enrich_queue
         self._workflow = HistorySyncWorkflow(
             db,
             auth_service,
@@ -424,6 +431,45 @@ class SyncService:
 
     def dashboard_state(self) -> DashboardState:
         return self._workflow.dashboard_state()
+
+    def enqueue_due_background_trakt_episode_ratings(self, *, limit: int = 200) -> int:
+        if self._enrich_queue is None or not self._auth.is_authorized():
+            return 0
+        batch_limit = max(1, int(limit or 1))
+        with self._db.session() as session:
+            candidates = self._episode_repo.list_episode_rating_refresh_candidates(session)
+        tasks = []
+        for row in candidates:
+            if len(tasks) >= batch_limit:
+                break
+            due = metadata_refresh_due(
+                ASSET_KIND_EPISODE_RATINGS,
+                status=str(row.get("trakt_details_status") or ""),
+                last_checked_at=row.get("trakt_details_refreshed_at"),
+                has_value=(row.get("trakt_rating") is not None and row.get("trakt_votes") is not None),
+                trigger=TRIGGER_BACKGROUND_SWEEP,
+                first_aired=row.get("first_aired"),
+            )
+            if not due.should_refresh:
+                continue
+            show_trakt_id = int(row["show_trakt_id"])
+            season = int(row["season"])
+            episode = int(row["number"])
+            tasks.append(
+                build_history_episode_task(
+                    title_key=f"bg:{show_trakt_id}:{season}:{episode}",
+                    show_trakt_id=show_trakt_id,
+                    season=season,
+                    episode=episode,
+                    priority=3,
+                    trigger=TRIGGER_BACKGROUND_SWEEP,
+                    requested_parts=(ASSET_KIND_EPISODE_RATINGS,),
+                )
+            )
+        if not tasks:
+            return 0
+        self._enrich_queue.submit_history_refresh(viewport_tasks=[], nearby_tasks=[], page_tasks=tasks)
+        return len(tasks)
 
     def _sync_assets(
         self,
@@ -561,7 +607,20 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         NotificationSender(),
     )
     interactions = InteractionService(history_service, notifications, progress_service)
-    sync = SyncService(db, auth, titles, user_states, history, progress, episode_repo, sync_state, operations, episode_metadata, catalog)
+    sync = SyncService(
+        db,
+        auth,
+        titles,
+        user_states,
+        history,
+        progress,
+        episode_repo,
+        sync_state,
+        operations,
+        episode_metadata,
+        catalog,
+        enrich_queue,
+    )
     return ServiceContainer(
         auth=auth,
         cache=cache,

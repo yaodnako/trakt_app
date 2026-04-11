@@ -160,10 +160,17 @@ Additional current UI details:
 ## 2026 Matrix Provider Behavior
 
 - Episode ratings matrix now uses one-click icon buttons for `IMDb`, `Trakt`, and `My ★`.
-- First switch to `Trakt` triggers quick missing Trakt-details refresh for unresolved episode rows.
+- First switch to `Trakt` rechecks due episode Trakt ratings through shared policy:
+  - released within 10 days: matrix foreground TTL 5 minutes
+  - older rows: background-only refresh path
 - Matrix `ALL` average excludes season `0`.
 - In `Trakt` mode, unreleased episodes and zero-vote Trakt ratings are shown as unrated (`?`) and excluded from Trakt averages.
 - Matrix tooltips now follow the currently displayed source values.
+- Web background loop periodically enqueues older due episode Trakt-rating refreshes:
+  - 10-60 days: 6 hours
+  - 60-180 days: 48 hours
+  - 180-720 days: 14 days
+  - 720+ days / unknown air date: 60 days
 
 ## 2026 History Title Card Rating Fallback
 

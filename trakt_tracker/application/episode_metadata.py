@@ -110,6 +110,7 @@ class EpisodeMetadataService:
                     last_checked_at=trakt_details_refreshed_at,
                     has_value=has_ratings_value,
                     trigger=request.trigger,
+                    first_aired=first_aired,
                 )
                 if ratings_decision.should_refresh:
                     parts[ASSET_KIND_EPISODE_RATINGS] = ratings_decision.reason

@@ -788,6 +788,10 @@
                     }
                     const provider = normalizeTitleMatrixProvider(providerToggle.getAttribute("data-title-matrix-provider"));
                     titleMatrixProvider = provider;
+                    if (provider === "trakt") {
+                        loadTitleMatrixOverlay({provider, refreshMissing: true});
+                        return;
+                    }
                     const cacheKey = titleMatrixCacheKey(provider);
                     if (titleMatrixCache.has(cacheKey)) {
                         const controlState = getTitleMatrixControlState();

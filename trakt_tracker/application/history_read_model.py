@@ -91,6 +91,11 @@ class HistoryReadModelService:
                     "title_poster_refreshed_at": (
                         title_models.get(row.title_trakt_id).poster_refreshed_at if title_models.get(row.title_trakt_id) is not None else None
                     ),
+                    "backdrop_url": (title_models.get(row.title_trakt_id).backdrop_url if title_models.get(row.title_trakt_id) is not None else ""),
+                    "title_backdrop_status": (title_models.get(row.title_trakt_id).backdrop_status if title_models.get(row.title_trakt_id) is not None else "unknown"),
+                    "title_backdrop_refreshed_at": (
+                        title_models.get(row.title_trakt_id).backdrop_refreshed_at if title_models.get(row.title_trakt_id) is not None else None
+                    ),
                     "title_trakt_rating": (title_models.get(row.title_trakt_id).trakt_rating if title_models.get(row.title_trakt_id) is not None else None),
                     "title_trakt_votes": (title_models.get(row.title_trakt_id).trakt_votes if title_models.get(row.title_trakt_id) is not None else None),
                     "title_imdb_rating": (title_models.get(row.title_trakt_id).imdb_rating if title_models.get(row.title_trakt_id) is not None else None),
@@ -280,6 +285,13 @@ class HistoryReadModelService:
                     "title_poster_status": (title_models.get(int(group["title_trakt_id"])).poster_status if title_models.get(int(group["title_trakt_id"])) is not None else "unknown"),
                     "title_poster_refreshed_at": (
                         title_models.get(int(group["title_trakt_id"])).poster_refreshed_at if title_models.get(int(group["title_trakt_id"])) is not None else None
+                    ),
+                    "backdrop_url": (title_models.get(int(group["title_trakt_id"])).backdrop_url if title_models.get(int(group["title_trakt_id"])) is not None else ""),
+                    "title_backdrop_status": (
+                        title_models.get(int(group["title_trakt_id"])).backdrop_status if title_models.get(int(group["title_trakt_id"])) is not None else "unknown"
+                    ),
+                    "title_backdrop_refreshed_at": (
+                        title_models.get(int(group["title_trakt_id"])).backdrop_refreshed_at if title_models.get(int(group["title_trakt_id"])) is not None else None
                     ),
                     "title_trakt_rating": (title_models.get(int(group["title_trakt_id"])).trakt_rating if title_models.get(int(group["title_trakt_id"])) is not None else None),
                     "title_trakt_votes": (title_models.get(int(group["title_trakt_id"])).trakt_votes if title_models.get(int(group["title_trakt_id"])) is not None else None),

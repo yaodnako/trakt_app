@@ -30,6 +30,8 @@ class TitleRepository:
             model.overview = title.overview
         if title.poster_url:
             model.poster_url = title.poster_url
+        if title.backdrop_url:
+            model.backdrop_url = title.backdrop_url
         if title.status:
             model.status = title.status
         if title.slug:
@@ -42,6 +44,14 @@ class TitleRepository:
                 if title.poster_refreshed_at is not None and title.poster_refreshed_at.tzinfo is not None
                 else title.poster_refreshed_at
             ) or model.poster_refreshed_at or datetime.now(tz=UTC).replace(tzinfo=None)
+        if title.backdrop_url:
+            model.backdrop_url = title.backdrop_url
+            model.backdrop_status = ENRICH_STATUS_READY
+            model.backdrop_refreshed_at = (
+                title.backdrop_refreshed_at.replace(tzinfo=None)
+                if title.backdrop_refreshed_at is not None and title.backdrop_refreshed_at.tzinfo is not None
+                else title.backdrop_refreshed_at
+            ) or model.backdrop_refreshed_at or datetime.now(tz=UTC).replace(tzinfo=None)
         if title.trakt_rating is not None:
             model.trakt_rating = title.trakt_rating
         if title.trakt_votes is not None:
@@ -60,11 +70,19 @@ class TitleRepository:
             model.imdb_votes = title.imdb_votes
         if model.poster_url and not model.poster_status:
             model.poster_status = ENRICH_STATUS_READY
+        if model.backdrop_url and not model.backdrop_status:
+            model.backdrop_status = ENRICH_STATUS_READY
         if title.poster_refreshed_at is not None:
             model.poster_refreshed_at = (
                 title.poster_refreshed_at.replace(tzinfo=None)
                 if title.poster_refreshed_at.tzinfo is not None
                 else title.poster_refreshed_at
+            )
+        if title.backdrop_refreshed_at is not None:
+            model.backdrop_refreshed_at = (
+                title.backdrop_refreshed_at.replace(tzinfo=None)
+                if title.backdrop_refreshed_at.tzinfo is not None
+                else title.backdrop_refreshed_at
             )
         if (
             model.ratings_status == ENRICH_STATUS_UNKNOWN
@@ -90,12 +108,37 @@ class TitleRepository:
         if model is None:
             return None
         if poster_url is not self._UNSET:
-            model.poster_url = str(poster_url or "")
+            incoming_poster_url = str(poster_url or "")
+            if incoming_poster_url or not model.poster_url:
+                model.poster_url = incoming_poster_url
         if model.poster_url:
             model.poster_status = ENRICH_STATUS_READY
         else:
             model.poster_status = status
         model.poster_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
+        session.flush()
+        return model
+
+    def update_backdrop_enrich_state(
+        self,
+        session: Session,
+        trakt_id: int,
+        *,
+        status: str,
+        backdrop_url: str | object = _UNSET,
+    ) -> Title | None:
+        model = self.get_title(session, trakt_id)
+        if model is None:
+            return None
+        if backdrop_url is not self._UNSET:
+            incoming_backdrop_url = str(backdrop_url or "")
+            if incoming_backdrop_url or not model.backdrop_url:
+                model.backdrop_url = incoming_backdrop_url
+        if model.backdrop_url:
+            model.backdrop_status = ENRICH_STATUS_READY
+        else:
+            model.backdrop_status = status
+        model.backdrop_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
         session.flush()
         return model
 
@@ -818,6 +861,29 @@ class EpisodeRepository:
                 "imdb_rating": row.imdb_rating,
                 "imdb_votes": row.imdb_votes,
                 "first_aired": row.first_aired,
+            }
+            for row in rows
+        ]
+
+    def list_episode_rating_refresh_candidates(self, session: Session, *, limit: int | None = None) -> list[dict]:
+        stmt = (
+            select(EpisodeCache)
+            .where(EpisodeCache.first_aired.is_not(None))
+            .order_by(EpisodeCache.first_aired.desc(), EpisodeCache.show_trakt_id, EpisodeCache.season, EpisodeCache.number)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        rows = session.scalars(stmt)
+        return [
+            {
+                "show_trakt_id": int(row.show_trakt_id),
+                "season": int(row.season),
+                "number": int(row.number),
+                "first_aired": row.first_aired,
+                "trakt_rating": row.trakt_rating,
+                "trakt_votes": row.trakt_votes,
+                "trakt_details_status": row.trakt_details_status or ENRICH_STATUS_UNKNOWN,
+                "trakt_details_refreshed_at": row.trakt_details_refreshed_at,
             }
             for row in rows
         ]

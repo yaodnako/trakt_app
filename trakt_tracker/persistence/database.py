@@ -49,6 +49,9 @@ class Database:
             "ALTER TABLE titles ADD COLUMN imdb_votes INTEGER",
             "ALTER TABLE titles ADD COLUMN poster_status VARCHAR(32) DEFAULT 'unknown'",
             "ALTER TABLE titles ADD COLUMN poster_refreshed_at DATETIME",
+            "ALTER TABLE titles ADD COLUMN backdrop_url VARCHAR(512) DEFAULT ''",
+            "ALTER TABLE titles ADD COLUMN backdrop_status VARCHAR(32) DEFAULT 'unknown'",
+            "ALTER TABLE titles ADD COLUMN backdrop_refreshed_at DATETIME",
             "ALTER TABLE titles ADD COLUMN ratings_status VARCHAR(32) DEFAULT 'unknown'",
             "ALTER TABLE titles ADD COLUMN ratings_refreshed_at DATETIME",
             "ALTER TABLE episodes_cache ADD COLUMN still_url VARCHAR(512) DEFAULT ''",
@@ -94,6 +97,14 @@ class Database:
                         "WHEN poster_refreshed_at IS NOT NULL THEN poster_refreshed_at "
                         "WHEN COALESCE(poster_url, '') != '' OR COALESCE(poster_status, '') IN ('ready', 'checked_no_data', 'retryable_failure') THEN updated_at "
                         "ELSE poster_refreshed_at END, "
+                        "backdrop_status = CASE "
+                        "WHEN COALESCE(backdrop_status, '') = '' AND COALESCE(backdrop_url, '') != '' THEN 'ready' "
+                        "WHEN COALESCE(backdrop_status, '') = '' THEN 'unknown' "
+                        "ELSE backdrop_status END, "
+                        "backdrop_refreshed_at = CASE "
+                        "WHEN backdrop_refreshed_at IS NOT NULL THEN backdrop_refreshed_at "
+                        "WHEN COALESCE(backdrop_url, '') != '' OR COALESCE(backdrop_status, '') IN ('ready', 'checked_no_data', 'retryable_failure') THEN updated_at "
+                        "ELSE backdrop_refreshed_at END, "
                         "ratings_status = CASE "
                         "WHEN COALESCE(ratings_status, '') = '' AND trakt_rating IS NOT NULL AND trakt_votes IS NOT NULL THEN 'ready' "
                         "WHEN COALESCE(ratings_status, '') = '' THEN 'unknown' "

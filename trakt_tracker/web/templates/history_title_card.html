@@ -132,8 +132,8 @@
             {% set still_status = row.episode_still_status or 'unknown' %}
             {% set trakt_status = row.episode_trakt_status or 'unknown' %}
             {% set imdb_status = row.episode_imdb_status or 'unknown' %}
-            {% set preview_url = row.episode_still_url or title_group.poster_url %}
-            {% set preview_alt = (row.episode_title or (row.season|episode_label(row.episode)) or title_group.title) ~ (' still' if row.episode_still_url else ' poster') %}
+            {% set preview_url = row.episode_still_url or row.backdrop_url or title_group.backdrop_url or title_group.poster_url %}
+            {% set preview_alt = (row.episode_title or (row.season|episode_label(row.episode)) or title_group.title) ~ (' still' if row.episode_still_url else (' backdrop' if row.backdrop_url or title_group.backdrop_url else ' poster')) %}
             {% if title_group.title_slug and row.type == 'show' and row.season is not none and row.episode is not none %}
                 {% set trakt_episode_url = "https://trakt.tv/shows/" ~ title_group.title_slug ~ "/seasons/" ~ row.season ~ "/episodes/" ~ row.episode %}
             {% endif %}

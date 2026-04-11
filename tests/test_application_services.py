@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -13,6 +14,7 @@ from trakt_tracker.application.enrich_state import (
 )
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
 from trakt_tracker.application.episode_ratings_matrix import EpisodeRatingsMatrixService, rating_bucket_color
+from trakt_tracker.application.enrich_queue import EnrichQueueService
 from trakt_tracker.application.history import HistoryService
 from trakt_tracker.application.history_read_model import HistoryReadModelService
 from trakt_tracker.application.history_sync import HistorySyncWorkflow
@@ -20,11 +22,11 @@ from trakt_tracker.application.interactions import InteractionService
 from trakt_tracker.application.metadata_refresh_policy import TRIGGER_PAGE_CONTEXT, TRIGGER_VIEWPORT
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
-from trakt_tracker.application.services import build_services
+from trakt_tracker.application.services import SyncService, build_services
 from trakt_tracker.config import AppConfig, ConfigStore
 from trakt_tracker.domain import EpisodeSummary, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
 from trakt_tracker.persistence.database import Database
-from trakt_tracker.persistence.repositories import EpisodeRepository, HistoryRepository, SyncStateRepository, TitleRepository, UserStateRepository
+from trakt_tracker.persistence.repositories import EpisodeRepository, HistoryRepository, ProgressRepository, SyncStateRepository, TitleRepository, UserStateRepository
 
 
 class _FakeConfig:
@@ -39,6 +41,9 @@ class _FakeAuthService:
 
     def get_client(self):
         return self._client
+
+    def is_authorized(self) -> bool:
+        return True
 
 
 class _FakeTraktClient:
@@ -670,6 +675,9 @@ class ApplicationServiceTests(unittest.TestCase):
                 "poster_url": "",
                 "title_poster_status": ENRICH_STATUS_CHECKED_NO_DATA,
                 "title_poster_refreshed_at": datetime.now(tz=UTC),
+                "backdrop_url": "",
+                "title_backdrop_status": ENRICH_STATUS_CHECKED_NO_DATA,
+                "title_backdrop_refreshed_at": datetime.now(tz=UTC),
                 "title_trakt_rating": None,
                 "title_trakt_votes": None,
                 "title_ratings_status": ENRICH_STATUS_CHECKED_NO_DATA,
@@ -677,6 +685,33 @@ class ApplicationServiceTests(unittest.TestCase):
             }
         ]
         self.assertFalse(service.has_missing_visible_titles(rows))
+
+    def test_catalog_service_queues_movie_backdrop_when_unresolved(self) -> None:
+        service = CatalogService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.sync_state,
+            lambda _config: _FakeTmdbClient(),
+            self.imdb,
+        )
+        rows = [
+            {
+                "title_trakt_id": 11,
+                "type": "movie",
+                "poster_url": "https://poster.example/movie.jpg",
+                "title_poster_status": ENRICH_STATUS_READY,
+                "backdrop_url": "",
+                "title_backdrop_status": "unknown",
+                "title_trakt_rating": 8.2,
+                "title_trakt_votes": 1000,
+                "title_imdb_rating": 7.9,
+                "title_imdb_votes": 10000,
+                "title_ratings_status": ENRICH_STATUS_READY,
+            }
+        ]
+        self.assertEqual(service.select_title_enrich_keys(rows), [(11, "movie")])
 
     def test_catalog_service_queues_title_ratings_when_trakt_exists_but_imdb_unresolved(self) -> None:
         service = CatalogService(
@@ -862,6 +897,83 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(self.trakt_client.episode_details_calls, [(138748, 1, 1)])
         self.assertEqual(matrix.rows[0].cells[0].display_value, "7.9")
         self.assertEqual(matrix.rows[0].cells[0].trakt_votes, 321)
+
+    def test_episode_ratings_matrix_refreshes_stale_ready_trakt_values(self) -> None:
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=138748, title_type="show", title="The Capture"))
+            row = self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=101, season=1, number=1, title="E1", trakt_rating=8.2, trakt_votes=2300),
+            )
+            row.trakt_details_status = ENRICH_STATUS_READY
+            row.trakt_details_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None) - timedelta(minutes=6)
+        matrix = service.load_show_matrix(138748, provider="trakt", refresh_missing=True)
+        self.assertEqual(self.trakt_client.episode_details_calls, [(138748, 1, 1)])
+        self.assertEqual(matrix.rows[0].cells[0].display_value, "7.9")
+        self.assertEqual(matrix.rows[0].cells[0].trakt_votes, 321)
+
+    def test_episode_ratings_matrix_does_not_refresh_fresh_ready_trakt_values(self) -> None:
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=138748, title_type="show", title="The Capture"))
+            row = self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=101, season=1, number=1, title="E1", trakt_rating=8.2, trakt_votes=2300),
+            )
+            row.trakt_details_status = ENRICH_STATUS_READY
+            row.trakt_details_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None)
+        matrix = service.load_show_matrix(138748, provider="trakt", refresh_missing=True)
+        self.assertEqual(self.trakt_client.episode_details_calls, [])
+        self.assertEqual(matrix.rows[0].cells[0].display_value, "8.2")
+        self.assertEqual(matrix.rows[0].cells[0].trakt_votes, 2300)
+
+    def test_sync_service_enqueues_due_background_trakt_episode_ratings(self) -> None:
+        started: list[str] = []
+
+        def handler(task) -> str:
+            started.append(task.task_key)
+            return "ready"
+
+        queue = EnrichQueueService({"history_episode": handler}, max_workers=1)
+        service = SyncService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            ProgressRepository(),
+            self.episode_repo,
+            self.sync_state,
+            OperationLog(),
+            self.episode_metadata,
+            None,
+            queue,
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=138748, title_type="show", title="The Capture"))
+            due_row = self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=101, season=1, number=1, title="E1", trakt_rating=8.2, trakt_votes=2300, first_aired=datetime.now(tz=UTC) - timedelta(days=30)),
+            )
+            due_row.trakt_details_status = ENRICH_STATUS_READY
+            due_row.trakt_details_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None) - timedelta(hours=7)
+            fresh_row = self.episode_repo.upsert_episode(
+                session,
+                138748,
+                EpisodeSummary(trakt_id=102, season=1, number=2, title="E2", trakt_rating=8.1, trakt_votes=1200, first_aired=datetime.now(tz=UTC) - timedelta(days=5)),
+            )
+            fresh_row.trakt_details_status = ENRICH_STATUS_READY
+            fresh_row.trakt_details_refreshed_at = datetime.now(tz=UTC).replace(tzinfo=None) - timedelta(hours=7)
+        queued = service.enqueue_due_background_trakt_episode_ratings(limit=10)
+        self.assertEqual(queued, 1)
+        deadline = datetime.now(tz=UTC) + timedelta(seconds=2)
+        while len(started) < 1 and datetime.now(tz=UTC) < deadline:
+            time.sleep(0.01)
+        self.assertEqual(started, ["episode:138748:1:1"])
 
     def test_episode_ratings_matrix_overall_excludes_season_zero(self) -> None:
         service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)

@@ -107,7 +107,25 @@ Shared queue primitives живут в `application`, а не в web routes:
 - matrix service использует `DB-first` path:
   - сначала читает `episodes_cache`
   - hydrate через `get_show_episodes()` делает только если данных нет или идет explicit retry
+  - при `Trakt` provider recheck идет через shared refresh policy:
+    - recent released window (до 10 дней) может refresh-ить foreground при открытии matrix
+    - older rows не тянутся массово на open-path и уходят в background sweep
 - episode cell может вести на IMDb title page эпизода, если у row есть `imdb_id`
+
+## 2026 Episode Trakt Ratings Refresh Model
+
+- `episode_ratings` refresh policy теперь age-aware и shared:
+  - matrix foreground (`visible_ratings_refresh`) для released episodes within 10 days: 5 minutes TTL
+  - background sweep (`background_sweep`) для older rows:
+    - 10-60 days: 6 hours
+    - 60-180 days: 48 hours
+    - 180-720 days: 14 days
+    - 720+ days / unknown air date: 60 days
+  - `retryable_failure` keeps independent 30-minute backoff
+- Web background loop does not bypass shared core:
+  - it only selects due rows from `episodes_cache`
+  - submits them into the existing enrich queue
+  - actual fetch/update still goes through shared `episode_metadata.enrich_episode_key`
 
 ## Repair sync model
 

@@ -131,6 +131,38 @@ class _IMDbAutoSyncLoop:
             self._stop_event.wait(self._poll_interval_seconds)
 
 
+class _TraktEpisodeRatingsRefreshLoop:
+    def __init__(self, app: FastAPI, *, poll_interval_seconds: float = 1800.0, batch_size: int = 200) -> None:
+        self._app = app
+        self._poll_interval_seconds = max(300.0, float(poll_interval_seconds))
+        self._batch_size = max(1, int(batch_size))
+        self._stop_event = Event()
+        self._thread = Thread(target=self._run, name="web-trakt-episode-ratings-refresh", daemon=True)
+
+    def start(self) -> None:
+        if not self._thread.is_alive():
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                services: ServiceContainer = self._app.state.services
+                bg_tasks = self._app.state.bg_tasks
+                if not bg_tasks.has_running_prefix(
+                    "history_sync",
+                    "progress_sync",
+                    "settings_",
+                ):
+                    services.sync.enqueue_due_background_trakt_episode_ratings(limit=self._batch_size)
+            except Exception:
+                pass
+            self._stop_event.wait(self._poll_interval_seconds)
+
+
 def _build_services_with_profiling() -> ServiceContainer:
     profile_path = get_app_data_dir() / "web_startup.log"
     profiler = StartupProfiler(profile_path)
@@ -225,6 +257,7 @@ def create_app() -> FastAPI:
     app.state.image_cache = BinaryCache("images")
     app.state.bg_tasks = _BackgroundTaskManager()
     app.state.imdb_auto_sync_loop = _IMDbAutoSyncLoop(app)
+    app.state.trakt_episode_ratings_refresh_loop = _TraktEpisodeRatingsRefreshLoop(app)
 
     templates = _build_templates()
     static_dir = Path(__file__).with_name("static")
@@ -255,10 +288,12 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def start_background_loops() -> None:
         app.state.imdb_auto_sync_loop.start()
+        app.state.trakt_episode_ratings_refresh_loop.start()
 
     @app.on_event("shutdown")
     async def stop_background_loops() -> None:
         app.state.imdb_auto_sync_loop.stop()
+        app.state.trakt_episode_ratings_refresh_loop.stop()
 
     def render(request: Request, template_name: str, context: dict, status_code: int = 200) -> HTMLResponse:
         sound_path = Path(str(request.app.state.services.auth.config.notification_sound_path or "")).expanduser()

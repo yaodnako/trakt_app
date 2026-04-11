@@ -10,6 +10,7 @@ from trakt_tracker.infrastructure.cache import ProviderCache
 
 TMDB_API_URL = "https://api.themoviedb.org/3"
 TMDB_POSTER_IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
+TMDB_BACKDROP_IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
 TMDB_STILL_IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
 
 
@@ -49,6 +50,9 @@ class TMDbClient:
         poster_path = payload.get("poster_path")
         if isinstance(poster_path, str) and poster_path:
             title.poster_url = f"{TMDB_POSTER_IMAGE_BASE}{poster_path}"
+        backdrop_path = payload.get("backdrop_path")
+        if isinstance(backdrop_path, str) and backdrop_path:
+            title.backdrop_url = f"{TMDB_BACKDROP_IMAGE_BASE}{backdrop_path}"
         vote_average = payload.get("vote_average")
         if vote_average is not None:
             try:
