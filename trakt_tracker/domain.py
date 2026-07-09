@@ -27,8 +27,11 @@ class TitleSummary:
     imdb_id: str = ""
     imdb_rating: float | None = None
     imdb_votes: int | None = None
+    ratings_status: str = "unknown"
+    ratings_refreshed_at: datetime | None = None
     poster_refreshed_at: datetime | None = None
     backdrop_refreshed_at: datetime | None = None
+    title_episode_avg_rating: float | None = None
 
 
 @dataclass(slots=True)
@@ -57,7 +60,7 @@ class EpisodeSummary:
 class HistoryItemInput:
     title_type: TitleType
     trakt_id: int
-    watched_at: datetime
+    watched_at: datetime | None
     season: int | None = None
     episode: int | None = None
     title: str = ""

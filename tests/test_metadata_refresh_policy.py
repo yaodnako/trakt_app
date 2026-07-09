@@ -25,6 +25,7 @@ from trakt_tracker.application.metadata_refresh_policy import (
     STILL_RECENT_EMPTY_REFRESH_SECONDS,
     STILL_RECENT_RELEASE_WINDOW_SECONDS,
     STILL_VISIBLE_EMPTY_REFRESH_SECONDS,
+    STILL_VISIBLE_RETRYABLE_FAILURE_BACKOFF_SECONDS,
     TRIGGER_BACKGROUND_SWEEP,
     TITLE_RATINGS_READY_REFRESH_SECONDS,
     TRIGGER_MANUAL_REPAIR,
@@ -86,6 +87,20 @@ class MetadataRefreshPolicyTests(unittest.TestCase):
             has_value=True,
             trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
             first_aired=now - timedelta(days=30),
+            now=now,
+        )
+        self.assertFalse(due.should_refresh)
+        self.assertEqual(due.reason, "background_refresh_window")
+
+    def test_unknown_air_date_episode_trakt_ready_skips_foreground_refresh(self) -> None:
+        now = datetime.now(tz=UTC)
+        due = metadata_refresh_due(
+            ASSET_KIND_EPISODE_RATINGS,
+            status=ENRICH_STATUS_READY,
+            last_checked_at=now - timedelta(seconds=TITLE_RATINGS_READY_REFRESH_SECONDS + 1),
+            has_value=True,
+            trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
+            first_aired=None,
             now=now,
         )
         self.assertFalse(due.should_refresh)
@@ -263,6 +278,19 @@ class MetadataRefreshPolicyTests(unittest.TestCase):
         )
         self.assertTrue(ratings_due.should_refresh)
         self.assertTrue(artwork_due.should_refresh)
+
+    def test_visible_still_retryable_failure_rechecks_quickly_when_value_missing(self) -> None:
+        now = datetime.now(tz=UTC)
+        due = metadata_refresh_due(
+            ASSET_KIND_STILL,
+            status=ENRICH_STATUS_RETRYABLE_FAILURE,
+            last_checked_at=now - timedelta(seconds=STILL_VISIBLE_RETRYABLE_FAILURE_BACKOFF_SECONDS + 1),
+            has_value=False,
+            trigger=TRIGGER_VIEWPORT,
+            now=now,
+        )
+        self.assertTrue(due.should_refresh)
+        self.assertEqual(due.reason, "retryable_failure_visible_ttl_elapsed")
 
     def test_manual_repair_overrides_ready_artwork(self) -> None:
         due = metadata_refresh_due(

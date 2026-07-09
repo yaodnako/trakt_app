@@ -23,16 +23,23 @@ from trakt_tracker.application.metadata_refresh_policy import (
 from trakt_tracker.application.history_read_model import HistoryReadModelService
 from trakt_tracker.application.notification_refresh import NotificationRefreshWorkflow
 from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
+from trakt_tracker.application.search_watch import SearchWatchService
 from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_history_items,
     load_cached_trakt_rating_items,
 )
 from trakt_tracker.application.sync_policy import SyncPolicy
-from trakt_tracker.config import AppConfig, ConfigStore
+from trakt_tracker.config import (
+    AppConfig,
+    ConfigStore,
+    normalize_kinopoisk_domain_options,
+    normalize_kinopoisk_domain_tail,
+)
 from trakt_tracker.domain import DashboardState, EpisodeSummary, ProgressSnapshot
 from trakt_tracker.infrastructure.keyring_store import TokenStore
 from trakt_tracker.infrastructure.notifications import NotificationSender
 from trakt_tracker.infrastructure.cache import BinaryCache, ProviderCache
+from trakt_tracker.infrastructure.artwork_cache import has_cached_image, warm_image_urls
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 from trakt_tracker.infrastructure.kinopoisk import KinopoiskClient
 from trakt_tracker.infrastructure.tmdb import TMDbClient
@@ -61,6 +68,7 @@ class ServiceContainer:
     interactions: "InteractionService"
     play: "PlayService"
     progress: "ProgressService"
+    search_watch: "SearchWatchService"
     notifications: "NotificationService"
     sync: "SyncService"
     operations: "OperationLog"
@@ -109,6 +117,8 @@ class AuthService:
         tmdb_api_key: str | None = None,
         tmdb_read_access_token: str | None = None,
         kinopoisk_api_key: str | None = None,
+        kinopoisk_domain_tail: str | None = None,
+        kinopoisk_domain_options: str | None = None,
     ) -> AppConfig:
         self._config.client_id = client_id.strip()
         self._config.client_secret = client_secret.strip()
@@ -119,6 +129,17 @@ class AuthService:
             self._config.tmdb_read_access_token = tmdb_read_access_token.strip()
         if kinopoisk_api_key is not None:
             self._config.kinopoisk_api_key = kinopoisk_api_key.strip()
+        if kinopoisk_domain_options is not None:
+            options = normalize_kinopoisk_domain_options(kinopoisk_domain_options)
+            self._config.kinopoisk_domain_options = ",".join(options)
+        if kinopoisk_domain_tail is not None:
+            self._config.kinopoisk_domain_tail = normalize_kinopoisk_domain_tail(kinopoisk_domain_tail)
+        options = normalize_kinopoisk_domain_options(self._config.kinopoisk_domain_options)
+        selected = normalize_kinopoisk_domain_tail(self._config.kinopoisk_domain_tail)
+        if selected not in options:
+            selected = options[0]
+        self._config.kinopoisk_domain_options = ",".join(options)
+        self._config.kinopoisk_domain_tail = selected
         self._config_store.save(self._config)
         return self._config
 
@@ -255,12 +276,13 @@ class PlayService:
     def __init__(self, auth_service: AuthService) -> None:
         self._auth = auth_service
 
-    def resolve_kinopoisk_url(self, title: str, domain: str = "net") -> str | None:
+    def resolve_kinopoisk_url(self, title: str, domain: str | None = None) -> str | None:
         normalized_title = title.strip()
         if not normalized_title:
             return None
+        resolved_domain = (domain or self._auth.config.kinopoisk_domain_tail or "net").strip()
         client = KinopoiskClient(api_key=self._auth.config.kinopoisk_api_key)
-        return client.resolve_title_url(normalized_title, domain=domain)
+        return client.resolve_title_url(normalized_title, domain=resolved_domain)
 
 
 class NotificationService:
@@ -325,6 +347,8 @@ class SyncService:
         self._operations = operations
         self._episode_metadata = episode_metadata
         self._enrich_queue = enrich_queue
+        self._image_cache = BinaryCache("images")
+        self._image_failure_cache = ProviderCache("image_failures")
         self._workflow = HistorySyncWorkflow(
             db,
             auth_service,
@@ -391,6 +415,7 @@ class SyncService:
             load_cached_trakt_history_items() + load_cached_trakt_rating_items()
         )
         self._episode_metadata.enrich_episode_imdb_ratings()
+        self._episode_metadata.repair_episode_imdb_ratings()
         return changed
 
     def should_auto_sync_imdb_dataset(self, interval_minutes: int) -> bool:
@@ -471,6 +496,46 @@ class SyncService:
         self._enrich_queue.submit_history_refresh(viewport_tasks=[], nearby_tasks=[], page_tasks=tasks)
         return len(tasks)
 
+    def warm_missing_artwork_cache(self, *, limit: int = 100, timeout: float = 8, max_workers: int = 4) -> dict[str, int]:
+        urls = self._missing_artwork_urls(limit=limit)
+        if not urls:
+            return {"selected": 0, "warmed": 0, "failed": 0, "skipped": 0}
+        result = warm_image_urls(
+            self._image_cache,
+            urls,
+            timeout=timeout,
+            max_workers=max_workers,
+            skip_cached=True,
+        )
+        for failed_url in result.get("failed_urls", []):
+            self._image_failure_cache.set_json(str(failed_url), {"failed_at": datetime.now(tz=UTC).isoformat()})
+        self._operations.publish(
+            "Artwork cache",
+            f"Artwork cache warm: selected {result['selected']}, warmed {result['warmed']}, failed {result['failed']}.",
+        )
+        return result
+
+    def _missing_artwork_urls(self, *, limit: int) -> list[str]:
+        batch_limit = max(1, int(limit or 1))
+        urls: list[str] = []
+        with self._db.session() as session:
+            for title in self._titles.list_titles(session):
+                poster_url = str(title.poster_url or "")
+                if poster_url and not has_cached_image(self._image_cache, poster_url) and not self._recent_image_failure(poster_url):
+                    urls.append(poster_url)
+                    if len(urls) >= batch_limit:
+                        return urls
+            for episode in self._episode_repo.list_all_episodes(session):
+                still_url = str(episode.still_url or "")
+                if still_url and not has_cached_image(self._image_cache, still_url) and not self._recent_image_failure(still_url):
+                    urls.append(still_url)
+                    if len(urls) >= batch_limit:
+                        return urls
+        return urls
+
+    def _recent_image_failure(self, url: str) -> bool:
+        return self._image_failure_cache.get_json(url, ttl_hours=6) is not None
+
     def _sync_assets(
         self,
         *,
@@ -493,6 +558,20 @@ class SyncService:
             episode_targets = set(self._episode_repo.list_episode_keys(session, statuses=episode_statuses))
             if include_missing_still:
                 episode_targets.update(self._episode_repo.list_episode_keys(session, include_missing_still=True))
+            title_binary_targets: set[tuple[int, str]] = set()
+            for title in self._titles.list_titles(session):
+                poster_url = str(title.poster_url or "")
+                if poster_url and not has_cached_image(self._image_cache, poster_url):
+                    title_binary_targets.add((int(title.trakt_id), str(title.title_type)))
+            episode_binary_targets: set[tuple[int, int, int]] = set()
+            for episode in self._episode_repo.list_all_episodes(session):
+                still_url = str(episode.still_url or "")
+                if still_url and not has_cached_image(self._image_cache, still_url):
+                    episode_binary_targets.add((int(episode.show_trakt_id), int(episode.season), int(episode.number)))
+            title_metadata_targets = set(title_targets)
+            episode_metadata_targets = set(episode_targets)
+            title_targets.update(title_binary_targets)
+            episode_targets.update(episode_binary_targets)
 
         title_list = sorted(title_targets)
         episode_list = sorted(episode_targets)
@@ -505,13 +584,14 @@ class SyncService:
 
         for trakt_id, title_type in title_list:
             try:
-                if self._catalog is not None:
+                if self._catalog is not None and (int(trakt_id), str(title_type)) in title_metadata_targets:
                     self._catalog.enrich_title_key(
                         int(trakt_id),
                         str(title_type),
                         trigger=TRIGGER_MANUAL_REPAIR,
                         requested_parts=(ASSET_KIND_POSTER,),
                     )
+                self._warm_title_poster(int(trakt_id))
             except Exception as exc:
                 report(f"{mode_label}: poster failed for {title_type}:{trakt_id}: {exc}")
             completed += 1
@@ -519,15 +599,31 @@ class SyncService:
 
         for show_trakt_id, season, episode in episode_list:
             try:
-                self._episode_metadata.enrich_episode_stills(
-                    [(int(show_trakt_id), int(season), int(episode))],
-                    trigger=TRIGGER_MANUAL_REPAIR,
-                    requested_parts=(ASSET_KIND_STILL,),
-                )
+                if (int(show_trakt_id), int(season), int(episode)) in episode_metadata_targets:
+                    self._episode_metadata.enrich_episode_stills(
+                        [(int(show_trakt_id), int(season), int(episode))],
+                        trigger=TRIGGER_MANUAL_REPAIR,
+                        requested_parts=(ASSET_KIND_STILL,),
+                    )
+                self._warm_episode_still(int(show_trakt_id), int(season), int(episode))
             except Exception as exc:
                 report(f"{mode_label}: still failed for show:{show_trakt_id} S{season}E{episode}: {exc}")
             completed += 1
             report(f"{mode_label}: {completed}/{total} ({(completed * 100.0 / total):.1f}%)")
+
+    def _warm_title_poster(self, trakt_id: int) -> None:
+        with self._db.session() as session:
+            row = self._titles.get_title(session, trakt_id)
+            poster_url = str(row.poster_url or "") if row is not None else ""
+        if poster_url:
+            warm_image_urls(self._image_cache, [poster_url], timeout=8, max_workers=1)
+
+    def _warm_episode_still(self, show_trakt_id: int, season: int, episode: int) -> None:
+        with self._db.session() as session:
+            row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
+            still_url = str(row.still_url or "") if row is not None else ""
+        if still_url:
+            warm_image_urls(self._image_cache, [still_url], timeout=8, max_workers=1)
 
 
 def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
@@ -568,6 +664,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     catalog = CatalogService(db, auth, titles, user_states, sync_state, tmdb_factory, imdb_client)
     episode_ratings_matrix = EpisodeRatingsMatrixService(db, auth, titles, history, episode_repo, imdb_client)
     history_service = HistoryService(db, auth, titles, user_states, history, episode_repo, history_read_model, episode_metadata)
+    search_watch = SearchWatchService(db, auth, titles, history, episode_repo, history_service, episode_metadata)
     enrich_queue = EnrichQueueService(
         {
             "history_title": lambda task: catalog.enrich_title_key(
@@ -631,6 +728,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         interactions=interactions,
         play=play,
         progress=progress_service,
+        search_watch=search_watch,
         notifications=notifications,
         sync=sync,
         operations=operations,

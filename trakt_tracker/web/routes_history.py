@@ -48,8 +48,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         flash: str = "",
         rate_trakt_id: int | None = None,
         rate_type: str = "",
-        rate_season: int | None = None,
-        rate_episode: int | None = None,
+        rate_season: str = "",
+        rate_episode: str = "",
         rate_title: str = "",
         view: str = "episodes",
     ) -> HTMLResponse:
@@ -96,8 +96,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                 "has_next": has_next,
                 "rate_trakt_id": rate_trakt_id,
                 "rate_type": normalize_title_type(rate_type) or "",
-                "rate_season": rate_season,
-                "rate_episode": rate_episode,
+                "rate_season": _optional_int(rate_season),
+                "rate_episode": _optional_int(rate_episode),
                 "rate_title": rate_title,
                 "history_sync_running": request.app.state.bg_tasks.is_running("history_sync"),
                 "flash": flash,
@@ -413,6 +413,14 @@ def _normalize_title_keys(raw_keys) -> list[str]:
     ]
 
 
+def _optional_int(value) -> int | None:
+    try:
+        raw = str(value if value is not None else "").strip()
+        return int(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _rows_by_title_key(rows: list[dict], utc_offset: str) -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
     for row in rows:
@@ -496,7 +504,9 @@ def _group_history_rows(rows: list[dict], utc_offset: str) -> list[dict]:
     groups: OrderedDict[str, dict] = OrderedDict()
     for row in rows:
         watched_at = row.get("watched_at")
-        if watched_at is None:
+        if not row.get("watched_at_known", True):
+            day_label = "Без даты"
+        elif watched_at is None:
             day_label = "Unknown date"
         else:
             normalized = watched_at if watched_at.tzinfo is not None else watched_at.replace(tzinfo=UTC)
@@ -528,6 +538,8 @@ def _group_history_rows(rows: list[dict], utc_offset: str) -> list[dict]:
             group["title_groups"].append(title_group)
         title_group["entries"].append(row)
     for day_group in groups.values():
+        for title_group in day_group.get("title_groups", []):
+            title_group["entries"] = list(reversed(title_group.get("entries", [])))
         day_group.pop("_title_map", None)
     return list(groups.values())
 
@@ -538,7 +550,9 @@ def _history_title_key_for_day(day_label: str, title_type: str, title_trakt_id) 
 
 def _history_title_key_for_row(row: dict, utc_offset: str) -> str:
     watched_at = row.get("watched_at")
-    if watched_at is None:
+    if not row.get("watched_at_known", True):
+        day_label = "Без даты"
+    elif watched_at is None:
         day_label = "Unknown date"
     else:
         tz = timezone_from_utc_offset(utc_offset)

@@ -13,6 +13,8 @@ from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_rating_items,
 )
 from trakt_tracker.domain import DashboardState, EpisodeSummary, TitleSummary
+from trakt_tracker.infrastructure.artwork_cache import warm_image_urls
+from trakt_tracker.infrastructure.cache import BinaryCache
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 
 
@@ -159,6 +161,9 @@ class HistorySyncWorkflow:
         progress = client.get_show_progress(trakt_id)
         episodes = client.get_show_episodes(trakt_id)
         with self._db.session() as session:
+            stored = self._titles.get_title(session, trakt_id)
+            if not progress.title and stored is not None and stored.title:
+                progress.title = stored.title
             self._progress.upsert_progress(session, progress)
             self._episode_repo.replace_show_episodes(session, trakt_id, episodes)
         if self._catalog is not None:
@@ -297,6 +302,7 @@ class HistorySyncWorkflow:
             emit(f"Artwork refresh {completed_steps}/{total_steps} ({percent:.1f}%)")
 
         if self._catalog is not None:
+            image_cache = BinaryCache("images")
             for title in all_titles:
                 try:
                     self._catalog.enrich_title_key(
@@ -305,13 +311,26 @@ class HistorySyncWorkflow:
                         trigger=TRIGGER_MANUAL_REPAIR,
                         requested_parts=(ASSET_KIND_POSTER,),
                     )
+                    with self._db.session() as session:
+                        refreshed = self._titles.get_title(session, int(title.trakt_id))
+                        poster_url = str(refreshed.poster_url or "") if refreshed is not None else ""
+                    if poster_url:
+                        warm_image_urls(image_cache, [poster_url], timeout=8, max_workers=1)
                 except Exception as exc:
                     emit(f"Poster refresh failed for {title.title_type}:{title.trakt_id}: {exc}")
                 completed_steps += 1
                 report_progress()
+        image_cache = BinaryCache("images")
         for show_trakt_id in all_show_ids:
             try:
                 self._episode_metadata.force_refresh_show_stills(int(show_trakt_id))
+                with self._db.session() as session:
+                    urls = [
+                        str(row.get("still_url") or "")
+                        for row in self._episode_repo.list_show_episode_metadata(session, int(show_trakt_id))
+                        if row.get("still_url")
+                    ]
+                warm_image_urls(image_cache, urls, timeout=8, max_workers=4)
             except Exception as exc:
                 emit(f"Still refresh failed for show:{show_trakt_id}: {exc}")
             completed_steps += 1
@@ -392,8 +411,10 @@ class HistorySyncWorkflow:
         state.in_history = True
         state.tracked = title_type == "show"
         watched_at_raw = item.get("watched_at")
-        watched_at = datetime.fromisoformat(watched_at_raw.replace("Z", "+00:00")) if watched_at_raw else datetime.now(tz=UTC)
-        state.last_watched_at = watched_at
+        watched_at_known = bool(watched_at_raw)
+        watched_at = datetime.fromisoformat(watched_at_raw.replace("Z", "+00:00")) if watched_at_raw else datetime(1970, 1, 1, tzinfo=UTC)
+        if watched_at_known:
+            state.last_watched_at = watched_at
         self._history.add_event(
             session,
             trakt_history_id=item.get("id"),
@@ -402,6 +423,7 @@ class HistorySyncWorkflow:
             title_type=title_type,
             action="watched",
             watched_at=watched_at,
+            watched_at_known=watched_at_known,
             season=season,
             episode=episode_number,
             source="trakt",

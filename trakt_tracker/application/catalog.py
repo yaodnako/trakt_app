@@ -33,6 +33,26 @@ from trakt_tracker.infrastructure.tmdb import TMDbClient
 from trakt_tracker.infrastructure.url_utils import normalize_external_url
 
 
+def _serialize_title_summary(title: TitleSummary) -> dict:
+    payload = asdict(title)
+    for key in ("poster_refreshed_at", "backdrop_refreshed_at", "ratings_refreshed_at"):
+        value = payload.get(key)
+        if isinstance(value, datetime):
+            payload[key] = value.isoformat()
+    return payload
+
+
+def _parse_optional_datetime(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 class CatalogService:
     def __init__(
         self,
@@ -182,21 +202,91 @@ class CatalogService:
         client = self._auth.get_client()
         results = client.search_titles(query, title_type)
         results = self._merge_cached_title_metadata(results)
+        results = self._normalize_title_urls(results)
+        results = self._enrich_search_title_ratings(results)
         self.save_last_search_state(query, title_type, results)
         with self._db.session() as session:
             for title in results:
                 self._titles.upsert_title(session, title)
+                if title.ratings_status != ENRICH_STATUS_UNKNOWN:
+                    self._titles.update_ratings_enrich_state(
+                        session,
+                        title.trakt_id,
+                        status=title.ratings_status,
+                        trakt_rating=title.trakt_rating,
+                        trakt_votes=title.trakt_votes,
+                        tmdb_id=title.tmdb_id,
+                        tmdb_rating=title.tmdb_rating,
+                        tmdb_votes=title.tmdb_votes,
+                        imdb_id=title.imdb_id,
+                        imdb_rating=title.imdb_rating,
+                        imdb_votes=title.imdb_votes,
+                    )
         return results
+
+    @staticmethod
+    def _normalize_title_urls(titles: list[TitleSummary]) -> list[TitleSummary]:
+        for title in titles:
+            title.poster_url = normalize_external_url(title.poster_url)
+            title.backdrop_url = normalize_external_url(title.backdrop_url)
+        return titles
+
+    def _enrich_search_title_ratings(self, titles: list[TitleSummary]) -> list[TitleSummary]:
+        if not titles or not self._imdb_client.is_ready():
+            return titles
+        enriched: list[TitleSummary] = []
+        for title in titles:
+            if title.imdb_rating is not None and title.imdb_votes is not None:
+                title.ratings_status = ENRICH_STATUS_READY
+                enriched.append(title)
+                continue
+            if title.imdb_id:
+                title = self._imdb_client.enrich_title(title)
+                title.ratings_status = (
+                    ENRICH_STATUS_READY
+                    if title.imdb_rating is not None and title.imdb_votes is not None
+                    else ENRICH_STATUS_CHECKED_NO_DATA
+                )
+            else:
+                title.ratings_status = ENRICH_STATUS_CHECKED_NO_DATA
+            enriched.append(title)
+        return enriched
 
     def enrich_title_with_tmdb(self, title: TitleSummary) -> TitleSummary:
         tmdb = self._tmdb_factory(self._auth.config)
         enriched = self._merge_cached_title_metadata([title])[0]
         if tmdb.is_configured():
             enriched = tmdb.enrich_title(enriched)
-        enriched = self._imdb_client.enrich_title(enriched)
+        ratings_status = ENRICH_STATUS_UNKNOWN
+        if self._imdb_client.is_ready():
+            if enriched.imdb_id:
+                enriched = self._imdb_client.enrich_title(enriched)
+                ratings_status = (
+                    ENRICH_STATUS_READY
+                    if enriched.imdb_rating is not None and enriched.imdb_votes is not None
+                    else ENRICH_STATUS_CHECKED_NO_DATA
+                )
+            else:
+                ratings_status = ENRICH_STATUS_CHECKED_NO_DATA
         enriched = self._merge_cached_title_metadata([enriched])[0]
+        if ratings_status != ENRICH_STATUS_UNKNOWN:
+            enriched.ratings_status = ratings_status
         with self._db.session() as session:
             self._titles.upsert_title(session, enriched)
+            if ratings_status != ENRICH_STATUS_UNKNOWN:
+                self._titles.update_ratings_enrich_state(
+                    session,
+                    enriched.trakt_id,
+                    status=ratings_status,
+                    trakt_rating=enriched.trakt_rating,
+                    trakt_votes=enriched.trakt_votes,
+                    tmdb_id=enriched.tmdb_id,
+                    tmdb_rating=enriched.tmdb_rating,
+                    tmdb_votes=enriched.tmdb_votes,
+                    imdb_id=enriched.imdb_id,
+                    imdb_rating=enriched.imdb_rating,
+                    imdb_votes=enriched.imdb_votes,
+                )
         return enriched
 
     def _merge_cached_title_metadata(self, titles: list[TitleSummary]) -> list[TitleSummary]:
@@ -209,10 +299,10 @@ class CatalogService:
                 if stored is None:
                     merged.append(title)
                     continue
-                if not title.poster_url and stored.poster_url:
-                    title.poster_url = str(stored.poster_url or "")
-                if not title.backdrop_url and stored.backdrop_url:
-                    title.backdrop_url = str(stored.backdrop_url or "")
+                if stored.poster_url:
+                    title.poster_url = normalize_external_url(str(stored.poster_url or ""))
+                if stored.backdrop_url:
+                    title.backdrop_url = normalize_external_url(str(stored.backdrop_url or ""))
                 if not title.status and stored.status:
                     title.status = str(stored.status or "")
                 if not title.slug and stored.slug:
@@ -233,6 +323,10 @@ class CatalogService:
                     title.imdb_rating = stored.imdb_rating
                 if title.imdb_votes is None and stored.imdb_votes is not None:
                     title.imdb_votes = stored.imdb_votes
+                if stored.ratings_status:
+                    title.ratings_status = str(stored.ratings_status)
+                if stored.ratings_refreshed_at is not None:
+                    title.ratings_refreshed_at = stored.ratings_refreshed_at
                 merged.append(title)
         return merged
 
@@ -241,7 +335,7 @@ class CatalogService:
             "query": query,
             "title_type": title_type or "all",
             "sort_mode": self.get_search_sort_mode(),
-            "results": [asdict(item) for item in results],
+            "results": [_serialize_title_summary(item) for item in results],
         }
         with self._db.session() as session:
             self._sync_state.set_value(session, "last_search_state", json.dumps(payload, ensure_ascii=False))
@@ -268,8 +362,12 @@ class CatalogService:
                 title = TitleSummary(**item)
             except TypeError:
                 continue
+            title.poster_refreshed_at = _parse_optional_datetime(title.poster_refreshed_at)
+            title.backdrop_refreshed_at = _parse_optional_datetime(title.backdrop_refreshed_at)
+            title.ratings_refreshed_at = _parse_optional_datetime(title.ratings_refreshed_at)
             title.poster_url = normalize_external_url(title.poster_url)
             results.append(title)
+        results = self._merge_cached_title_metadata(results)
         return {
             "query": str(payload.get("query", "") or ""),
             "title_type": str(payload.get("title_type", "all") or "all"),

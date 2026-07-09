@@ -107,6 +107,7 @@ class HistoryReadModelService:
                     "type": row.title_type,
                     "action": row.action,
                     "watched_at": row.watched_at,
+                    "watched_at_known": bool(getattr(row, "watched_at_known", True)),
                     "season": row.season,
                     "episode": row.episode,
                     "episode_title": (
@@ -242,6 +243,7 @@ class HistoryReadModelService:
                         "title": row.title,
                         "type": row.title_type,
                         "last_watched_at": row.watched_at,
+                        "last_watched_at_known": bool(getattr(row, "watched_at_known", True)),
                         "watched_count": 0,
                         "title_episode_avg_rating": stats.get("avg_rating"),
                         "title_episode_rated_count": stats.get("rated_count", 0),
@@ -307,6 +309,7 @@ class HistoryReadModelService:
                     "title_rating": group.get("title_rating"),
                     "type": group["type"],
                     "last_watched_at": group.get("last_watched_at"),
+                    "last_watched_at_known": group.get("last_watched_at_known", True),
                     "watched_count": group.get("watched_count", 0),
                     "latest_season": group.get("latest_season"),
                     "latest_episode": group.get("latest_episode"),

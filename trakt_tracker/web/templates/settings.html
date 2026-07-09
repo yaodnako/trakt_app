@@ -30,6 +30,20 @@
             <span>Kinopoisk API Key</span>
             <input type="password" name="kinopoisk_api_key" value="{{ config.kinopoisk_api_key }}">
         </label>
+        <div class="settings-row settings-sync-row">
+            <label class="settings-inline-field">
+                <span>Kinopoisk domain tail</span>
+                <select name="kinopoisk_domain_tail">
+                    {% for option in kinopoisk_domain_options %}
+                    <option value="{{ option }}" {% if option == config.kinopoisk_domain_tail %}selected{% endif %}>{{ option }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label class="settings-inline-field">
+                <span>Available tails (comma)</span>
+                <input type="text" name="kinopoisk_domain_options" value="{{ config.kinopoisk_domain_options }}" placeholder="net,ru,cx">
+            </label>
+        </div>
         <label>
             <span>Cache TTL (hours)</span>
             <input type="number" name="cache_ttl_hours" min="1" max="168" value="{{ config.cache_ttl_hours }}">
@@ -41,6 +55,10 @@
         <label>
             <span>Notification repeat (minutes)</span>
             <input type="number" name="notification_repeat_minutes" min="1" max="240" value="{{ config.notification_repeat_minutes }}">
+        </label>
+        <label>
+            <span>Notification release delay (minutes)</span>
+            <input type="number" name="notification_release_delay_minutes" min="0" max="10080" value="{{ config.notification_release_delay_minutes }}">
         </label>
         <div class="settings-row settings-sync-row">
             <label class="settings-inline-field">
@@ -120,6 +138,10 @@
         <label class="settings-checkbox">
             <input type="checkbox" name="open_in_embedded_player" value="1" {% if config.open_in_embedded_player %}checked{% endif %}>
             <span>Open Kinopoisk in embedded player</span>
+        </label>
+        <label class="settings-checkbox">
+            <input type="checkbox" name="web_portal_start_with_windows" value="1" {% if config.web_portal_start_with_windows %}checked{% endif %}>
+            <span>Start web portal with Windows</span>
         </label>
         <div class="settings-actions">
             <button type="submit" class="button">Save settings</button>

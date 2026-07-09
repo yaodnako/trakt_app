@@ -18,13 +18,16 @@ from trakt_tracker.application.metadata_refresh_policy import (
     metadata_refresh_due,
 )
 from trakt_tracker.application.operations import OperationLog
+from trakt_tracker.domain import RatingInput
 from trakt_tracker.web.routes_history import register_history_routes
+from trakt_tracker.web.routes_ratings import register_rating_routes
 
 
 class _FakeHistoryService:
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
         self.episode_missing = False
+        self.ratings: list[tuple[RatingInput, str]] = []
 
     def history(self, *, title_type=None, title_filter=None, rated_only=False, limit=None, offset=0):
         rows = list(self.rows)
@@ -121,6 +124,9 @@ class _FakeHistoryService:
         rows = self.history(title_type=title_type, limit=None, offset=0)
         return sorted({str(row.get("title", "")) for row in rows if row.get("title")})
 
+    def set_rating(self, item: RatingInput, title: str = "") -> None:
+        self.ratings.append((item, title))
+
 
 class _FakeCatalogService:
     def __init__(self) -> None:
@@ -213,6 +219,14 @@ class _FakeBackgroundTaskManager:
         return any(any(item.startswith(prefix) for prefix in prefixes) for item in self.running)
 
 
+class _FakeInteractionsService:
+    def __init__(self) -> None:
+        self.ratings: list[tuple[RatingInput, str]] = []
+
+    def save_rating(self, item: RatingInput, *, title: str = "") -> None:
+        self.ratings.append((item, title))
+
+
 class HistoryRouteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = FastAPI()
@@ -233,12 +247,14 @@ class HistoryRouteTests(unittest.TestCase):
         self.sync = _FakeSyncService()
         self.enrich_queue = _FakeEnrichQueueService()
         self.operations = OperationLog()
+        self.interactions = _FakeInteractionsService()
         self.app.state.services = SimpleNamespace(
             history=self.history,
             catalog=self.catalog,
             enrich_queue=self.enrich_queue,
             sync=self.sync,
             operations=self.operations,
+            interactions=self.interactions,
             auth=SimpleNamespace(
                 config=SimpleNamespace(utc_offset="+03:00"),
                 is_authorized=lambda: True,
@@ -266,6 +282,7 @@ class HistoryRouteTests(unittest.TestCase):
             fragment_context.update(context)
             return self.templates.get_template(template_name).render(fragment_context)
 
+        register_rating_routes(self.app)
         register_history_routes(self.app, render=render, render_fragment=render_fragment)
         self.client = TestClient(self.app)
 
@@ -386,6 +403,63 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertNotIn("reloadGuardKey", html)
         self.assertEqual(self.app.state.bg_tasks.started_keys, [])
 
+    def test_history_rate_query_accepts_empty_season_episode(self) -> None:
+        response = self.client.get(
+            "/history?rate_trakt_id=2&rate_type=movie&rate_season=&rate_episode=&rate_title=Dune"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("data-rating-autopen", response.text)
+
+    def test_history_unrated_card_uses_rating_modal_trigger(self) -> None:
+        self.history.rows = [self._row("movie", 2, "Dune", watched_at=datetime(2026, 4, 3, 11, 0, tzinfo=UTC))]
+        response = self.client.get("/history?page=1")
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn("data-rating-trigger", html)
+        self.assertIn('data-rating-title-type="movie"', html)
+        self.assertNotIn("rate_season=", html)
+
+    def test_ratings_endpoint_saves_movie_rating(self) -> None:
+        response = self.client.post(
+            "/ratings",
+            json={
+                "title_type": "movie",
+                "trakt_id": 2,
+                "title": "Dune",
+                "rating": 9,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        item, title = self.history.ratings[-1]
+        self.assertEqual(item.title_type, "movie")
+        self.assertEqual(item.trakt_id, 2)
+        self.assertEqual(item.rating, 9)
+        self.assertIsNone(item.season)
+        self.assertIsNone(item.episode)
+        self.assertEqual(title, "Dune")
+
+    def test_ratings_endpoint_saves_show_episode_rating(self) -> None:
+        response = self.client.post(
+            "/ratings",
+            json={
+                "title_type": "show",
+                "trakt_id": 1,
+                "title": "Severance",
+                "season": "1",
+                "episode": "2",
+                "rating": 8,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        item, title = self.history.ratings[-1]
+        self.assertEqual(item.title_type, "show")
+        self.assertEqual(item.trakt_id, 1)
+        self.assertEqual(item.rating, 8)
+        self.assertEqual(item.season, 1)
+        self.assertEqual(item.episode, 2)
+        self.assertEqual(title, "Severance")
+
     def test_history_uses_distinct_card_keys_for_same_title_on_different_days(self) -> None:
         self.history.rows = [
             self._row("show", 1, "Severance", watched_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC)),
@@ -396,6 +470,36 @@ class HistoryRouteTests(unittest.TestCase):
         html = response.text
         self.assertIn('data-history-title-key="03.04.2026:show:1"', html)
         self.assertIn('data-history-title-key="02.04.2026:show:1"', html)
+
+    def test_history_orders_entries_inside_title_card_oldest_to_newest(self) -> None:
+        newer = {
+            **self._row("show", 1, "Severance", watched_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC)),
+            "episode": 2,
+            "episode_title": "Episode 2",
+        }
+        older = self._row("show", 1, "Severance", watched_at=datetime(2026, 4, 3, 11, 0, tzinfo=UTC))
+        self.history.rows = [newer, older]
+
+        response = self.client.get("/history?page=1")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertLess(html.index("Episode 1"), html.index("Episode 2"))
+
+    def test_history_groups_undated_rows_at_without_date_label(self) -> None:
+        self.history.rows = [
+            self._row("movie", 2, "Dune", watched_at=datetime(2026, 4, 3, 11, 0, tzinfo=UTC)),
+            {
+                **self._row("movie", 4, "Arrival", watched_at=datetime(1970, 1, 1, tzinfo=UTC)),
+                "watched_at_known": False,
+            },
+        ]
+        response = self.client.get("/history?page=1")
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn("Без даты", html)
+        self.assertIn('data-history-title-key="Без даты:movie:4"', html)
+        self.assertLess(html.index("03.04.2026"), html.index("Без даты"))
 
     def test_history_template_renders_loading_states_for_unknown_statuses(self) -> None:
         response = self.client.get("/history?page=1")
@@ -460,6 +564,41 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertIn("No poster", html)
         self.assertIn("No preview", html)
         self.assertGreaterEqual(html.count("n/a"), 4)
+
+    def test_history_images_use_proxy_retry_without_direct_cdn_fallback(self) -> None:
+        self.history.rows = [
+            {
+                **self._row("show", 1, "Severance", watched_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC)),
+                "poster_url": "https://poster.example/severance.jpg",
+                "episode_still_url": "https://still.example/severance.jpg",
+            }
+        ]
+
+        response = self.client.get("/history?page=1")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn("proxyRetryApplied", html)
+        self.assertNotIn("data-direct-src", html)
+        self.assertNotIn("dataset.directSrc", html)
+
+    def test_history_show_episode_without_still_does_not_use_title_poster_fallback(self) -> None:
+        self.history.rows = [
+            {
+                **self._row("show", 1, "Severance", watched_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC)),
+                "poster_url": "https://poster.example/severance.jpg",
+                "episode_still_url": "",
+                "episode_still_status": "unknown",
+            }
+        ]
+
+        response = self.client.get("/history?page=1")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn("history-entry-still-loading", html)
+        self.assertIn("Loading", html)
+        self.assertEqual(html.count("https://poster.example/severance.jpg"), 1)
 
     def test_history_title_mode_shows_na_for_ready_status_without_imdb_value(self) -> None:
         self.history.rows = [
@@ -593,6 +732,7 @@ class HistoryRouteTests(unittest.TestCase):
             "type": title_type,
             "action": "watched",
             "watched_at": watched_at,
+            "watched_at_known": True,
             "season": 1 if title_type == "show" else None,
             "episode": 1 if title_type == "show" else None,
             "episode_title": "Episode 1" if title_type == "show" else None,

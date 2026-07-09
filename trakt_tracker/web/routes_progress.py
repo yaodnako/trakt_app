@@ -298,7 +298,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                 use_year_filter=use_year_filter_value,
                 flash="Title not found.",
             )
-        target_url = services.play.resolve_kinopoisk_url(current.title, domain="net")
+        target_url = services.play.resolve_kinopoisk_url(current.title)
         if not target_url:
             return progress_redirect(
                 hide_upcoming=hide_upcoming_value,

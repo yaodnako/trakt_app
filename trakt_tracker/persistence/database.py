@@ -65,6 +65,7 @@ class Database:
             "ALTER TABLE episodes_cache ADD COLUMN still_refreshed_at DATETIME",
             "ALTER TABLE episodes_cache ADD COLUMN trakt_details_status VARCHAR(32) DEFAULT 'unknown'",
             "ALTER TABLE episodes_cache ADD COLUMN trakt_details_refreshed_at DATETIME",
+            "ALTER TABLE history_events ADD COLUMN watched_at_known BOOLEAN DEFAULT 1",
             "ALTER TABLE notifications_log ADD COLUMN last_sent_at DATETIME",
             "ALTER TABLE notifications_log ADD COLUMN seen_at DATETIME",
             "ALTER TABLE notifications_log ADD COLUMN notify_count INTEGER DEFAULT 1",

@@ -8,6 +8,7 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
     ENRICH_STATUS_RETRYABLE_FAILURE,
 )
+from trakt_tracker.application.episode_imdb_resolver import EpisodeIMDbResolver
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_EPISODE_RATINGS,
     TRIGGER_VISIBLE_RATINGS_REFRESH,
@@ -117,6 +118,7 @@ class EpisodeRatingsMatrixService:
         self._history = history_repo
         self._episode_repo = episode_repo
         self._imdb_client = imdb_client
+        self._imdb_resolver = EpisodeIMDbResolver(imdb_client)
 
     def load_show_matrix(
         self,
@@ -153,6 +155,15 @@ class EpisodeRatingsMatrixService:
             with self._db.session() as session:
                 episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
                 my_ratings = self._history.latest_show_episode_ratings(session, trakt_id)
+        if episode_rows:
+            self._repair_cached_imdb_ratings(
+                trakt_id,
+                title_imdb_id=title.get("imdb_id", ""),
+                episode_rows=episode_rows,
+            )
+            with self._db.session() as session:
+                episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
+                my_ratings = self._history.latest_show_episode_ratings(session, trakt_id)
         return self._build_matrix(
             trakt_id,
             title=title.get("title", f"Show {trakt_id}"),
@@ -185,12 +196,45 @@ class EpisodeRatingsMatrixService:
             self._episode_repo.replace_show_episodes(session, trakt_id, episodes)
 
     def _hydrate_episode_imdb(self, episode: EpisodeSummary, *, title_imdb_id: str) -> None:
-        if not episode.imdb_id and title_imdb_id and episode.season > 0 and episode.number > 0:
-            episode.imdb_id = self._imdb_client.lookup_episode_imdb_id(title_imdb_id, episode.season, episode.number)
-            if not episode.imdb_id and episode.title:
-                episode.imdb_id = self._imdb_client.lookup_episode_imdb_id_by_title(title_imdb_id, episode.title)
-        if episode.imdb_id:
-            self._imdb_client.enrich_episode(episode)
+        resolution = self._imdb_resolver.resolve(
+            show_imdb_id=title_imdb_id,
+            season=episode.season,
+            episode=episode.number,
+            title=episode.title,
+            trakt_imdb_id=episode.imdb_id,
+        )
+        episode.imdb_id = resolution.imdb_id
+        episode.imdb_rating = resolution.imdb_rating
+        episode.imdb_votes = resolution.imdb_votes
+
+    def _repair_cached_imdb_ratings(self, trakt_id: int, *, title_imdb_id: str, episode_rows: list[dict]) -> None:
+        if not title_imdb_id or not episode_rows or not self._imdb_client.is_ready():
+            return
+        with self._db.session() as session:
+            for row in episode_rows:
+                if row.get("season") is None or row.get("number") is None:
+                    continue
+                season = int(row["season"])
+                episode_number = int(row["number"])
+                resolution = self._imdb_resolver.resolve(
+                    show_imdb_id=title_imdb_id,
+                    season=season,
+                    episode=episode_number,
+                    title=str(row.get("title", "") or ""),
+                    trakt_imdb_id=str(row.get("imdb_id", "") or ""),
+                )
+                cached = self._episode_repo.find_episode(session, trakt_id, season, episode_number)
+                if cached is None:
+                    continue
+                if (
+                    cached.imdb_id == resolution.imdb_id
+                    and cached.imdb_rating == resolution.imdb_rating
+                    and cached.imdb_votes == resolution.imdb_votes
+                ):
+                    continue
+                cached.imdb_id = resolution.imdb_id
+                cached.imdb_rating = resolution.imdb_rating
+                cached.imdb_votes = resolution.imdb_votes
 
     def _refresh_due_trakt_ratings(
         self,
@@ -214,6 +258,7 @@ class EpisodeRatingsMatrixService:
                 last_checked_at=row.get("trakt_details_refreshed_at"),
                 has_value=(row.get("trakt_rating") is not None and row.get("trakt_votes") is not None),
                 trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
+                first_aired=row.get("first_aired"),
             )
             if due.should_refresh:
                 due_keys.append((season, episode))
@@ -244,6 +289,8 @@ class EpisodeRatingsMatrixService:
                         status=ENRICH_STATUS_CHECKED_NO_DATA,
                     )
                     continue
+                title_imdb_id = self._load_title(show_trakt_id).get("imdb_id", "")
+                self._hydrate_episode_imdb(details, title_imdb_id=title_imdb_id)
                 status = ENRICH_STATUS_READY if details.trakt_rating is not None and details.trakt_votes is not None else ENRICH_STATUS_CHECKED_NO_DATA
                 self._episode_repo.update_trakt_details_enrich_state(
                     session,

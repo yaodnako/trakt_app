@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import shutil
 import sqlite3
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +16,21 @@ from trakt_tracker.domain import EpisodeSummary, TitleSummary
 IMDb_RATINGS_URL = "https://datasets.imdbws.com/title.ratings.tsv.gz"
 IMDb_EPISODES_URL = "https://datasets.imdbws.com/title.episode.tsv.gz"
 IMDb_BASICS_URL = "https://datasets.imdbws.com/title.basics.tsv.gz"
+_TITLE_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+    }
+)
 
 
 class IMDbDatasetClient:
@@ -180,6 +196,47 @@ class IMDbDatasetClient:
         episode.imdb_votes = int(row[1]) if row[1] is not None else None
         return episode
 
+    def lookup_episode_metadata(self, imdb_id: str) -> dict | None:
+        if not imdb_id or not self._db_path.exists():
+            return None
+        conn = sqlite3.connect(self._db_path)
+        try:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT e.parent_tconst, e.season_number, e.episode_number, b.primary_title, r.average_rating, r.num_votes
+                    FROM episodes e
+                    LEFT JOIN basics b ON b.tconst = e.tconst
+                    LEFT JOIN ratings r ON r.tconst = e.tconst
+                    WHERE e.tconst = ?
+                    """,
+                    (imdb_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+            if row is None:
+                rating = self._lookup(imdb_id)
+                if rating is None:
+                    return None
+                return {
+                    "parent_imdb_id": "",
+                    "season": None,
+                    "episode": None,
+                    "title": "",
+                    "imdb_rating": rating[0],
+                    "imdb_votes": rating[1],
+                }
+            return {
+                "parent_imdb_id": str(row[0] or ""),
+                "season": int(row[1]) if row[1] is not None else None,
+                "episode": int(row[2]) if row[2] is not None else None,
+                "title": str(row[3] or ""),
+                "imdb_rating": float(row[4]) if row[4] is not None else None,
+                "imdb_votes": int(row[5]) if row[5] is not None else None,
+            }
+        finally:
+            conn.close()
+
     def lookup_episode_imdb_id(self, show_imdb_id: str, season_number: int, episode_number: int) -> str:
         if not show_imdb_id or not self._db_path.exists() or season_number <= 0 or episode_number <= 0:
             return ""
@@ -196,8 +253,47 @@ class IMDbDatasetClient:
         finally:
             conn.close()
 
+    def lookup_overflow_episode_imdb_id(self, show_imdb_id: str, season_number: int, episode_number: int) -> str:
+        if not show_imdb_id or not self._db_path.exists() or season_number != 1 or episode_number <= 0:
+            return ""
+        conn = sqlite3.connect(self._db_path)
+        try:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT season_number, MAX(episode_number)
+                    FROM episodes
+                    WHERE parent_tconst = ? AND season_number > 0
+                    GROUP BY season_number
+                    ORDER BY season_number
+                    """,
+                    (show_imdb_id,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return ""
+            if len(rows) < 2:
+                return ""
+            remaining = episode_number
+            for row in rows:
+                imdb_season = int(row[0] or 0)
+                max_episode = int(row[1] or 0)
+                if imdb_season <= 0 or max_episode <= 0:
+                    continue
+                if remaining <= max_episode:
+                    if imdb_season == season_number:
+                        return ""
+                    found = conn.execute(
+                        "SELECT tconst FROM episodes WHERE parent_tconst = ? AND season_number = ? AND episode_number = ?",
+                        (show_imdb_id, imdb_season, remaining),
+                    ).fetchone()
+                    return str(found[0]) if found and found[0] else ""
+                remaining -= max_episode
+            return ""
+        finally:
+            conn.close()
+
     def lookup_episode_imdb_id_by_title(self, show_imdb_id: str, episode_title: str) -> str:
-        normalized_title = " ".join((episode_title or "").strip().lower().split())
+        normalized_title = _normalize_title(episode_title)
         if not show_imdb_id or not normalized_title or not self._db_path.exists():
             return ""
         conn = sqlite3.connect(self._db_path)
@@ -205,18 +301,18 @@ class IMDbDatasetClient:
             try:
                 rows = conn.execute(
                     """
-                    SELECT e.tconst
+                    SELECT e.tconst, b.primary_title
                     FROM episodes e
                     JOIN basics b ON b.tconst = e.tconst
                     WHERE e.parent_tconst = ?
-                      AND lower(trim(b.primary_title)) = ?
                     """,
-                    (show_imdb_id, normalized_title),
+                    (show_imdb_id,),
                 ).fetchall()
             except sqlite3.OperationalError:
                 return ""
-            if len(rows) == 1 and rows[0][0]:
-                return str(rows[0][0])
+            matches = [row for row in rows if len(row) >= 2 and _normalize_title(row[1]) == normalized_title]
+            if len(matches) == 1 and matches[0][0]:
+                return str(matches[0][0])
             return ""
         finally:
             conn.close()
@@ -263,3 +359,9 @@ class IMDbDatasetClient:
             ).fetchone()
         finally:
             conn.close()
+
+
+def _normalize_title(title: str | None) -> str:
+    normalized = unicodedata.normalize("NFKC", str(title or ""))
+    normalized = normalized.translate(_TITLE_TRANSLATION)
+    return " ".join(normalized.casefold().strip().split())

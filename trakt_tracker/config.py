@@ -24,6 +24,8 @@ class AppConfig:
     tmdb_api_key: str = ""
     tmdb_read_access_token: str = ""
     kinopoisk_api_key: str = ""
+    kinopoisk_domain_tail: str = "net"
+    kinopoisk_domain_options: str = "net,ru"
     open_in_embedded_player: bool = False
     hide_upcoming_in_progress: bool = False
     show_dropped_in_progress: bool = False
@@ -33,11 +35,13 @@ class AppConfig:
     cache_ttl_hours: int = 24
     poll_interval_minutes: int = 30
     notification_repeat_minutes: int = 5
+    notification_release_delay_minutes: int = 120
     imdb_auto_sync_interval_minutes: int = 180
     imdb_auto_sync_interval_hours: int = 3
     notification_sound_path: str = ""
     notifications_enabled: bool = True
     debug_mode: bool = False
+    web_portal_start_with_windows: bool = False
     utc_offset: str = "+03:00"
     window_x: int | None = None
     window_y: int | None = None
@@ -118,3 +122,31 @@ def format_local_datetime(value: datetime | None, utc_offset: str | None) -> str
     if normalized.tzinfo is None:
         normalized = normalized.replace(tzinfo=UTC)
     return normalized.astimezone(tz).strftime("%d.%m.%Y %H:%M")
+
+
+def normalize_kinopoisk_domain_tail(value: str | None, fallback: str = "net") -> str:
+    raw = str(value or "").strip().casefold().strip(".")
+    if raw.startswith("https://"):
+        raw = raw[len("https://") :]
+    elif raw.startswith("http://"):
+        raw = raw[len("http://") :]
+    if raw.startswith("www.kinopoisk."):
+        raw = raw[len("www.kinopoisk.") :]
+    elif raw.startswith("kinopoisk."):
+        raw = raw[len("kinopoisk.") :]
+    return raw or fallback
+
+
+def normalize_kinopoisk_domain_options(value: str | None, fallback: tuple[str, ...] = ("net", "ru")) -> list[str]:
+    raw = str(value or "")
+    options: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        normalized = normalize_kinopoisk_domain_tail(part, fallback="")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        options.append(normalized)
+    if options:
+        return options
+    return [item for item in fallback if item]

@@ -694,16 +694,32 @@ select {
     top: 8px;
     right: 8px;
     min-height: 24px;
-    padding: 4px 8px;
+    min-width: 38px;
+    padding: 4px 8px 5px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    gap: 3px;
     border-radius: 999px;
+    border: 0;
     background: rgba(55, 65, 81, 0.92);
     color: #fff;
+    font-family: var(--font-body);
     font-size: 0.74rem;
     font-weight: 700;
     line-height: 1;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    vertical-align: middle;
+}
+
+.history-rating-badge[data-rating-trigger] {
+    cursor: pointer;
+}
+
+button.history-rating-badge {
+    appearance: none;
+    margin: 0;
 }
 
 .poster-chip.history-title-chip {
@@ -871,6 +887,7 @@ select {
     line-height: 1;
     text-decoration: none;
     box-shadow: 0 6px 14px rgba(47, 159, 115, 0.14);
+    cursor: pointer;
 }
 
 .pager {
@@ -1112,6 +1129,7 @@ tbody tr:hover {
 }
 
 .progress-card {
+    position: relative;
     display: grid;
     gap: 4px;
     padding: 8px 10px 10px;
@@ -1133,7 +1151,6 @@ tbody tr:hover {
     border-color: #2f9f73;
     background: rgba(238, 250, 243, 0.98);
     box-shadow: none;
-    cursor: pointer;
 }
 
 .progress-new-badge {
@@ -1154,6 +1171,38 @@ tbody tr:hover {
     font-weight: 700;
     line-height: 1;
     box-shadow: 0 6px 14px rgba(47, 159, 115, 0.12);
+}
+
+.progress-seen-form {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 4;
+    margin: 0;
+}
+
+.progress-seen-button {
+    width: 32px;
+    height: 28px;
+    display: inline-grid;
+    place-items: center;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid rgba(47, 159, 115, 0.32);
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 6px 14px rgba(47, 159, 115, 0.12);
+    cursor: pointer;
+}
+
+.progress-seen-button:hover {
+    transform: translateY(-1px);
+}
+
+.progress-seen-button img {
+    width: 17px;
+    height: 17px;
+    display: block;
+    pointer-events: none;
 }
 
 .progress-title-stack {
@@ -2330,8 +2379,361 @@ tbody tr:hover {
     background: transparent;
 }
 
+.search-watch-poster-trigger {
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    color: inherit;
+}
+
+.search-watch-movie-button {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    z-index: 2;
+    background: rgba(255, 255, 255, 0.9);
+}
+
+.search-card-action {
+    position: absolute;
+    z-index: 3;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 10px 24px rgba(31, 28, 24, 0.16);
+}
+
+.search-play-button {
+    right: 8px;
+    bottom: 8px;
+}
+
+.search-watch-title-button {
+    left: 8px;
+    bottom: 8px;
+}
+
 .search-result-body {
     align-content: start;
+}
+
+.search-watch-overlay,
+.search-watch-date-overlay,
+.trakt-rating-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 130;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+
+.search-watch-overlay[hidden],
+.search-watch-date-overlay[hidden],
+.trakt-rating-overlay[hidden] {
+    display: none;
+}
+
+.search-watch-backdrop,
+.trakt-rating-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(25, 22, 18, 0.48);
+    backdrop-filter: blur(8px);
+}
+
+.search-watch-dialog,
+.search-watch-date-dialog {
+    position: relative;
+    z-index: 1;
+    width: min(1040px, calc(100vw - 36px));
+    max-height: min(820px, calc(100vh - 36px));
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 12px;
+    padding: 18px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: var(--panel-strong);
+    box-shadow: var(--shadow);
+}
+
+.search-watch-date-dialog {
+    width: min(520px, calc(100vw - 36px));
+    grid-template-rows: auto auto;
+}
+
+.trakt-rating-dialog {
+    position: relative;
+    z-index: 1;
+    width: min(620px, calc(100vw - 36px));
+    display: grid;
+    gap: 14px;
+    padding: 18px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: var(--panel-strong);
+    box-shadow: var(--shadow);
+}
+
+.trakt-rating-form {
+    display: grid;
+    gap: 10px;
+}
+
+.trakt-rating-meter {
+    justify-self: center;
+    min-height: 34px;
+    color: var(--text);
+    font-family: var(--font-head);
+    font-size: 1.7rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.trakt-rating-stars {
+    display: grid;
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+    gap: 4px;
+}
+
+.trakt-rating-star {
+    width: 100%;
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: rgba(92, 91, 88, 0.22);
+    font-size: clamp(1.7rem, 5vw, 2.8rem);
+    line-height: 1;
+    cursor: pointer;
+    text-shadow:
+        0 0 0 rgba(92, 91, 88, 0.65),
+        0 1px 0 rgba(255, 255, 255, 0.8);
+    transition: color 120ms ease, transform 120ms ease;
+}
+
+.trakt-rating-star:hover,
+.trakt-rating-star:focus-visible {
+    transform: translateY(-1px);
+    outline: none;
+}
+
+.trakt-rating-star.is-filled {
+    color: #d8a233;
+    text-shadow: 0 2px 8px rgba(150, 102, 20, 0.2);
+}
+
+.trakt-rating-numbers {
+    display: grid;
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+    gap: 4px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-align: center;
+}
+
+.trakt-rating-error {
+    margin: 0;
+    color: #9f2d20;
+    font-size: 0.9rem;
+    text-align: center;
+}
+
+.search-watch-body {
+    min-height: 0;
+    overflow: auto;
+}
+
+.search-watch-panel {
+    display: grid;
+    gap: 12px;
+}
+
+.search-watch-seasons,
+.search-watch-bulk-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.search-watch-date-actions {
+    display: grid;
+    grid-template-columns: auto minmax(240px, 1fr) auto;
+    align-items: end;
+    gap: 12px;
+}
+
+.search-watch-season-tab {
+    min-height: 34px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.68);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 700;
+}
+
+.search-watch-season-tab span {
+    color: var(--muted);
+    font-weight: 600;
+}
+
+.search-watch-season-tab.is-active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.search-watch-season-tab.is-active span {
+    color: rgba(255, 255, 255, 0.82);
+}
+
+.search-watch-episode-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.search-watch-episode-grid.is-hidden,
+.search-watch-season-action.is-hidden {
+    display: none;
+}
+
+.search-watch-episode-card {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(77, 61, 40, 0.12);
+    background: rgba(255, 255, 255, 0.66);
+}
+
+.search-watch-episode-card.is-watched {
+    border-color: rgba(13, 107, 97, 0.38);
+    background: rgba(235, 248, 244, 0.86);
+}
+
+.search-watch-episode-card.is-unreleased {
+    opacity: 0.58;
+}
+
+.search-watch-still {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    border-radius: 8px;
+    background: rgba(238, 234, 226, 0.8);
+    color: var(--muted);
+}
+
+.search-watch-still img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.search-watch-episode-label,
+.search-watch-state {
+    position: absolute;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(55, 65, 81, 0.92);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.search-watch-episode-label {
+    left: 7px;
+    top: 7px;
+}
+
+.search-watch-state {
+    right: 7px;
+    top: 7px;
+    background: rgba(13, 107, 97, 0.94);
+}
+
+.search-watch-episode-copy {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
+}
+
+.search-watch-episode-copy h4 {
+    grid-column: 1 / -1;
+    margin: 0;
+    min-height: 2.1rem;
+    font-size: 0.92rem;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
+}
+
+.poster-chip.search-watch-episode-ratings {
+    position: static;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    transform: none;
+    grid-column: 1;
+    justify-self: start;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    display: inline-grid;
+    padding: 5px 8px;
+}
+
+.search-watch-episode-action {
+    grid-column: 2;
+    justify-self: end;
+    align-self: center;
+}
+
+.search-watch-now-action,
+.search-watch-custom-submit {
+    min-height: 42px;
+    align-self: end;
+}
+
+.search-watch-custom-date {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.search-watch-custom-date span {
+    color: var(--muted);
+    font-size: 0.86rem;
+    font-weight: 700;
+}
+
+.search-watch-custom-date input {
+    width: 100%;
+    height: 42px;
+    padding: 8px 10px;
+    border-radius: 10px;
 }
 
 @media (max-width: 1200px) {
@@ -2375,6 +2777,43 @@ tbody tr:hover {
 
     .search-result-card {
         justify-self: center;
+    }
+}
+
+@media (max-width: 860px) {
+    .search-watch-overlay,
+    .search-watch-date-overlay,
+    .trakt-rating-overlay {
+        padding: 0;
+    }
+
+    .search-watch-dialog {
+        width: 100vw;
+        height: 100vh;
+        max-height: 100vh;
+        border-radius: 0;
+    }
+
+    .trakt-rating-dialog {
+        width: 100vw;
+        min-height: 100vh;
+        align-content: center;
+        border-radius: 0;
+        padding: 16px;
+    }
+
+    .search-watch-date-actions {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+    }
+
+    .search-watch-now-action,
+    .search-watch-custom-submit {
+        width: 100%;
+    }
+
+    .search-watch-episode-grid {
+        grid-template-columns: 1fr;
     }
 }
 

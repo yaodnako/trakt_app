@@ -4,9 +4,7 @@ import asyncio
 import mimetypes
 import shutil
 from pathlib import Path
-from threading import Lock, Thread
 from urllib.parse import quote
-from urllib.request import Request as UrlRequest, urlopen
 
 from sqlalchemy import func, select
 
@@ -14,15 +12,18 @@ from fastapi import Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from trakt_tracker.application.services import ServiceContainer
-from trakt_tracker.config import ConfigStore, get_app_data_dir, normalize_utc_offset
+from trakt_tracker.config import (
+    ConfigStore,
+    get_app_data_dir,
+    normalize_kinopoisk_domain_options,
+    normalize_kinopoisk_domain_tail,
+    normalize_utc_offset,
+)
 from trakt_tracker.infrastructure.cache import BinaryCache
+from trakt_tracker.infrastructure.artwork_cache import fetch_and_cache_image, warm_image_cache_in_background
+from trakt_tracker.infrastructure.windows_autostart import set_web_tray_autostart
 from trakt_tracker.persistence.models import EpisodeCache, Title
-from trakt_tracker.web.app_shared import image_cache_suffix
 from trakt_tracker.web.viewmodels import parse_bool_flag
-
-
-_image_warm_lock = Lock()
-_image_warm_running: set[str] = set()
 
 
 def register_system_routes(app, *, render, template_filters) -> None:
@@ -31,7 +32,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
         return RedirectResponse(url="/progress", status_code=302)
 
     @app.get("/cached-image")
-    async def cached_image(request: Request, url: str = "") -> Response:
+    async def cached_image(request: Request, url: str = "", v: str = "") -> Response:
         target_url = url.strip()
         if not target_url:
             return Response(status_code=404)
@@ -40,16 +41,16 @@ def register_system_routes(app, *, render, template_filters) -> None:
         payload = cache.get_bytes(target_url, max(1, int(services.auth.config.cache_ttl_hours)))
         media_type, _ = mimetypes.guess_type(target_url)
         if payload is not None:
-            return Response(content=payload, media_type=media_type or "image/jpeg")
+            return _image_response(target_url, payload, media_type)
         stale_payload = cache.get_any_bytes(target_url)
         if stale_payload is not None:
-            return Response(content=stale_payload, media_type=media_type or "image/jpeg")
-        fetched = await asyncio.to_thread(_fetch_and_cache_image, cache, target_url, 5)
+            return _image_response(target_url, stale_payload, media_type)
+        fetched = await asyncio.to_thread(fetch_and_cache_image, cache, target_url, 8)
         if fetched is not None:
             payload, content_type = fetched
-            return Response(content=payload, media_type=content_type or media_type or "image/jpeg")
-        _warm_image_cache_in_background(cache, target_url, timeout=5)
-        return RedirectResponse(url=target_url, status_code=307)
+            return _image_response(target_url, payload, content_type or media_type)
+        warm_image_cache_in_background(cache, target_url, timeout=5)
+        return Response(status_code=502, headers={"Cache-Control": "no-store"})
 
     @app.get("/notification-sound")
     async def notification_sound(request: Request) -> Response:
@@ -70,6 +71,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
                 "page_title": "Settings",
                 "flash": flash,
                 "config": config,
+                "kinopoisk_domain_options": normalize_kinopoisk_domain_options(getattr(config, "kinopoisk_domain_options", "")),
                 "imdb_sync_running": bg_tasks.is_running("imdb_manual_sync") or bg_tasks.is_running("imdb_auto_sync"),
                 "imdb_sync_status": request.app.state.services.sync.imdb_dataset_status(),
             },
@@ -86,6 +88,8 @@ def register_system_routes(app, *, render, template_filters) -> None:
             str(form.get("tmdb_api_key", "") or ""),
             str(form.get("tmdb_read_access_token", "") or ""),
             str(form.get("kinopoisk_api_key", "") or ""),
+            normalize_kinopoisk_domain_tail(str(form.get("kinopoisk_domain_tail", "") or "")),
+            str(form.get("kinopoisk_domain_options", "") or ""),
         )
         try:
             cache_ttl_hours = int(str(form.get("cache_ttl_hours", config.cache_ttl_hours) or config.cache_ttl_hours))
@@ -101,6 +105,18 @@ def register_system_routes(app, *, render, template_filters) -> None:
             )
         except ValueError:
             notification_repeat_minutes = config.notification_repeat_minutes
+        try:
+            notification_release_delay_minutes = int(
+                str(
+                    form.get(
+                        "notification_release_delay_minutes",
+                        getattr(config, "notification_release_delay_minutes", 120),
+                    )
+                    or getattr(config, "notification_release_delay_minutes", 120)
+                )
+            )
+        except ValueError:
+            notification_release_delay_minutes = getattr(config, "notification_release_delay_minutes", 120)
         try:
             imdb_auto_sync_interval_minutes = int(
                 str(form.get("imdb_auto_sync_interval_minutes", config.imdb_auto_sync_interval_minutes) or config.imdb_auto_sync_interval_minutes)
@@ -120,12 +136,18 @@ def register_system_routes(app, *, render, template_filters) -> None:
         config.cache_ttl_hours = max(1, min(168, cache_ttl_hours))
         config.poll_interval_minutes = max(5, min(240, poll_interval_minutes))
         config.notification_repeat_minutes = max(1, min(240, notification_repeat_minutes))
+        config.notification_release_delay_minutes = max(0, min(10080, notification_release_delay_minutes))
         config.imdb_auto_sync_interval_minutes = max(1, min(10080, imdb_auto_sync_interval_minutes))
         config.imdb_auto_sync_interval_hours = max(1, config.imdb_auto_sync_interval_minutes // 60 or 1)
         config.notification_sound_path = notification_sound_path
         config.notifications_enabled = parse_bool_flag(str(form.get("notifications_enabled", "")))
         config.debug_mode = parse_bool_flag(str(form.get("debug_mode", "")))
         config.open_in_embedded_player = parse_bool_flag(str(form.get("open_in_embedded_player", "")))
+        config.web_portal_start_with_windows = parse_bool_flag(str(form.get("web_portal_start_with_windows", "")))
+        try:
+            set_web_tray_autostart(config.web_portal_start_with_windows)
+        except OSError:
+            config.web_portal_start_with_windows = False
         config.utc_offset = normalize_utc_offset(str(form.get("utc_offset", config.utc_offset or "+03:00")))
         ConfigStore().save(config)
         template_filters.utc_offset = config.utc_offset
@@ -382,39 +404,26 @@ def register_system_routes(app, *, render, template_filters) -> None:
         return JSONResponse({"events": services.operations.list_after(after)})
 
 
-def _warm_image_cache_in_background(cache: BinaryCache, target_url: str, *, timeout: int) -> None:
-    with _image_warm_lock:
-        if target_url in _image_warm_running:
-            return
-        _image_warm_running.add(target_url)
+def _image_media_type(target_url: str, payload: bytes, guessed_media_type: str | None = None) -> str:
+    if payload.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if payload.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return "image/webp"
+    stripped = payload[:128].lstrip()
+    if stripped.startswith(b"<svg") or stripped.startswith(b"<?xml"):
+        return "image/svg+xml"
+    if target_url.lower().split("?", 1)[0].endswith(".webp"):
+        return "image/webp"
+    return guessed_media_type or "image/jpeg"
 
-    def runner() -> None:
-        try:
-            _fetch_and_cache_image(cache, target_url, timeout)
-        except Exception:
-            pass
-        finally:
-            with _image_warm_lock:
-                _image_warm_running.discard(target_url)
 
-    Thread(target=runner, daemon=True).start()
-
-
-def _fetch_and_cache_image(cache: BinaryCache, target_url: str, timeout: int) -> tuple[bytes, str] | None:
-    try:
-        upstream_request = UrlRequest(
-            target_url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-            },
-        )
-        with urlopen(upstream_request, timeout=timeout) as upstream_response:
-            fetched = upstream_response.read()
-            content_type = upstream_response.headers.get("Content-Type", "")
-        if not fetched:
-            return None
-        cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(target_url, content_type))
-        return fetched, content_type
-    except Exception:
-        return None
+def _image_response(target_url: str, payload: bytes, guessed_media_type: str | None = None) -> Response:
+    return Response(
+        content=payload,
+        media_type=_image_media_type(target_url, payload, guessed_media_type),
+        headers={"Cache-Control": "no-store"},
+    )

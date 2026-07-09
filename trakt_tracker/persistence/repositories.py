@@ -15,6 +15,10 @@ from trakt_tracker.domain import CalendarEntry, EpisodeSummary, ProgressSnapshot
 from .models import EpisodeCache, HistoryEvent, NotificationLog, SyncState, Title, UserTitleState, WatchProgress
 
 
+def _is_show_title_fallback(title: str, trakt_id: int) -> bool:
+    return (title or "").strip() == f"Show {trakt_id}"
+
+
 class TitleRepository:
     _UNSET = object()
 
@@ -260,6 +264,7 @@ class HistoryRepository:
         season: int | None,
         episode: int | None,
         watched_at: datetime,
+        watched_at_known: bool = True,
     ) -> HistoryEvent | None:
         existing_local = session.scalar(
             select(HistoryEvent)
@@ -268,12 +273,15 @@ class HistoryRepository:
             .where(HistoryEvent.title_trakt_id == title_trakt_id)
             .where(HistoryEvent.season == season)
             .where(HistoryEvent.episode == episode)
-            .order_by(desc(HistoryEvent.watched_at))
+            .where(HistoryEvent.watched_at_known == watched_at_known)
+            .order_by(desc(HistoryEvent.watched_at_known), desc(HistoryEvent.watched_at))
             .limit(1)
         )
+        if existing_local is not None and not watched_at_known:
+            return existing_local
         if (
             existing_local is not None
-            and abs(watched_at - existing_local.watched_at) <= self._LOCAL_WATCH_DEDUP_WINDOW
+            and self._within_local_watch_window(watched_at, existing_local.watched_at)
         ):
             return existing_local
         return None
@@ -288,6 +296,7 @@ class HistoryRepository:
         title_type: str,
         action: str,
         watched_at: datetime,
+        watched_at_known: bool = True,
         season: int | None = None,
         episode: int | None = None,
         rating: int | None = None,
@@ -301,6 +310,7 @@ class HistoryRepository:
                 existing.title_type = title_type
                 existing.action = action
                 existing.watched_at = watched_at
+                existing.watched_at_known = watched_at_known
                 existing.season = season
                 existing.episode = episode
                 existing.rating = rating
@@ -314,11 +324,13 @@ class HistoryRepository:
                 season=season,
                 episode=episode,
                 watched_at=watched_at,
+                watched_at_known=watched_at_known,
             )
             if existing_local is not None:
                 existing_local.title = title
                 existing_local.title_type = title_type
                 existing_local.watched_at = watched_at
+                existing_local.watched_at_known = watched_at_known
                 existing_local.rating = rating
                 self._delete_other_watched_duplicates(session, existing_local)
                 session.flush()
@@ -330,6 +342,7 @@ class HistoryRepository:
             title_type=title_type,
             action=action,
             watched_at=watched_at,
+            watched_at_known=watched_at_known,
             season=season,
             episode=episode,
             rating=rating,
@@ -358,7 +371,7 @@ class HistoryRepository:
         rows = session.scalars(
             select(HistoryEvent)
             .where(HistoryEvent.action == "watched")
-            .order_by(desc(HistoryEvent.watched_at), desc(HistoryEvent.id))
+            .order_by(desc(HistoryEvent.watched_at_known), desc(HistoryEvent.watched_at), desc(HistoryEvent.id))
         ).all()
         seen: set[tuple[str, int, int | None, int | None]] = set()
         for row in rows:
@@ -400,7 +413,7 @@ class HistoryRepository:
             .where(HistoryEvent.episode.is_not(None))
             .where(HistoryEvent.rating.is_not(None))
             .where(HistoryEvent.action.in_(("rated", "watched")))
-            .order_by(desc(HistoryEvent.watched_at), desc(HistoryEvent.id))
+            .order_by(desc(HistoryEvent.watched_at_known), desc(HistoryEvent.watched_at), desc(HistoryEvent.id))
         )
         result: dict[tuple[int, int], int] = {}
         for row in rows:
@@ -429,14 +442,14 @@ class HistoryRepository:
             .where(HistoryEvent.title_type == title_type)
             .where(HistoryEvent.season == season)
             .where(HistoryEvent.episode == episode)
-            .order_by(desc(HistoryEvent.watched_at), desc(HistoryEvent.id))
+            .order_by(desc(HistoryEvent.watched_at_known), desc(HistoryEvent.watched_at), desc(HistoryEvent.id))
             .limit(1)
         )
         if watched_row is not None:
             watched_row.rating = rating
 
     def list_recent(self, session: Session, limit: int = 20) -> list[HistoryEvent]:
-        stmt = select(HistoryEvent).order_by(desc(HistoryEvent.watched_at)).limit(limit)
+        stmt = select(HistoryEvent).order_by(desc(HistoryEvent.watched_at_known), desc(HistoryEvent.watched_at)).limit(limit)
         return list(session.scalars(stmt))
 
     def list_filtered(
@@ -455,12 +468,38 @@ class HistoryRepository:
             stmt = stmt.where(HistoryEvent.title_type == title_type)
         if title_filter:
             stmt = stmt.where(HistoryEvent.title.ilike(f"%{title_filter}%"))
-        stmt = stmt.order_by(desc(HistoryEvent.watched_at))
+        stmt = stmt.order_by(desc(HistoryEvent.watched_at_known), desc(HistoryEvent.watched_at))
         if offset:
             stmt = stmt.offset(offset)
         if limit is not None:
             stmt = stmt.limit(limit)
         return list(session.scalars(stmt))
+
+    def watched_episode_keys(self, session: Session, show_trakt_id: int) -> set[tuple[int, int]]:
+        rows = session.scalars(
+            select(HistoryEvent)
+            .where(HistoryEvent.action == "watched")
+            .where(HistoryEvent.title_type == "show")
+            .where(HistoryEvent.title_trakt_id == show_trakt_id)
+            .where(HistoryEvent.season.is_not(None))
+            .where(HistoryEvent.episode.is_not(None))
+        )
+        return {
+            (int(row.season), int(row.episode))
+            for row in rows
+            if row.season is not None and row.episode is not None
+        }
+
+    @staticmethod
+    def _within_local_watch_window(left: datetime, right: datetime) -> bool:
+        try:
+            return abs(left - right) <= HistoryRepository._LOCAL_WATCH_DEDUP_WINDOW
+        except TypeError:
+            if left.tzinfo is not None:
+                left = left.replace(tzinfo=None)
+            if right.tzinfo is not None:
+                right = right.replace(tzinfo=None)
+            return abs(left - right) <= HistoryRepository._LOCAL_WATCH_DEDUP_WINDOW
 
     def distinct_titles(self, session: Session, title_type: str | None = None, action: str | None = None) -> list[str]:
         stmt = select(HistoryEvent.title).distinct().order_by(HistoryEvent.title)
@@ -481,10 +520,17 @@ class HistoryRepository:
 class ProgressRepository:
     def upsert_progress(self, session: Session, progress: ProgressSnapshot) -> WatchProgress:
         model = session.scalar(select(WatchProgress).where(WatchProgress.show_trakt_id == progress.trakt_id))
+        show_title = progress.title
+        if _is_show_title_fallback(show_title, progress.trakt_id):
+            title_row = session.scalar(select(Title).where(Title.trakt_id == progress.trakt_id))
+            if title_row is not None and title_row.title and not _is_show_title_fallback(title_row.title, progress.trakt_id):
+                show_title = title_row.title
+            elif model is not None and model.show_title and not _is_show_title_fallback(model.show_title, progress.trakt_id):
+                show_title = model.show_title
         if model is None:
-            model = WatchProgress(show_trakt_id=progress.trakt_id, show_title=progress.title)
+            model = WatchProgress(show_trakt_id=progress.trakt_id, show_title=show_title)
             session.add(model)
-        model.show_title = progress.title
+        model.show_title = show_title
         model.completed = progress.completed
         model.aired = progress.aired
         model.percent_completed = progress.percent_completed
@@ -542,6 +588,14 @@ class ProgressRepository:
         rows = list(session.execute(stmt))
         result: list[ProgressSnapshot] = []
         for row, title, next_episode_row, state in rows:
+            show_title = row.show_title
+            if (
+                title is not None
+                and title.title
+                and _is_show_title_fallback(show_title, row.show_trakt_id)
+                and not _is_show_title_fallback(title.title, row.show_trakt_id)
+            ):
+                show_title = title.title
             next_episode = None
             if row.next_episode_trakt_id:
                 next_episode = EpisodeSummary(
@@ -582,7 +636,7 @@ class ProgressRepository:
             result.append(
                 ProgressSnapshot(
                     trakt_id=row.show_trakt_id,
-                    title=row.show_title,
+                    title=show_title,
                     completed=row.completed,
                     aired=row.aired,
                     percent_completed=row.percent_completed,
@@ -798,6 +852,9 @@ class EpisodeRepository:
     def list_all_with_imdb(self, session: Session) -> list[EpisodeCache]:
         return list(session.scalars(select(EpisodeCache).where(EpisodeCache.imdb_id != "")))
 
+    def list_all_episodes(self, session: Session) -> list[EpisodeCache]:
+        return list(session.scalars(select(EpisodeCache).order_by(EpisodeCache.show_trakt_id, EpisodeCache.season, EpisodeCache.number)))
+
     def titles_by_episode_keys(self, session: Session, keys: list[tuple[int, int, int]]) -> dict[tuple[int, int, int], str]:
         if not keys:
             return {}
@@ -1011,6 +1068,40 @@ class NotificationRepository:
         row.message = message
         row.last_sent_at = now
         row.notify_count = max(1, row.notify_count or 0) + 1
+
+    def track_released(
+        self,
+        session: Session,
+        *,
+        show_trakt_id: int,
+        show_title: str,
+        episode_trakt_id: int,
+        season: int,
+        episode: int,
+        message: str,
+        released_at: datetime,
+    ) -> None:
+        row = self.get_log(session, show_trakt_id, episode_trakt_id)
+        if row is not None:
+            row.show_title = show_title
+            row.season = season
+            row.episode = episode
+            row.message = message
+            return
+        stamp = released_at.replace(tzinfo=None) if released_at.tzinfo is not None else released_at
+        session.add(
+            NotificationLog(
+                show_trakt_id=show_trakt_id,
+                show_title=show_title,
+                episode_trakt_id=episode_trakt_id,
+                season=season,
+                episode=episode,
+                sent_at=stamp,
+                last_sent_at=stamp,
+                notify_count=0,
+                message=message,
+            )
+        )
 
     def mark_seen(
         self,

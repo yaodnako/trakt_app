@@ -348,6 +348,12 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertIn("The Boys", payload["sections_html"])
         self.assertIn("data-progress-card-key=\"progress:3\"", payload["sections_html"])
         self.assertIn("progress-new-badge", payload["sections_html"])
+        self.assertIn('action="/progress/3/seen"', payload["sections_html"])
+        self.assertIn("progress-seen-form", payload["sections_html"])
+        self.assertIn("eye.svg", payload["sections_html"])
+        self.assertNotIn("icon-button progress-seen-button", payload["sections_html"])
+        self.assertNotIn("js-new-card", payload["sections_html"])
+        self.assertNotIn("data-seen-form", payload["sections_html"])
 
     def test_progress_refresh_queues_recent_checked_no_data_still_for_visible_card(self) -> None:
         self.progress.items = [

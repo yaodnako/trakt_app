@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 
@@ -25,11 +26,20 @@ class NotificationSender:
             "$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Trakt Tracker'); "
             "$notifier.Show($toast)"
         )
+        run_kwargs = {
+            "check": False,
+            "capture_output": True,
+            "text": True,
+        }
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            run_kwargs["startupinfo"] = startupinfo
+            run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-            check=False,
-            capture_output=True,
-            text=True,
+            **run_kwargs,
         )
 
     @staticmethod
@@ -41,4 +51,3 @@ class NotificationSender:
             .replace('"', "&quot;")
             .replace("'", "&apos;")
         )
-

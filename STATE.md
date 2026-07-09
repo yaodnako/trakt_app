@@ -1,115 +1,39 @@
 # Trakt Tracker State
 
-This file is a compact current-state reference. It is not mandatory startup
-context; new chats should read `AGENTS.md` first and open this file only when
-they need current behavior or policy details.
+This file tracks current temporary reality. Keep it about what is true now, not how the project got here.
 
-## Current Facts
+## Current Product State
 
-- `web` is the primary UI.
-- `desktop` is the secondary UI over the same Python core and the same SQLite DB.
-- `History` and `Progress` use shared metadata tables:
-  - `titles`
-  - `episodes_cache`
-- SQLite is the source of truth for enrich state, statuses, and refresh timestamps.
-- Provider/file caches are response caches, not decision authority.
+- `web` is the primary day-to-day UI.
+- `desktop` still exists and uses the same shared core and SQLite database.
+- Main web surfaces are `Progress`, `History`, `Search`, `Settings`, and the title details page.
 
-## Normal Behavior
+## Current Metadata Behavior
 
-- `History` and `Progress` use queue-driven patch refresh, not full page reload convergence.
-- Visible viewport entries get higher-priority refresh.
-- Stale visible refresh is scoped to ratings/details.
-- Ready poster/still artwork is not periodically rechecked like ratings.
-- Screenshot workflow is required after UI or visible behavior changes:
-  - run `capture_web_ui.bat`
-  - inspect the generated screenshots
-  - iterate if the visible result is wrong
+- `History` and `Progress` read shared metadata from `titles` and `episodes_cache`.
+- Web pages use queue-driven patch refresh instead of relying on full-page reload convergence.
+- Visible entries are refreshed ahead of non-visible entries.
+- Ratings/details may refresh on short stale windows; resolved artwork is treated more conservatively.
+- The episode ratings matrix supports `IMDb`, `Trakt`, and `My rating` display modes.
+- Episode IMDb ids and ratings are resolved from Trakt ids plus local IMDb dataset episode/title evidence before being persisted, including matrix-open repair for stale cached episode IMDb fields.
+- Web image delivery is proxy-first: `/cached-image` serves local cache or freshly fetched bytes and should not rely on the browser following upstream artwork URLs.
+- Artwork fetch in `/cached-image` uses the app process first and can fall back to a short `python.exe` helper from the tray `pythonw.exe` runtime to tolerate CDN/proxy differences.
 
-## Metadata Policy
+## Current Operations
 
-- `title_ratings`:
-  - `ready`: 5 minutes on visible stale refresh
-  - `checked_no_data`: 6 hours
-  - `retryable_failure`: 30 minutes
-- `episode_ratings`:
-  - matrix foreground (`visible_ratings_refresh`):
-    - released within 10 days: 5 minutes
-    - older than 10 days: background-only, not matrix-polled
-  - background sweep (`background_sweep`):
-    - 10-60 days: 6 hours
-    - 60-180 days: 48 hours
-    - 180-720 days: 14 days
-    - 720+ days / unknown air date: 60 days
-  - `retryable_failure`: 30 minutes backoff
-- `poster`:
-  - `ready`: not rechecked by normal viewport/sync; only manual repair
-  - `checked_no_data`: 7 days
-  - `retryable_failure`: 6 hours
-- `still`:
-  - `ready`: not rechecked by normal viewport/sync; only manual repair
-  - `checked_no_data` for recent released + visible (`viewport`): about 5 minutes
-  - `checked_no_data` for recent released + non-visible (`page_context` / `sync_event`): about 1 hour
-  - `checked_no_data` for old / unknown / unreleased: 7 days
-  - `retryable_failure`: 6 hours
+- Web sync modes currently exposed in settings: `Full Sync`, `Sync`, `Timeout Sync`, `Repair Sync`.
+- The web portal can run through the tray launcher (`pythonw -m trakt_tracker.web_tray` or `run_trakt_tracker_web_tray.bat`) without a console window.
+- The tray launcher polls upcoming episode notifications itself and can play the configured notification sound even when no browser tab is open.
+- Episode notifications wait for the configured post-release delay before firing; the default delay is 120 minutes so translations have time to appear.
+- Notification polling can use the current progress next-episode air date when Trakt calendar entries omit `first_aired`; `New` cards require an explicit action button to mark the notification seen.
+- Settings can register the tray web portal for Windows user-login autostart.
+- Kinopoisk play URLs use a configurable selected domain tail from a comma-separated option list.
+- `capture_web_ui.bat` is the standard broad web screenshot pass.
+- The tray launcher is the standard day-to-day web runtime; use `run_trakt_tracker_web_tray.bat` or `pythonw -m trakt_tracker.web_tray` for manual verification runs.
 
-## Refresh Triggers
+## Current Known Limits
 
-- `viewport`: actually visible cards/groups.
-- `page_context`: nearby/page buckets that are loaded but not actually visible.
-- `visible_ratings_refresh`: ratings/details stale refresh only.
-- `sync_event`: targeted sync-driven refresh.
-- `manual_repair`: explicit repair override.
-- `background_sweep`: periodic web background sweep for age-bucketed Trakt episode ratings.
-
-## Current Web Features
-
-- `Progress`
-- `History`
-- `Search`
-- `Settings`
-- title/details page
-- show-level episode ratings matrix overlay
-- web sync modes: `Full Sync`, `Sync`, `Timeout Sync`, `Repair Sync`
-
-## Investigation Checklist
-
-For History/Progress metadata bugs:
-
-1. Check SQLite row values in `titles` / `episodes_cache`.
-2. Check enrich statuses and refresh timestamps.
-3. Check queue updates and `retryable_failure` state.
-4. Check route trigger and `requested_parts`.
-5. For UI issues, run and inspect screenshot workflow.
-
-## Recent Fix Notes
-
-- Episode still retry is now release-aware and visibility-aware.
-- Fresh `checked_no_data` stills no longer wait 7 days when the episode is already released and visible.
-- The confirmed The Boys S05E01/S05E02 stale negative case was resolved through the shared policy path.
-- Episode ratings matrix overlay is DB-first and reads from shared `episodes_cache`.
-
-## 2026 Matrix State Notes
-
-- Matrix rating source is selectable with one-click buttons: `IMDb` (default) / `Trakt` / `My ★`.
-- First switch to `Trakt` rechecks due episode Trakt ratings through the shared policy, not only missing rows.
-- Matrix `ALL` average excludes season `0`.
-- In `Trakt` mode, unreleased episodes and zero-vote Trakt ratings are treated as unrated (`?`) and are excluded from Trakt averages.
-- Matrix tooltip votes follow the active display source.
-- Web runs a periodic background sweep that enqueues due older episode Trakt-rating refreshes through the shared enrich queue.
-
-## 2026 History Card Rating Rendering Notes
-
-- `History` title chips now render `n/a` when `title_ratings_status` is `ready` or `checked_no_data` but a specific provider value is absent.
-- `Loading` is now limited to unresolved states (for example `unknown` / retry in progress), to avoid sticky loading labels.
-- History filter controls auto-apply without the old `Apply` button.
-
-## Current Limitation: History Ratings Sync Scope
-
-- History rating import currently fetches Trakt ratings for `episode`, `show`, and `movie` types.
-- `season` ratings are not currently imported by the history ratings sync path.
-
-## 2026 Sync / Image Runtime Notes
-
-- Watch-history sync fetches both the general history stream and the movie-specific history stream, then dedupes by Trakt history id.
-- Search no longer blocks first render on TMDb / IMDb metadata enrichment.
-- `/cached-image` returns freshly fetched bytes on cache miss when possible; redirect to the external image remains the fallback path.
+- IMDb episode freshness depends on the local official IMDb dataset snapshot; there is no separate incremental feed in the current implementation.
+- History ratings import currently covers `episode`, `show`, and `movie` ratings, but not `season` ratings.
+- No dedicated lint configuration is present in the repo today.
+- The in-app browser can diverge from external browser behavior on interactive image-loading flows; regression sign-off should be done in Edge/Chrome.

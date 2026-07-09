@@ -25,6 +25,8 @@ class KinopoiskUtilsTests(unittest.TestCase):
 
     def test_build_urls(self) -> None:
         self.assertEqual(build_film_url(123, "net"), "https://www.kinopoisk.net/film/123/")
+        self.assertEqual(build_film_url(123, "cx"), "https://www.kinopoisk.cx/film/123/")
+        self.assertEqual(build_film_url(123, "https://www.kinopoisk.cx"), "https://www.kinopoisk.cx/film/123/")
 
 
 class KinopoiskClientTests(unittest.TestCase):

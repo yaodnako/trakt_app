@@ -32,27 +32,29 @@ class NotificationRefreshWorkflow:
         if not config.notifications_enabled:
             return []
         repeat_interval = timedelta(minutes=max(1, int(config.notification_repeat_minutes or 1)))
+        release_delay = timedelta(minutes=max(0, int(getattr(config, "notification_release_delay_minutes", 120) or 0)))
         client = self._auth.get_client()
         now = datetime.now(tz=UTC)
         start_date = (now - timedelta(days=self._CALENDAR_LOOKBACK_DAYS)).date().isoformat()
         entries = client.get_calendar(start_date, days=self._CALENDAR_SPAN_DAYS)
         sent: list[dict] = []
         with self._db.session() as session:
-            current_next_episode_ids = {
-                item.trakt_id: item.next_episode.trakt_id
+            current_next_episodes = {
+                item.trakt_id: item.next_episode
                 for item in self._progress_repo.list_in_progress(session, dropped_only=False)
                 if item.next_episode is not None
             }
             for entry in entries:
-                if entry.episode.first_aired is None:
-                    continue
-                expected_episode_id = current_next_episode_ids.get(entry.show_trakt_id)
-                if expected_episode_id != entry.episode.trakt_id:
+                expected_episode = current_next_episodes.get(entry.show_trakt_id)
+                if expected_episode is None or expected_episode.trakt_id != entry.episode.trakt_id:
                     self._notification_repo.delete_sent(session, entry.show_trakt_id, entry.episode.trakt_id)
                     continue
-                release_at = entry.episode.first_aired.astimezone(UTC)
+                first_aired = entry.episode.first_aired or expected_episode.first_aired
+                if first_aired is None:
+                    continue
+                release_at = first_aired.replace(tzinfo=UTC) if first_aired.tzinfo is None else first_aired.astimezone(UTC)
                 sent_log = self._notification_repo.get_log(session, entry.show_trakt_id, entry.episode.trakt_id)
-                if entry.episode.first_aired > now:
+                if release_at > now:
                     if sent_log is not None:
                         self._notification_repo.delete_sent(session, entry.show_trakt_id, entry.episode.trakt_id)
                     continue
@@ -64,6 +66,20 @@ class NotificationRefreshWorkflow:
                         self._notification_repo.delete_sent(session, entry.show_trakt_id, entry.episode.trakt_id)
                         sent_log = None
                 message = f"S{entry.episode.season:02d}E{entry.episode.number:02d} {entry.episode.title}"
+                if sent_log is None:
+                    self._notification_repo.track_released(
+                        session,
+                        show_trakt_id=entry.show_trakt_id,
+                        show_title=entry.show_title,
+                        episode_trakt_id=entry.episode.trakt_id,
+                        season=entry.episode.season,
+                        episode=entry.episode.number,
+                        message=message,
+                        released_at=release_at,
+                    )
+                    sent_log = self._notification_repo.get_log(session, entry.show_trakt_id, entry.episode.trakt_id)
+                if now < release_at + release_delay:
+                    continue
                 if sent_log is not None and sent_log.seen_at is not None:
                     seen_at = sent_log.seen_at
                     if seen_at.tzinfo is None:

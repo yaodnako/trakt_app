@@ -28,8 +28,7 @@
                 src="{{ title_group.poster_url|cached_image_url }}"
                 alt="{{ title_group.title }} poster"
                 loading="lazy"
-                data-direct-src="{{ title_group.poster_url }}"
-                onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+                onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
             >
             {% elif title_poster_status == 'checked_no_data' %}
             <div class="poster-fallback">No poster</div>
@@ -132,8 +131,13 @@
             {% set still_status = row.episode_still_status or 'unknown' %}
             {% set trakt_status = row.episode_trakt_status or 'unknown' %}
             {% set imdb_status = row.episode_imdb_status or 'unknown' %}
-            {% set preview_url = row.episode_still_url or row.backdrop_url or title_group.backdrop_url or title_group.poster_url %}
-            {% set preview_alt = (row.episode_title or (row.season|episode_label(row.episode)) or title_group.title) ~ (' still' if row.episode_still_url else (' backdrop' if row.backdrop_url or title_group.backdrop_url else ' poster')) %}
+            {% if row.type == 'show' and row.season is not none and row.episode is not none %}
+                {% set preview_url = row.episode_still_url %}
+                {% set preview_alt = (row.episode_title or (row.season|episode_label(row.episode)) or title_group.title) ~ ' still' %}
+            {% else %}
+                {% set preview_url = row.backdrop_url or title_group.backdrop_url or title_group.poster_url %}
+                {% set preview_alt = (row.title or title_group.title) ~ (' backdrop' if row.backdrop_url or title_group.backdrop_url else ' poster') %}
+            {% endif %}
             {% if title_group.title_slug and row.type == 'show' and row.season is not none and row.episode is not none %}
                 {% set trakt_episode_url = "https://trakt.tv/shows/" ~ title_group.title_slug ~ "/seasons/" ~ row.season ~ "/episodes/" ~ row.episode %}
             {% endif %}
@@ -151,8 +155,7 @@
                         src="{{ preview_url|cached_image_url }}"
                         alt="{{ preview_alt }}"
                         loading="lazy"
-                        data-direct-src="{{ preview_url }}"
-                        onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+                        onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
                     >
                 </a>
                 {% elif still_status == 'checked_no_data' or still_status == 'retryable_failure' %}
@@ -165,12 +168,27 @@
                 </div>
                 {% endif %}
                 {% if row.display_rating is not none %}
-                <div class="history-rating-badge">{{ row.display_rating }} ★</div>
+                <button
+                    type="button"
+                    class="history-rating-badge"
+                    data-rating-trigger
+                    data-rating-title-type="{{ row.type }}"
+                    data-rating-trakt-id="{{ row.title_trakt_id }}"
+                    data-rating-title="{{ row.title }}"
+                    data-rating-season="{{ row.season or '' }}"
+                    data-rating-episode="{{ row.episode or '' }}"
+                >{{ row.display_rating }} &#9733;</button>
                 {% else %}
-                <a
+                <button
+                    type="button"
                     class="history-rate-chip"
-                    href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page }}&view={{ history_view or 'episodes' }}&rate_trakt_id={{ row.title_trakt_id }}&rate_type={{ row.type }}&rate_season={{ row.season or '' }}&rate_episode={{ row.episode or '' }}&rate_title={{ row.title|urlencode }}"
-                >Rate</a>
+                    data-rating-trigger
+                    data-rating-title-type="{{ row.type }}"
+                    data-rating-trakt-id="{{ row.title_trakt_id }}"
+                    data-rating-title="{{ row.title }}"
+                    data-rating-season="{{ row.season or '' }}"
+                    data-rating-episode="{{ row.episode or '' }}"
+                >Rate</button>
                 {% endif %}
                 {% if row.type == 'show' and row.season is not none and row.episode is not none %}
                 <div class="history-episode-chip">{{ row.season|episode_label(row.episode) }}</div>

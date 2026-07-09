@@ -282,7 +282,7 @@ class ProgressSyncWorkflow:
                         status=stored.status,
                         slug=stored.slug,
                     )
-            return TitleSummary(trakt_id=trakt_id, title_type="show", title=fallback_title or f"Show {trakt_id}")
+            return TitleSummary(trakt_id=trakt_id, title_type="show", title=fallback_title)
         if persist:
             with self._db.session() as session:
                 self._titles.upsert_title(session, title)

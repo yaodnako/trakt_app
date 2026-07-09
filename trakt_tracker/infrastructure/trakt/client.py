@@ -162,7 +162,7 @@ class TraktClient:
         payload = self._request("GET", f"/shows/{trakt_id}/progress/watched", use_cache=use_cache)
         return ProgressSnapshot(
             trakt_id=trakt_id,
-            title=payload.get("title", f"Show {trakt_id}"),
+            title=str(payload.get("title", "") or ""),
             completed=payload.get("completed", 0),
             aired=payload.get("aired", 0),
             percent_completed=float(payload.get("completed", 0)) / max(payload.get("aired", 1), 1) * 100.0,
@@ -212,15 +212,36 @@ class TraktClient:
         return payload if isinstance(payload, dict) else {}
 
     def add_history_item(self, item: HistoryItemInput) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        watched_at = item.watched_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
-        if item.title_type == "movie":
-            payload["movies"] = [{"ids": {"trakt": item.trakt_id}, "watched_at": watched_at}]
-        elif item.season is not None and item.episode is not None:
-            payload["episodes"] = [{"ids": {"trakt": item.trakt_id}, "watched_at": watched_at}]
-        else:
-            payload["shows"] = [{"ids": {"trakt": item.trakt_id}, "watched_at": watched_at}]
+        return self.add_history_items([item])
+
+    def add_history_items(self, items: list[HistoryItemInput]) -> dict[str, Any]:
+        payload = self._history_items_payload(items, include_watched_at=True)
+        if not payload:
+            return {}
         return self._request("POST", "/sync/history", json=payload)
+
+    def remove_history_items(self, items: list[HistoryItemInput]) -> dict[str, Any]:
+        payload = self._history_items_payload(items, include_watched_at=False)
+        if not payload:
+            return {}
+        return self._request("POST", "/sync/history/remove", json=payload)
+
+    @staticmethod
+    def _history_items_payload(items: list[HistoryItemInput], *, include_watched_at: bool) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for item in items:
+            body: dict[str, Any] = {"ids": {"trakt": item.trakt_id}}
+            if include_watched_at:
+                if item.watched_at is None:
+                    raise ValueError("Trakt history sync requires a watched date.")
+                body["watched_at"] = item.watched_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+            if item.title_type == "movie":
+                payload.setdefault("movies", []).append(body)
+            elif item.season is not None and item.episode is not None:
+                payload.setdefault("episodes", []).append(body)
+            else:
+                payload.setdefault("shows", []).append(body)
+        return payload
 
     def set_rating(self, item: RatingInput) -> dict[str, Any]:
         if not 1 <= item.rating <= 10:

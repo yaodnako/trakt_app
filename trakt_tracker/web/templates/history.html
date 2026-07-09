@@ -49,41 +49,15 @@
 </section>
 
 {% if rate_trakt_id %}
-<section class="rate-panel">
-    <div class="rate-card panel">
-        <h3>Rate history item</h3>
-        <p class="rate-episode">
-            {{ rate_title }}
-            {% if rate_season and rate_episode %}
-            S{{ '%02d'|format(rate_season) }}E{{ '%02d'|format(rate_episode) }}
-            {% endif %}
-        </p>
-        <form method="post" action="/history/rate" class="rate-form">
-            <input type="hidden" name="type" value="{{ history_type }}">
-            <input type="hidden" name="title_filter" value="{{ history_title_filter }}">
-            <input type="hidden" name="rated_only" value="{{ '1' if history_rated_only else '0' }}">
-            <input type="hidden" name="page" value="{{ page }}">
-            <input type="hidden" name="view" value="{{ history_view }}">
-            <input type="hidden" name="trakt_id" value="{{ rate_trakt_id }}">
-            <input type="hidden" name="rating_type" value="{{ rate_type }}">
-            <input type="hidden" name="season" value="{{ rate_season or '' }}">
-            <input type="hidden" name="episode" value="{{ rate_episode or '' }}">
-            <input type="hidden" name="title_value" value="{{ rate_title }}">
-            <label>
-                <span>Rating</span>
-                <select name="rating">
-                    {% for value in range(10, 0, -1) %}
-                    <option value="{{ value }}" {% if value == 8 %}selected{% endif %}>{{ value }}/10</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <div class="rate-actions">
-                <button type="submit" class="button">Save Rating</button>
-                <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page }}&view={{ history_view }}">Cancel</a>
-            </div>
-        </form>
-    </div>
-</section>
+<div
+    data-rating-autopen
+    data-rating-title-type="{{ rate_type }}"
+    data-rating-trakt-id="{{ rate_trakt_id }}"
+    data-rating-title="{{ rate_title }}"
+    data-rating-season="{{ rate_season or '' }}"
+    data-rating-episode="{{ rate_episode or '' }}"
+    hidden
+></div>
 {% endif %}
 
 <section

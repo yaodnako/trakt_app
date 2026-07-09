@@ -47,10 +47,17 @@ from PySide6.QtWidgets import (
 )
 
 from trakt_tracker.application.services import ServiceContainer
-from trakt_tracker.config import ConfigStore, format_local_datetime, normalize_utc_offset
+from trakt_tracker.config import (
+    ConfigStore,
+    format_local_datetime,
+    normalize_kinopoisk_domain_options,
+    normalize_kinopoisk_domain_tail,
+    normalize_utc_offset,
+)
 from trakt_tracker.domain import HistoryItemInput, RatingInput, TitleSummary
 from trakt_tracker.formatting import format_compact_votes, format_progress_percent, format_rating_with_votes
 from trakt_tracker.infrastructure.cache import BinaryCache
+from trakt_tracker.infrastructure.windows_autostart import set_web_tray_autostart
 from trakt_tracker.startup_profile import StartupProfiler
 
 _DESKTOP_UI_SCALE = 1.5
@@ -153,7 +160,19 @@ class OnboardingDialog(QDialog):
         self.tmdb_token = QLineEdit(config.tmdb_read_access_token)
         self.tmdb_api_key = QLineEdit(config.tmdb_api_key)
         self.kinopoisk_api_key = QLineEdit(config.kinopoisk_api_key)
+        self.kinopoisk_domain_tail = QComboBox()
+        self.kinopoisk_domain_options = QLineEdit(config.kinopoisk_domain_options)
         self.embedded_player_checkbox = QCheckBox("Open Kinopoisk in embedded player")
+        self._rebuild_kinopoisk_domain_combo(
+            selected=config.kinopoisk_domain_tail,
+            options_raw=config.kinopoisk_domain_options,
+        )
+        self.kinopoisk_domain_options.textChanged.connect(
+            lambda _text: self._rebuild_kinopoisk_domain_combo(
+                selected=self.kinopoisk_domain_tail.currentText(),
+                options_raw=self.kinopoisk_domain_options.text(),
+            )
+        )
 
         form = QFormLayout()
         form.addRow("Client ID", self.client_id)
@@ -162,6 +181,8 @@ class OnboardingDialog(QDialog):
         form.addRow("TMDb Read Token", self.tmdb_token)
         form.addRow("TMDb API Key", self.tmdb_api_key)
         form.addRow("Kinopoisk API Key", self.kinopoisk_api_key)
+        form.addRow("Kinopoisk domain tail", self.kinopoisk_domain_tail)
+        form.addRow("Kinopoisk tails (comma)", self.kinopoisk_domain_options)
         form.addRow("", self.embedded_player_checkbox)
 
         info = QLabel(
@@ -187,10 +208,23 @@ class OnboardingDialog(QDialog):
             self.tmdb_api_key.text(),
             self.tmdb_token.text(),
             self.kinopoisk_api_key.text(),
+            self.kinopoisk_domain_tail.currentText(),
+            self.kinopoisk_domain_options.text(),
         )
         self.services.auth.config.open_in_embedded_player = self.embedded_player_checkbox.isChecked()
         ConfigStore().save(self.services.auth.config)
         super().accept()
+
+    def _rebuild_kinopoisk_domain_combo(self, *, selected: str, options_raw: str) -> None:
+        options = normalize_kinopoisk_domain_options(options_raw)
+        normalized_selected = normalize_kinopoisk_domain_tail(selected)
+        if normalized_selected not in options:
+            normalized_selected = options[0]
+        self.kinopoisk_domain_tail.blockSignals(True)
+        self.kinopoisk_domain_tail.clear()
+        self.kinopoisk_domain_tail.addItems(options)
+        self.kinopoisk_domain_tail.setCurrentText(normalized_selected)
+        self.kinopoisk_domain_tail.blockSignals(False)
 
 
 class RatingDialog(QDialog):
@@ -1401,6 +1435,8 @@ class MainWindow(QMainWindow):
         self.tmdb_token_edit = QLineEdit()
         self.tmdb_api_key_edit = QLineEdit()
         self.kinopoisk_api_key_edit = QLineEdit()
+        self.kinopoisk_domain_tail_edit = QComboBox()
+        self.kinopoisk_domain_options_edit = QLineEdit()
         self.notification_sound_path_edit = QLineEdit()
         self.embedded_player_checkbox = QCheckBox("Open Kinopoisk in embedded player")
         self.cache_ttl_edit = QSpinBox()
@@ -1409,11 +1445,14 @@ class MainWindow(QMainWindow):
         self.poll_interval_edit.setRange(5, 240)
         self.notification_repeat_edit = QSpinBox()
         self.notification_repeat_edit.setRange(1, 240)
+        self.notification_release_delay_edit = QSpinBox()
+        self.notification_release_delay_edit.setRange(0, 10080)
         self.imdb_auto_sync_interval_edit = QSpinBox()
         self.imdb_auto_sync_interval_edit.setRange(1, 10080)
         self.utc_offset_edit = QLineEdit()
         self.notifications_checkbox = QCheckBox("Enable Windows notifications")
         self.debug_mode_checkbox = QCheckBox("Enable debug toasts")
+        self.web_portal_autostart_checkbox = QCheckBox("Start web portal with Windows")
         self.imdb_status_label = QLabel()
         self._notification_audio_output = QAudioOutput(self)
         self._notification_audio_output.setVolume(1.0)
@@ -1697,7 +1736,10 @@ class MainWindow(QMainWindow):
         self.tmdb_token_edit.setMaximumWidth(420)
         self.tmdb_api_key_edit.setMaximumWidth(260)
         self.kinopoisk_api_key_edit.setMaximumWidth(320)
+        self.kinopoisk_domain_tail_edit.setMaximumWidth(140)
+        self.kinopoisk_domain_options_edit.setMaximumWidth(260)
         self.utc_offset_edit.setMaximumWidth(100)
+        self.kinopoisk_domain_options_edit.textChanged.connect(self._on_kinopoisk_domain_options_changed)
 
         def inline_row(*widgets: QWidget) -> QWidget:
             wrapper = QWidget()
@@ -1715,6 +1757,7 @@ class MainWindow(QMainWindow):
         form.addRow("TMDb Read Token", inline_row(self.tmdb_token_edit, clear_tmdb_cache_btn))
         form.addRow("TMDb API Key", inline_row(self.tmdb_api_key_edit))
         form.addRow("Kinopoisk API Key", inline_row(self.kinopoisk_api_key_edit))
+        form.addRow("Kinopoisk domain", inline_row(self.kinopoisk_domain_tail_edit, self.kinopoisk_domain_options_edit))
         form.addRow("Notification sound", inline_row(self.notification_sound_path_edit))
         form.addRow("Playback", inline_row(self.embedded_player_checkbox))
         form.addRow("UTC offset", inline_row(self.utc_offset_edit))
@@ -1722,7 +1765,9 @@ class MainWindow(QMainWindow):
         form.addRow("IMDb Auto-sync (minutes)", inline_row(self.imdb_auto_sync_interval_edit))
         form.addRow("Cache TTL (hours)", inline_row(self.cache_ttl_edit, clear_trakt_cache_btn))
         form.addRow("Notification repeat (minutes)", inline_row(self.notification_repeat_edit))
+        form.addRow("Notification release delay (minutes)", inline_row(self.notification_release_delay_edit))
         form.addRow("Polling interval (minutes)", inline_row(self.poll_interval_edit, sync_imdb_btn, self.notifications_checkbox, self.debug_mode_checkbox))
+        form.addRow("Web portal", inline_row(self.web_portal_autostart_checkbox))
 
         save_row = QHBoxLayout()
         save_btn = QPushButton("Save settings")
@@ -1747,6 +1792,13 @@ class MainWindow(QMainWindow):
         self.tmdb_token_edit.setText(config.tmdb_read_access_token)
         self.tmdb_api_key_edit.setText(config.tmdb_api_key)
         self.kinopoisk_api_key_edit.setText(config.kinopoisk_api_key)
+        self.kinopoisk_domain_options_edit.blockSignals(True)
+        self.kinopoisk_domain_options_edit.setText(config.kinopoisk_domain_options)
+        self.kinopoisk_domain_options_edit.blockSignals(False)
+        self._rebuild_settings_kinopoisk_domain_combo(
+            selected=config.kinopoisk_domain_tail,
+            options_raw=config.kinopoisk_domain_options,
+        )
         self.notification_sound_path_edit.setText(config.notification_sound_path)
         self.utc_offset_edit.setText(config.utc_offset)
         self.embedded_player_checkbox.setChecked(config.open_in_embedded_player)
@@ -1765,15 +1817,34 @@ class MainWindow(QMainWindow):
         self.cache_ttl_edit.setValue(config.cache_ttl_hours)
         self.poll_interval_edit.setValue(config.poll_interval_minutes)
         self.notification_repeat_edit.setValue(config.notification_repeat_minutes)
+        self.notification_release_delay_edit.setValue(getattr(config, "notification_release_delay_minutes", 120))
         self.imdb_auto_sync_interval_edit.setValue(config.imdb_auto_sync_interval_minutes)
         self.notifications_checkbox.setChecked(config.notifications_enabled)
         self.debug_mode_checkbox.setChecked(config.debug_mode)
+        self.web_portal_autostart_checkbox.setChecked(config.web_portal_start_with_windows)
         self.imdb_status_label.setText(self.services.sync.imdb_dataset_status())
         sort_mode = self.services.catalog.get_search_sort_mode()
         index = self.search_sort.findText(sort_mode)
         self.search_sort.blockSignals(True)
         self.search_sort.setCurrentIndex(index if index >= 0 else 0)
         self.search_sort.blockSignals(False)
+
+    def _on_kinopoisk_domain_options_changed(self) -> None:
+        self._rebuild_settings_kinopoisk_domain_combo(
+            selected=self.kinopoisk_domain_tail_edit.currentText(),
+            options_raw=self.kinopoisk_domain_options_edit.text(),
+        )
+
+    def _rebuild_settings_kinopoisk_domain_combo(self, *, selected: str, options_raw: str) -> None:
+        options = normalize_kinopoisk_domain_options(options_raw)
+        normalized_selected = normalize_kinopoisk_domain_tail(selected)
+        if normalized_selected not in options:
+            normalized_selected = options[0]
+        self.kinopoisk_domain_tail_edit.blockSignals(True)
+        self.kinopoisk_domain_tail_edit.clear()
+        self.kinopoisk_domain_tail_edit.addItems(options)
+        self.kinopoisk_domain_tail_edit.setCurrentText(normalized_selected)
+        self.kinopoisk_domain_tail_edit.blockSignals(False)
 
     def _reload_search_history(self) -> None:
         current = self.search_input.currentText().strip()
@@ -1818,16 +1889,24 @@ class MainWindow(QMainWindow):
             self.tmdb_api_key_edit.text(),
             self.tmdb_token_edit.text(),
             self.kinopoisk_api_key_edit.text(),
+            self.kinopoisk_domain_tail_edit.currentText(),
+            self.kinopoisk_domain_options_edit.text(),
         )
         config.cache_ttl_hours = self.cache_ttl_edit.value()
         config.poll_interval_minutes = self.poll_interval_edit.value()
         config.notification_repeat_minutes = self.notification_repeat_edit.value()
+        config.notification_release_delay_minutes = self.notification_release_delay_edit.value()
         config.imdb_auto_sync_interval_minutes = self.imdb_auto_sync_interval_edit.value()
         config.imdb_auto_sync_interval_hours = max(1, config.imdb_auto_sync_interval_minutes // 60 or 1)
         config.notification_sound_path = self.notification_sound_path_edit.text().strip()
         config.notifications_enabled = self.notifications_checkbox.isChecked()
         config.debug_mode = self.debug_mode_checkbox.isChecked()
         config.open_in_embedded_player = self.embedded_player_checkbox.isChecked()
+        config.web_portal_start_with_windows = self.web_portal_autostart_checkbox.isChecked()
+        try:
+            set_web_tray_autostart(config.web_portal_start_with_windows)
+        except OSError:
+            config.web_portal_start_with_windows = False
         config.utc_offset = normalize_utc_offset(self.utc_offset_edit.text(), config.utc_offset)
         ConfigStore().save(config)
         self._start_timer()
@@ -2376,7 +2455,7 @@ class MainWindow(QMainWindow):
         if current is None or not current.title.strip():
             return
         try:
-            target_url = self.services.play.resolve_kinopoisk_url(current.title, domain="net")
+            target_url = self.services.play.resolve_kinopoisk_url(current.title)
         except Exception as exc:
             QMessageBox.critical(self, "Play failed", str(exc))
             self._debug_toast(f"Play failed: {exc}")

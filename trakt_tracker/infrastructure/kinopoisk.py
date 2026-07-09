@@ -16,9 +16,17 @@ def normalize_cache_key(title: str) -> str:
 
 
 def build_film_url(film_id: int, domain: str) -> str:
-    normalized_domain = (domain or "ru").strip().casefold().strip(".")
-    if normalized_domain not in {"ru", "net"}:
-        normalized_domain = "ru"
+    normalized_domain = (domain or "net").strip().casefold().strip(".")
+    if normalized_domain.startswith("https://"):
+        normalized_domain = normalized_domain[len("https://") :]
+    elif normalized_domain.startswith("http://"):
+        normalized_domain = normalized_domain[len("http://") :]
+    if normalized_domain.startswith("www.kinopoisk."):
+        normalized_domain = normalized_domain[len("www.kinopoisk.") :]
+    elif normalized_domain.startswith("kinopoisk."):
+        normalized_domain = normalized_domain[len("kinopoisk.") :]
+    if not normalized_domain:
+        normalized_domain = "net"
     return f"https://www.kinopoisk.{normalized_domain}/film/{film_id}/"
 
 

@@ -50,14 +50,21 @@
                 </h3>
             </div>
             <div class="progress-poster-shell search-result-poster-shell">
-                <a class="progress-poster search-result-poster" href="{{ trakt_title_url }}" {% if item.slug %}target="_blank" rel="noreferrer"{% endif %}>
+                {% if item.title_type == 'show' %}
+                <button
+                    type="button"
+                    class="progress-poster search-result-poster search-watch-poster-trigger"
+                    data-search-show-watch-trigger
+                    data-watch-panel-url="/search/show/{{ item.trakt_id }}/watch-panel"
+                    data-title="{{ item.title }}"
+                    aria-label="Open episode watch panel for {{ item.title }}"
+                >
                     {% if item.poster_url %}
                     <img
                         src="{{ item.poster_url|cached_image_url }}"
                         alt="{{ item.title }} poster"
                         loading="lazy"
-                        data-direct-src="{{ item.poster_url }}"
-                        onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+                        onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
                     >
                     {% else %}
                     <div class="poster-fallback">No poster</div>
@@ -67,7 +74,80 @@
                         {{ item.title_episode_avg_rating|round(1) }} &#9733;
                     </div>
                     {% endif %}
+                </button>
+                <a
+                    class="icon-button search-card-action search-play-button"
+                    href="/search/{{ item.title_type }}/{{ item.trakt_id }}/play?title={{ item.title|urlencode }}"
+                    title="Play"
+                    aria-label="Play {{ item.title }}"
+                    target="_blank"
+                    rel="noreferrer"
+                >
+                    <img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true">
                 </a>
+                <button
+                    type="button"
+                    class="icon-button search-card-action search-watch-title-button"
+                    title="Mark watched"
+                    data-search-watch-action
+                    data-title-type="show"
+                    data-trakt-id="{{ item.trakt_id }}"
+                    data-title="{{ item.title }}"
+                    data-scope="title"
+                    aria-label="Mark {{ item.title }} watched"
+                >
+                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
+                </button>
+                {% else %}
+                <a class="progress-poster search-result-poster" href="{{ trakt_title_url }}" {% if item.slug %}target="_blank" rel="noreferrer"{% endif %}>
+                    {% if item.poster_url %}
+                    <img
+                        src="{{ item.poster_url|cached_image_url }}"
+                        alt="{{ item.title }} poster"
+                        loading="lazy"
+                        onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
+                    >
+                    {% else %}
+                    <div class="poster-fallback">No poster</div>
+                    {% endif %}
+                    {% if item.title_episode_avg_rating is defined and item.title_episode_avg_rating is not none %}
+                    <span
+                        class="history-rating-badge"
+                        role="button"
+                        tabindex="0"
+                        data-rating-trigger
+                        data-rating-title-type="movie"
+                        data-rating-trakt-id="{{ item.trakt_id }}"
+                        data-rating-title="{{ item.title }}"
+                    >
+                        {{ item.title_episode_avg_rating|round(1) }} &#9733;
+                    </span>
+                    {% endif %}
+                </a>
+                <a
+                    class="icon-button search-card-action search-play-button"
+                    href="/search/{{ item.title_type }}/{{ item.trakt_id }}/play?title={{ item.title|urlencode }}"
+                    title="Play"
+                    aria-label="Play {{ item.title }}"
+                    target="_blank"
+                    rel="noreferrer"
+                >
+                    <img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true">
+                </a>
+                <button
+                    type="button"
+                    class="icon-button search-card-action search-watch-title-button search-watch-movie-button"
+                    title="Mark watched"
+                    data-search-watch-action
+                    data-title-type="movie"
+                    data-trakt-id="{{ item.trakt_id }}"
+                    data-title="{{ item.title }}"
+                    data-scope="title"
+                    aria-label="Mark {{ item.title }} watched"
+                >
+                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
+                </button>
+                {% endif %}
                 {% if item.title_type == 'show' %}
                 <button
                     type="button"
@@ -80,22 +160,22 @@
                 >
                     <span class="poster-chip-part">
                         <img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt">
-                        <span>{% if item.trakt_rating is not none %}{{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}{% else %}Loading{% endif %}</span>
+                        <span>{% if item.trakt_rating is not none %}{{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
                     </span>
                     <span class="poster-chip-part">
                         <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="imdb">
-                        <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% else %}Loading{% endif %}</span>
+                        <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
                     </span>
                 </button>
                 {% else %}
                 <div class="poster-chip progress-title-chip search-title-ratings-chip" aria-label="Title ratings">
                     <span class="poster-chip-part">
                         <img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt">
-                        <span>{% if item.trakt_rating is not none %}{{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}{% else %}Loading{% endif %}</span>
+                        <span>{% if item.trakt_rating is not none %}{{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
                     </span>
                     <span class="poster-chip-part">
                         <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="imdb">
-                        <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% else %}Loading{% endif %}</span>
+                        <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
                     </span>
                 </div>
                 {% endif %}
@@ -139,4 +219,283 @@
     </div>
 </section>
 {% endif %}
+
+<div id="search-watch-overlay" class="search-watch-overlay" hidden aria-hidden="true">
+    <div class="search-watch-backdrop" data-search-watch-close></div>
+    <section class="search-watch-dialog" role="dialog" aria-modal="true" aria-labelledby="search-watch-title">
+        <div class="title-matrix-dialog-head">
+            <div class="title-matrix-dialog-copy">
+                <p class="title-matrix-eyebrow">Search Watch</p>
+                <h2 id="search-watch-title">Loading...</h2>
+                <p class="title-matrix-subtitle">Choose episodes to mark watched</p>
+            </div>
+            <button type="button" class="title-matrix-close" data-search-watch-close aria-label="Close search watch panel"><span class="title-matrix-close-glyph">Close</span></button>
+        </div>
+        <div id="search-watch-body" class="search-watch-body"></div>
+    </section>
+</div>
+
+<div id="search-watch-date-overlay" class="search-watch-date-overlay" hidden aria-hidden="true">
+    <div class="search-watch-backdrop" data-search-watch-date-close></div>
+    <section class="search-watch-date-dialog" role="dialog" aria-modal="true" aria-labelledby="search-watch-date-title">
+        <div class="title-matrix-dialog-head">
+            <div class="title-matrix-dialog-copy">
+                <p class="title-matrix-eyebrow">Watched Date</p>
+                <h2 id="search-watch-date-title">Mark watched</h2>
+                <p class="title-matrix-subtitle">Choose how this appears in Trakt history</p>
+            </div>
+            <button type="button" class="title-matrix-close" data-search-watch-date-close aria-label="Close watched date prompt"><span class="title-matrix-close-glyph">Close</span></button>
+        </div>
+        <div class="search-watch-date-actions">
+            <button type="button" class="button search-watch-now-action" data-search-watch-date-mode="now">Сейчас</button>
+            <label class="search-watch-custom-date">
+                <span>Своя дата</span>
+                <input type="datetime-local" data-search-watch-custom-input>
+            </label>
+            <button type="button" class="button ghost search-watch-custom-submit" data-search-watch-date-mode="custom">Отправить</button>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(() => {
+    if (!window.fetch) {
+        return;
+    }
+    const watchOverlay = document.getElementById("search-watch-overlay");
+    const watchBody = document.getElementById("search-watch-body");
+    const watchTitle = document.getElementById("search-watch-title");
+    const dateOverlay = document.getElementById("search-watch-date-overlay");
+    const customInput = dateOverlay ? dateOverlay.querySelector("[data-search-watch-custom-input]") : null;
+    let activeTrigger = null;
+    let activePanelUrl = "";
+    let pendingAction = null;
+
+    function openOverlay(node) {
+        if (!node) {
+            return;
+        }
+        node.hidden = false;
+        node.classList.add("is-open");
+        node.setAttribute("aria-hidden", "false");
+        if (window.traktSyncOverlayBodyLock) {
+            window.traktSyncOverlayBodyLock();
+        } else {
+            document.body.classList.add("has-title-matrix-overlay");
+        }
+    }
+
+    function closeOverlay(node) {
+        if (!node) {
+            return;
+        }
+        node.hidden = true;
+        node.classList.remove("is-open");
+        node.setAttribute("aria-hidden", "true");
+        if (window.traktSyncOverlayBodyLock) {
+            window.traktSyncOverlayBodyLock();
+        } else if ((!watchOverlay || watchOverlay.hidden) && (!dateOverlay || dateOverlay.hidden)) {
+            document.body.classList.remove("has-title-matrix-overlay");
+        }
+    }
+
+    function renderWatchLoading() {
+        if (!watchBody) {
+            return;
+        }
+        watchBody.innerHTML = `
+            <div class="title-matrix-loading-shell">
+                <div class="title-matrix-loading-bar is-wide"></div>
+                <div class="title-matrix-loading-grid">
+                    <span></span><span></span><span></span><span></span>
+                    <span></span><span></span><span></span><span></span>
+                </div>
+            </div>
+        `;
+    }
+
+    async function loadWatchPanel(panelUrl) {
+        const requestUrl = panelUrl || activePanelUrl;
+        if (!requestUrl || !watchBody) {
+            return;
+        }
+        renderWatchLoading();
+        try {
+            const response = await fetch(requestUrl, {
+                headers: {"Accept": "text/html"},
+                cache: "no-store",
+            });
+            watchBody.innerHTML = await response.text();
+        } catch (_error) {
+            watchBody.innerHTML = `<div class="title-matrix-empty-state"><p>Could not load episodes.</p></div>`;
+        }
+    }
+
+    function openWatchPanel(trigger) {
+        activeTrigger = trigger;
+        activePanelUrl = trigger.dataset.watchPanelUrl || "";
+        if (watchTitle) {
+            watchTitle.textContent = trigger.dataset.title || "Episodes";
+        }
+        openOverlay(watchOverlay);
+        loadWatchPanel();
+    }
+
+    function actionFromElement(target) {
+        return {
+            title_type: target.dataset.titleType || "movie",
+            trakt_id: Number(target.dataset.traktId || "0"),
+            title: target.dataset.title || "",
+            scope: target.dataset.scope || "title",
+            season: target.dataset.season || "",
+            episode: target.dataset.episode || "",
+        };
+    }
+
+    function openDatePrompt(action) {
+        pendingAction = action;
+        if (customInput) {
+            customInput.value = "";
+        }
+        openOverlay(dateOverlay);
+    }
+
+    async function submitWatch(dateMode) {
+        if (!pendingAction) {
+            return;
+        }
+        const payload = {...pendingAction, date_mode: dateMode};
+        if (dateMode === "custom") {
+            payload.watched_at = customInput ? customInput.value : "";
+        }
+        try {
+            const response = await fetch("/search/watch", {
+                method: "POST",
+                headers: {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                cache: "no-store",
+                body: JSON.stringify(payload),
+            });
+            const result = await response.json();
+            if (!response.ok || !result.ok) {
+                if (window.pushFlashToast) {
+                    window.pushFlashToast(result.message || "Watch action failed.", 5200);
+                }
+                return;
+            }
+            if (window.pushFlashToast) {
+                window.pushFlashToast(result.message || "Marked watched.", 3600);
+            }
+            const completedAction = pendingAction;
+            closeOverlay(dateOverlay);
+            pendingAction = null;
+            if (watchOverlay && !watchOverlay.hidden && activePanelUrl) {
+                loadWatchPanel();
+            }
+            if (
+                completedAction
+                && window.traktOpenRatingModal
+                && (
+                    (completedAction.title_type === "movie" && completedAction.scope === "title")
+                    || (completedAction.title_type === "show" && completedAction.scope === "episode")
+                )
+            ) {
+                window.traktOpenRatingModal({
+                    titleType: completedAction.title_type,
+                    traktId: completedAction.trakt_id,
+                    title: completedAction.title,
+                    season: completedAction.season,
+                    episode: completedAction.episode,
+                });
+            }
+        } catch (_error) {
+            if (window.pushFlashToast) {
+                window.pushFlashToast("Watch action failed.", 5200);
+            }
+        }
+    }
+
+    document.addEventListener("click", (event) => {
+        const showTrigger = event.target.closest("[data-search-show-watch-trigger]");
+        if (showTrigger) {
+            event.preventDefault();
+            openWatchPanel(showTrigger);
+            return;
+        }
+        const actionTarget = event.target.closest("[data-search-watch-action]");
+        if (actionTarget) {
+            event.preventDefault();
+            if (actionTarget.disabled) {
+                return;
+            }
+            openDatePrompt(actionFromElement(actionTarget));
+            return;
+        }
+        const seasonTab = event.target.closest("[data-search-watch-season-tab]");
+        if (seasonTab && watchBody) {
+            event.preventDefault();
+            const season = seasonTab.dataset.searchWatchSeasonTab || "";
+            const selectedPanel = watchBody.querySelector(`[data-search-watch-season-panel="${season}"]`);
+            const episodeCount = selectedPanel ? selectedPanel.querySelectorAll(".search-watch-episode-card").length : 0;
+            const imageCount = selectedPanel ? selectedPanel.querySelectorAll(".search-watch-still img").length : 0;
+            const hasPendingImages = selectedPanel && (selectedPanel.textContent.includes("Loading") || (episodeCount > 0 && imageCount === 0));
+            if (hasPendingImages && activePanelUrl) {
+                const separator = activePanelUrl.includes("?") ? "&" : "?";
+                loadWatchPanel(`${activePanelUrl}${separator}season=${encodeURIComponent(season)}`);
+                return;
+            }
+            watchBody.querySelectorAll("[data-search-watch-season-tab]").forEach((tab) => {
+                const active = tab.dataset.searchWatchSeasonTab === season;
+                tab.classList.toggle("is-active", active);
+                tab.setAttribute("aria-selected", active ? "true" : "false");
+            });
+            watchBody.querySelectorAll("[data-search-watch-season-panel]").forEach((panel) => {
+                panel.classList.toggle("is-hidden", panel.dataset.searchWatchSeasonPanel !== season);
+            });
+            watchBody.querySelectorAll("[data-search-watch-season-action]").forEach((button) => {
+                button.classList.toggle("is-hidden", button.dataset.searchWatchSeasonAction !== season);
+            });
+            return;
+        }
+        if (event.target.closest("[data-search-watch-close]")) {
+            event.preventDefault();
+            closeOverlay(watchOverlay);
+            if (activeTrigger && document.contains(activeTrigger)) {
+                activeTrigger.focus();
+            }
+            activeTrigger = null;
+            return;
+        }
+        if (event.target.closest("[data-search-watch-date-close]")) {
+            event.preventDefault();
+            closeOverlay(dateOverlay);
+            pendingAction = null;
+            return;
+        }
+        const dateModeTarget = event.target.closest("[data-search-watch-date-mode]");
+        if (dateModeTarget) {
+            event.preventDefault();
+            submitWatch(dateModeTarget.dataset.searchWatchDateMode || "none");
+        }
+    });
+
+    window.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") {
+            return;
+        }
+        if (dateOverlay && !dateOverlay.hidden) {
+            closeOverlay(dateOverlay);
+            pendingAction = null;
+            return;
+        }
+        if (watchOverlay && !watchOverlay.hidden) {
+            closeOverlay(watchOverlay);
+        }
+    });
+})();
+</script>
 {% endblock %}

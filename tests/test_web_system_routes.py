@@ -48,6 +48,7 @@ class WebSystemRouteTests(unittest.TestCase):
             start=lambda key, source, operations, fn: self.started.append((key, source)) or True,
         )
         self.app.state.image_cache = BinaryCache("images_test_routes")
+        self.app.state.image_cache.clear()
 
         def render(request: Request, template_name: str, context: dict, status_code: int = 200) -> HTMLResponse:
             base_context = {
@@ -65,9 +66,12 @@ class WebSystemRouteTests(unittest.TestCase):
         register_system_routes(self.app, render=render, template_filters=SimpleNamespace(utc_offset="+03:00"))
         self.client = TestClient(self.app)
 
-    def test_cached_image_fetches_and_returns_image_on_cache_miss(self) -> None:
-        original = routes_system._fetch_and_cache_image
-        routes_system._fetch_and_cache_image = lambda cache, target_url, timeout: (b"image-bytes", "image/jpeg")
+    def test_cached_image_returns_error_and_warms_cache_on_fetch_miss(self) -> None:
+        original_fetch = routes_system.fetch_and_cache_image
+        original_warm = routes_system.warm_image_cache_in_background
+        warmed: list[tuple[str, int]] = []
+        routes_system.fetch_and_cache_image = lambda cache, target_url, timeout: None
+        routes_system.warm_image_cache_in_background = lambda cache, target_url, timeout: warmed.append((target_url, timeout))
         try:
             response = self.client.get(
                 "/cached-image",
@@ -75,29 +79,53 @@ class WebSystemRouteTests(unittest.TestCase):
                 follow_redirects=False,
             )
         finally:
-            routes_system._fetch_and_cache_image = original
+            routes_system.fetch_and_cache_image = original_fetch
+            routes_system.warm_image_cache_in_background = original_warm
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("location", response.headers)
+        self.assertEqual(warmed, [("https://example.com/image.jpg", 5)])
+
+    def test_cached_image_returns_fetched_payload_on_cache_miss(self) -> None:
+        original_fetch = routes_system.fetch_and_cache_image
+        routes_system.fetch_and_cache_image = lambda cache, target_url, timeout: (b"\xff\xd8\xffpayload", "image/jpeg")
+        try:
+            response = self.client.get(
+                "/cached-image",
+                params={"url": "https://example.com/image.jpg"},
+                follow_redirects=False,
+            )
+        finally:
+            routes_system.fetch_and_cache_image = original_fetch
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content, b"image-bytes")
+        self.assertEqual(response.content, b"\xff\xd8\xffpayload")
         self.assertEqual(response.headers["content-type"], "image/jpeg")
 
-    def test_cached_image_redirects_when_fetch_fails(self) -> None:
-        called: list[str] = []
-        original_fetch = routes_system._fetch_and_cache_image
-        original = routes_system._warm_image_cache_in_background
-        routes_system._fetch_and_cache_image = lambda cache, target_url, timeout: None
-        routes_system._warm_image_cache_in_background = lambda cache, target_url, timeout=5: called.append(target_url)
-        try:
-            response = self.client.get(
-                "/cached-image",
-                params={"url": "https://example.com/image.jpg"},
-                follow_redirects=False,
-            )
-        finally:
-            routes_system._fetch_and_cache_image = original_fetch
-            routes_system._warm_image_cache_in_background = original
-        self.assertEqual(response.status_code, 307)
-        self.assertEqual(response.headers["location"], "https://example.com/image.jpg")
-        self.assertEqual(called, ["https://example.com/image.jpg"])
+    def test_cached_image_returns_cached_payload_with_no_store_header(self) -> None:
+        target_url = "https://example.com/cached.png"
+        self.app.state.image_cache.set_bytes(target_url, b"\x89PNG\r\n\x1a\npayload", suffix=".png")
+        response = self.client.get(
+            "/cached-image",
+            params={"url": target_url},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"\x89PNG\r\n\x1a\npayload")
+        self.assertEqual(response.headers["content-type"], "image/png")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_cached_image_detects_webp_payload_for_jpg_url(self) -> None:
+        target_url = "https://example.com/image.jpg"
+        webp_payload = b"RIFF1234WEBPpayload"
+        self.app.state.image_cache.set_bytes(target_url, webp_payload, suffix=".jpg")
+        response = self.client.get(
+            "/cached-image",
+            params={"url": target_url},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, webp_payload)
+        self.assertEqual(response.headers["content-type"], "image/webp")
+        self.assertEqual(response.headers["cache-control"], "no-store")
 
     def test_settings_sync_repair_starts_background_task(self) -> None:
         response = self.client.post("/settings/sync-repair", follow_redirects=False)

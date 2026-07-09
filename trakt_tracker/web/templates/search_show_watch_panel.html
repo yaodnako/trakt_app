@@ -1,0 +1,109 @@
+{% if panel and panel.seasons %}
+<div class="search-watch-panel" data-search-watch-panel data-search-watch-title="{{ panel.title }}" data-search-watch-trakt-id="{{ panel.trakt_id }}">
+    <div class="search-watch-seasons" role="tablist" aria-label="Seasons">
+        {% for season in panel.seasons %}
+        <button
+            type="button"
+            class="search-watch-season-tab{% if season.is_default %} is-active{% endif %}"
+            data-search-watch-season-tab="{{ season.season }}"
+            role="tab"
+            aria-selected="{{ 'true' if season.is_default else 'false' }}"
+        >
+            {{ season.label }}
+            <span>{{ season.watched_count }}/{{ season.released_count }}</span>
+        </button>
+        {% endfor %}
+    </div>
+    <div class="search-watch-bulk-actions">
+        {% for season in panel.seasons %}
+        <button
+            type="button"
+            class="button ghost search-watch-season-action{% if not season.is_default %} is-hidden{% endif %}"
+            data-search-watch-action
+            data-title-type="show"
+            data-trakt-id="{{ panel.trakt_id }}"
+            data-title="{{ panel.title }}"
+            data-scope="season"
+            data-season="{{ season.season }}"
+            data-search-watch-season-action="{{ season.season }}"
+            {% if season.released_count == 0 %}disabled{% endif %}
+        >
+            Mark season
+        </button>
+        {% endfor %}
+        <button
+            type="button"
+            class="button search-watch-title-action"
+            data-search-watch-action
+            data-title-type="show"
+            data-trakt-id="{{ panel.trakt_id }}"
+            data-title="{{ panel.title }}"
+            data-scope="title"
+        >
+            Mark series
+        </button>
+    </div>
+    {% for season in panel.seasons %}
+    <section class="search-watch-episode-grid{% if not season.is_default %} is-hidden{% endif %}" data-search-watch-season-panel="{{ season.season }}">
+        {% for episode in season.episodes %}
+        <article class="search-watch-episode-card{% if episode.is_watched %} is-watched{% endif %}{% if not episode.is_released %} is-unreleased{% endif %}">
+            <div class="search-watch-still">
+                {% if episode.still_url %}
+                <img
+                    src="{{ episode.still_url|cached_image_url }}"
+                    alt="{{ episode.title }} still"
+                    loading="eager"
+                    onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
+                >
+                {% elif episode.still_status == 'unknown' %}
+                <span>Loading</span>
+                {% else %}
+                <span>No preview</span>
+                {% endif %}
+                <span class="search-watch-episode-label">S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}</span>
+                {% if episode.is_watched %}
+                <span class="search-watch-state">Watched</span>
+                {% endif %}
+            </div>
+            <div class="search-watch-episode-copy">
+                <h4>{{ episode.title }}</h4>
+                <div class="poster-chip search-watch-episode-ratings">
+                    <span class="poster-chip-part">
+                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt">
+                        <span>{% if episode.trakt_rating is not none %}{{ episode.trakt_rating|rating_with_votes(episode.trakt_votes) }}{% else %}n/a{% endif %}</span>
+                    </span>
+                    <span class="poster-chip-part">
+                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="imdb">
+                        <span>{% if episode.imdb_rating is not none %}{{ episode.imdb_rating|rating_with_votes(episode.imdb_votes) }}{% else %}n/a{% endif %}</span>
+                    </span>
+                </div>
+                <button
+                    type="button"
+                    class="icon-button search-watch-episode-action"
+                    title="Mark episode watched"
+                    data-search-watch-action
+                    data-title-type="show"
+                    data-trakt-id="{{ panel.trakt_id }}"
+                    data-title="{{ panel.title }}"
+                    data-scope="episode"
+                    data-season="{{ episode.season }}"
+                    data-episode="{{ episode.number }}"
+                    {% if episode.is_watched or not episode.is_released %}disabled{% endif %}
+                >
+                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
+                </button>
+            </div>
+        </article>
+        {% endfor %}
+    </section>
+    {% endfor %}
+</div>
+{% elif error_message %}
+<div class="title-matrix-empty-state">
+    <p>{{ error_message }}</p>
+</div>
+{% else %}
+<div class="title-matrix-empty-state">
+    <p>No episodes found for this show.</p>
+</div>
+{% endif %}

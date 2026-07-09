@@ -27,8 +27,7 @@
                 src="{{ title_card.poster_url|cached_image_url }}"
                 alt="{{ title_card.title }} poster"
                 loading="lazy"
-                data-direct-src="{{ title_card.poster_url }}"
-                onerror="if (!this.dataset.fallbackApplied) { this.dataset.fallbackApplied = '1'; this.src = this.dataset.directSrc; }"
+                onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
             >
             {% elif title_poster_status == 'checked_no_data' %}
             <div class="poster-fallback">No poster</div>
@@ -36,9 +35,19 @@
             <div class="poster-fallback poster-loading">Loading</div>
             {% endif %}
             {% if title_card.my_rating is not none %}
-            <div class="history-rating-badge">
+            <span
+                class="history-rating-badge"
+                {% if title_card.type == 'movie' %}
+                role="button"
+                tabindex="0"
+                data-rating-trigger
+                data-rating-title-type="movie"
+                data-rating-trakt-id="{{ title_card.title_trakt_id }}"
+                data-rating-title="{{ title_card.title }}"
+                {% endif %}
+            >
                 {% if title_card.type == 'show' %}{{ title_card.my_rating|round(1) }}{% else %}{{ title_card.my_rating|int }}{% endif %} &#9733;
-            </div>
+            </span>
             {% endif %}
         </a>
         {% if title_card.type == 'show' %}

@@ -1,10 +1,18 @@
 <article
-    class="progress-card{% if progress_is_new %} is-released js-new-card{% endif %}"
+    class="progress-card{% if progress_is_new %} is-released{% endif %}"
     data-progress-card-key="progress:{{ progress_item.trakt_id }}"
-    {% if progress_is_new %}data-seen-form="seen-form-{{ progress_item.trakt_id }}"{% endif %}
 >
     {% if progress_is_new %}
     <div class="progress-new-badge">New</div>
+    <form method="post" action="/progress/{{ progress_item.trakt_id }}/seen" class="progress-seen-form">
+        <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+        <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+        <input type="hidden" name="min_year" value="{{ min_year or '' }}">
+        <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+        <button type="submit" class="progress-seen-button" title="Mark notification seen" aria-label="Mark notification seen">
+            <img src="{{ request.url_for('static', path='eye.svg') }}" alt="" aria-hidden="true">
+        </button>
+    </form>
     {% endif %}
     {% set trakt_title_url = "" %}
     {% if progress_item.slug %}
@@ -73,14 +81,6 @@
             </div>
         </div>
         <div class="progress-body">
-            {% if progress_is_new %}
-            <form method="post" action="/progress/{{ progress_item.trakt_id }}/seen" id="seen-form-{{ progress_item.trakt_id }}" class="visually-hidden">
-                <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
-                <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
-                <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-                <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
-            </form>
-            {% endif %}
             {% if progress_item.next_episode %}
             <div class="progress-episode-block">
                 <div class="progress-episode-head">

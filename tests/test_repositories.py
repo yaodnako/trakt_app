@@ -66,6 +66,60 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(rows[0].title, "Sample Show")
         self.assertEqual(rows[0].next_episode.number, 9)
 
+    def test_progress_repository_displays_cached_title_when_progress_title_is_fallback(self) -> None:
+        titles = TitleRepository()
+        repo = ProgressRepository()
+        with self.db.session() as session:
+            titles.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=135985,
+                    title_type="show",
+                    title="That Time I Got Reincarnated as a Slime",
+                ),
+            )
+            repo.upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=135985,
+                    title="Show 135985",
+                    completed=78,
+                    aired=79,
+                    percent_completed=98.7,
+                    next_episode=EpisodeSummary(trakt_id=700, season=4, number=7, title="The Mastermind's Identity"),
+                ),
+            )
+            rows = repo.list_in_progress(session)
+        self.assertEqual(rows[0].title, "That Time I Got Reincarnated as a Slime")
+
+    def test_progress_repository_does_not_overwrite_real_title_with_fallback(self) -> None:
+        repo = ProgressRepository()
+        with self.db.session() as session:
+            repo.upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=135985,
+                    title="That Time I Got Reincarnated as a Slime",
+                    completed=77,
+                    aired=79,
+                    percent_completed=97.4,
+                    next_episode=EpisodeSummary(trakt_id=699, season=4, number=6, title="Previous"),
+                ),
+            )
+            repo.upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=135985,
+                    title="Show 135985",
+                    completed=78,
+                    aired=79,
+                    percent_completed=98.7,
+                    next_episode=EpisodeSummary(trakt_id=700, season=4, number=7, title="The Mastermind's Identity"),
+                ),
+            )
+            rows = repo.list_in_progress(session)
+        self.assertEqual(rows[0].title, "That Time I Got Reincarnated as a Slime")
+
     def test_notification_repository_prevents_duplicates(self) -> None:
         repo = NotificationRepository()
         with self.db.session() as session:

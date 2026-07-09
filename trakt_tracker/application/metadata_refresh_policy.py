@@ -33,6 +33,7 @@ RATINGS_EMPTY_REFRESH_SECONDS = 21600
 RATINGS_RETRYABLE_FAILURE_BACKOFF_SECONDS = 1800
 ARTWORK_EMPTY_REFRESH_SECONDS = 604800
 ARTWORK_RETRYABLE_FAILURE_BACKOFF_SECONDS = 21600
+STILL_VISIBLE_RETRYABLE_FAILURE_BACKOFF_SECONDS = 300
 STILL_VISIBLE_EMPTY_REFRESH_SECONDS = 300
 STILL_RECENT_EMPTY_REFRESH_SECONDS = 3600
 STILL_RECENT_RELEASE_WINDOW_SECONDS = 1209600
@@ -339,7 +340,7 @@ def _episode_ratings_refresh_due(
 
 def _episode_ratings_foreground_window_allows(first_aired: datetime | None, now: datetime) -> bool:
     if first_aired is None:
-        return True
+        return False
     if first_aired > now:
         return False
     return now - first_aired <= timedelta(seconds=EPISODE_RATINGS_FOREGROUND_WINDOW_SECONDS)
@@ -398,6 +399,16 @@ def _artwork_refresh_due(
     if status == ENRICH_STATUS_UNKNOWN:
         return MetadataRefreshDecision(asset_kind, trigger, True, "status_unknown")
     if status == ENRICH_STATUS_RETRYABLE_FAILURE:
+        if asset_kind == ASSET_KIND_STILL and trigger == TRIGGER_VIEWPORT and not has_value:
+            return _timed_refresh_decision(
+                asset_kind,
+                trigger,
+                last_checked_at,
+                timedelta(seconds=STILL_VISIBLE_RETRYABLE_FAILURE_BACKOFF_SECONDS),
+                now,
+                "retryable_failure_visible_ttl_elapsed",
+                "retryable_failure_visible_ttl_active",
+            )
         return _timed_refresh_decision(
             asset_kind,
             trigger,

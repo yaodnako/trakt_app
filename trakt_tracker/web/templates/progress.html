@@ -54,34 +54,15 @@
 </section>
 
 {% if rate_trakt_id %}
-<section class="rate-panel">
-    <div class="rate-card panel">
-        <h3>Rate just watched episode</h3>
-        <p class="rate-episode">{{ rate_title }} S{{ '%02d'|format(rate_season or 0) }}E{{ '%02d'|format(rate_episode or 0) }}</p>
-        <form method="post" action="/progress/rate" class="rate-form">
-            <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
-            <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
-            <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-            <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
-            <input type="hidden" name="trakt_id" value="{{ rate_trakt_id }}">
-            <input type="hidden" name="season" value="{{ rate_season }}">
-            <input type="hidden" name="episode" value="{{ rate_episode }}">
-            <input type="hidden" name="title" value="{{ rate_title }}">
-            <label>
-                <span>Rating</span>
-                <select name="rating">
-                    {% for value in range(10, 0, -1) %}
-                    <option value="{{ value }}" {% if value == 8 %}selected{% endif %}>{{ value }}/10</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <div class="rate-actions">
-                <button type="submit" class="button">Save Rating</button>
-                <button type="submit" name="skip_rating" value="1" class="button ghost">Skip</button>
-            </div>
-        </form>
-    </div>
-</section>
+<div
+    data-rating-autopen
+    data-rating-title-type="show"
+    data-rating-trakt-id="{{ rate_trakt_id }}"
+    data-rating-title="{{ rate_title }}"
+    data-rating-season="{{ rate_season or '' }}"
+    data-rating-episode="{{ rate_episode or '' }}"
+    hidden
+></div>
 {% endif %}
 
 <div id="progress-sections-root">
@@ -107,21 +88,6 @@
                 link.addEventListener("click", () => window.pushFlashToast("Play: resolving target URL…", 2600));
             });
         }
-        document.querySelectorAll(".js-new-card").forEach((card) => {
-            card.addEventListener("click", (event) => {
-                if (event.target.closest(".progress-actions, a, button, input, select, textarea, label")) {
-                    return;
-                }
-                const formId = card.getAttribute("data-seen-form");
-                if (!formId) {
-                    return;
-                }
-                const form = document.getElementById(formId);
-                if (form) {
-                    form.requestSubmit();
-                }
-            });
-        });
     })();
 </script>
 <script>
@@ -240,25 +206,6 @@
             if (window.traktBindPlayPromptLinks) {
                 window.traktBindPlayPromptLinks();
             }
-            document.querySelectorAll(".js-new-card").forEach((card) => {
-                if (card.dataset.boundSeenCardRefresh) {
-                    return;
-                }
-                card.dataset.boundSeenCardRefresh = "1";
-                card.addEventListener("click", (event) => {
-                    if (event.target.closest(".progress-actions, a, button, input, select, textarea, label")) {
-                        return;
-                    }
-                    const formId = card.getAttribute("data-seen-form");
-                    if (!formId) {
-                        return;
-                    }
-                    const form = document.getElementById(formId);
-                    if (form) {
-                        form.requestSubmit();
-                    }
-                });
-            });
         }
 
         startPolling() {

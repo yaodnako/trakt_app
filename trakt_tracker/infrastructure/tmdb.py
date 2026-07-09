@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 from typing import Any
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
 import httpx
 
@@ -99,16 +106,82 @@ class TMDbClient:
         cached = self._cache.get_json(cache_key, self._cache_ttl_hours)
         if cached is not None:
             return cached
-        response = self._client.request(method, f"{TMDB_API_URL}{path}", headers=headers, params=params)
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response = self._client.request(method, f"{TMDB_API_URL}{path}", headers=headers, params=params)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise
+            payload = self._request_with_curl(method, path, headers=headers, params=params)
+        except (httpx.HTTPError, ValueError):
+            payload = self._request_with_curl(method, path, headers=headers, params=params)
         self._cache.set_json(cache_key, payload)
         return payload
+
+    def _request_with_curl(self, method: str, path: str, *, headers: dict[str, str], params: dict[str, Any]) -> Any:
+        query = urlencode(params)
+        url = f"{TMDB_API_URL}{path}"
+        if query:
+            url = f"{url}?{query}"
+        command = [
+            "curl",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--ipv4",
+            "--doh-url",
+            "https://cloudflare-dns.com/dns-query",
+            "--max-time",
+            str(int(self._client.timeout.connect or 20.0)),
+            "--request",
+            method.upper(),
+            "--header",
+            "Accept: application/json",
+        ]
+        authorization = headers.get("Authorization")
+        if authorization:
+            command.extend(["--header", f"Authorization: {authorization}"])
+        command.append(url)
+        startupinfo = None
+        creationflags = 0
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = subprocess.CREATE_NO_WINDOW
+        try:
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=(self._client.timeout.connect or 20.0) + 2.0,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+            return json.loads(completed.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return self._request_with_urllib(method, path, headers=headers, params=params)
+
+    def _request_with_urllib(self, method: str, path: str, *, headers: dict[str, str], params: dict[str, Any]) -> Any:
+        query = urlencode(params)
+        url = f"{TMDB_API_URL}{path}"
+        if query:
+            url = f"{url}?{query}"
+        request = UrlRequest(url, headers=headers, method=method.upper())
+        with urlopen(request, timeout=self._client.timeout.connect or 20.0) as response:
+            return json.loads(response.read().decode("utf-8"))
 
     def _request_optional(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> Any | None:
         try:
             return self._request(method, path, params=params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
+                return None
+            raise
+        except HTTPError as exc:
+            if exc.code == 404:
                 return None
             raise

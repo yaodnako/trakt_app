@@ -122,6 +122,7 @@ class HistoryEvent(Base):
     title_type: Mapped[str] = mapped_column(String(16), index=True)
     action: Mapped[str] = mapped_column(String(32))
     watched_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    watched_at_known: Mapped[bool] = mapped_column(Boolean, default=True)
     season: Mapped[int | None] = mapped_column(Integer, nullable=True)
     episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)

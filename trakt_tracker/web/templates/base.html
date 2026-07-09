@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ page_title }} | Trakt Tracker Web</title>
     <link rel="icon" type="image/svg+xml" href="{{ request.url_for('static', path='trakt_logo_bw.svg') }}">
-    <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}">
+    <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}?v={{ style_css_version }}">
 </head>
 <body>
     <div class="shell">
@@ -58,6 +58,33 @@
         </section>
     </div>
     <div id="title-matrix-tooltip" class="title-matrix-tooltip" hidden></div>
+    <div id="trakt-rating-overlay" class="trakt-rating-overlay" hidden aria-hidden="true">
+        <div class="trakt-rating-backdrop" data-rating-close></div>
+        <section class="trakt-rating-dialog" role="dialog" aria-modal="true" aria-labelledby="trakt-rating-title">
+            <div class="title-matrix-dialog-head">
+                <div class="title-matrix-dialog-copy">
+                    <p class="title-matrix-eyebrow">Rating</p>
+                    <h2 id="trakt-rating-title">Rate title</h2>
+                    <p id="trakt-rating-subtitle" class="title-matrix-subtitle">Choose a score</p>
+                </div>
+                <button type="button" class="title-matrix-close" data-rating-close aria-label="Close rating dialog"><span class="title-matrix-close-glyph">&times;</span></button>
+            </div>
+            <form id="trakt-rating-form" class="trakt-rating-form">
+                <div class="trakt-rating-meter" aria-live="polite"><span data-rating-value>0</span> / 10</div>
+                <div class="trakt-rating-stars" role="radiogroup" aria-label="Rating out of 10">
+                    {% for value in range(1, 11) %}
+                    <button type="button" class="trakt-rating-star" data-rating-star="{{ value }}" role="radio" aria-checked="false" aria-label="{{ value }} out of 10">&#9733;</button>
+                    {% endfor %}
+                </div>
+                <div class="trakt-rating-numbers" aria-hidden="true">
+                    {% for value in range(1, 11) %}
+                    <span>{{ value }}</span>
+                    {% endfor %}
+                </div>
+                <p id="trakt-rating-error" class="trakt-rating-error" hidden></p>
+            </form>
+        </section>
+    </div>
     <script>
         (() => {
             if (!window.fetch) {
@@ -65,6 +92,7 @@
             }
 
             const DEBUG_MODE = {{ 'true' if debug_mode else 'false' }};
+            const NOTIFICATIONS_BROWSER_POLL_ENABLED = {{ 'true' if notifications_browser_poll_enabled|default(true) else 'false' }};
             const NOTIFICATION_SOUND_URL = {{ notification_sound_url|tojson }};
             const PLAY_PROMPT_STORAGE_KEY = "trakt-progress-play-prompts";
             let lastDebugSeq = {{ debug_initial_seq }};
@@ -88,6 +116,21 @@
             }
             window.pushFlashToast = pushFlashToast;
             window.traktDebugMode = DEBUG_MODE;
+
+            function syncOverlayBodyLock() {
+                const overlaySelectors = [
+                    "#title-matrix-overlay",
+                    "#trakt-rating-overlay",
+                    "#search-watch-overlay",
+                    "#search-watch-date-overlay",
+                ];
+                const hasOpenOverlay = overlaySelectors.some((selector) => {
+                    const node = document.querySelector(selector);
+                    return Boolean(node && !node.hidden);
+                });
+                document.body.classList.toggle("has-title-matrix-overlay", hasOpenOverlay);
+            }
+            window.traktSyncOverlayBodyLock = syncOverlayBodyLock;
 
             function playFallbackTone() {
                 try {
@@ -341,11 +384,189 @@
             const titleMatrixTitle = document.getElementById("title-matrix-title");
             const titleMatrixSubtitle = titleMatrixOverlay ? titleMatrixOverlay.querySelector(".title-matrix-subtitle") : null;
             const titleMatrixTooltip = document.getElementById("title-matrix-tooltip");
+            const ratingOverlay = document.getElementById("trakt-rating-overlay");
+            const ratingForm = document.getElementById("trakt-rating-form");
+            const ratingTitle = document.getElementById("trakt-rating-title");
+            const ratingSubtitle = document.getElementById("trakt-rating-subtitle");
+            const ratingValueNode = ratingOverlay ? ratingOverlay.querySelector("[data-rating-value]") : null;
+            const ratingError = document.getElementById("trakt-rating-error");
+            const ratingStars = ratingOverlay ? Array.from(ratingOverlay.querySelectorAll("[data-rating-star]")) : [];
             let titleMatrixTrigger = null;
             let titleMatrixUrl = "";
             let titleMatrixProvider = "imdb";
             let titleMatrixRequest = null;
             const titleMatrixCache = new Map();
+            let ratingTrigger = null;
+            let ratingContext = null;
+            let selectedRating = 0;
+            let hoverRating = 0;
+            let ratingSaving = false;
+
+            function ratingLabel(context) {
+                if (!context) {
+                    return "";
+                }
+                const season = context.season ? Number(context.season) : 0;
+                const episode = context.episode ? Number(context.episode) : 0;
+                if (season && episode) {
+                    return `S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`;
+                }
+                return "";
+            }
+
+            function updateRatingStars(value) {
+                const activeValue = Number(value || 0);
+                for (const star of ratingStars) {
+                    const starValue = Number(star.dataset.ratingStar || "0");
+                    const active = starValue <= activeValue;
+                    star.classList.toggle("is-filled", active);
+                    star.setAttribute("aria-checked", selectedRating === starValue ? "true" : "false");
+                }
+                if (ratingValueNode) {
+                    ratingValueNode.textContent = String(activeValue || selectedRating || 0);
+                }
+            }
+
+            function closeRatingModal({restoreFocus = true} = {}) {
+                if (!ratingOverlay) {
+                    return;
+                }
+                ratingOverlay.hidden = true;
+                ratingOverlay.classList.remove("is-open");
+                ratingOverlay.setAttribute("aria-hidden", "true");
+                if (ratingError) {
+                    ratingError.hidden = true;
+                    ratingError.textContent = "";
+                }
+                syncOverlayBodyLock();
+                if (restoreFocus && ratingTrigger instanceof HTMLElement && document.contains(ratingTrigger)) {
+                    ratingTrigger.focus();
+                }
+                ratingTrigger = null;
+                ratingContext = null;
+                selectedRating = 0;
+                hoverRating = 0;
+                ratingSaving = false;
+                updateRatingStars(0);
+            }
+
+            function openRatingModal(context, trigger = null) {
+                if (!ratingOverlay || !context) {
+                    return;
+                }
+                ratingTrigger = trigger;
+                ratingContext = {
+                    titleType: context.titleType || context.title_type || context.ratingTitleType || "movie",
+                    traktId: context.traktId || context.trakt_id || context.ratingTraktId || "",
+                    title: context.title || context.ratingTitle || "",
+                    season: context.season || context.ratingSeason || "",
+                    episode: context.episode || context.ratingEpisode || "",
+                };
+                selectedRating = 0;
+                hoverRating = 0;
+                ratingSaving = false;
+                if (ratingTitle) {
+                    ratingTitle.textContent = ratingContext.title ? `Rate ${ratingContext.title}` : "Rate title";
+                }
+                if (ratingSubtitle) {
+                    const label = ratingLabel(ratingContext);
+                    ratingSubtitle.textContent = label ? `Choose a score for ${label}` : "Choose a score";
+                }
+                if (ratingError) {
+                    ratingError.hidden = true;
+                    ratingError.textContent = "";
+                }
+                updateRatingStars(0);
+                ratingOverlay.hidden = false;
+                ratingOverlay.classList.add("is-open");
+                ratingOverlay.setAttribute("aria-hidden", "false");
+                syncOverlayBodyLock();
+                const firstStar = ratingStars[0];
+                if (firstStar) {
+                    firstStar.focus();
+                }
+            }
+            window.traktOpenRatingModal = openRatingModal;
+
+            function openRatingModalFromTrigger(trigger) {
+                openRatingModal(
+                    {
+                        titleType: trigger.dataset.ratingTitleType || "movie",
+                        traktId: trigger.dataset.ratingTraktId || "",
+                        title: trigger.dataset.ratingTitle || "",
+                        season: trigger.dataset.ratingSeason || "",
+                        episode: trigger.dataset.ratingEpisode || "",
+                    },
+                    trigger
+                );
+            }
+
+            function applySavedRatingToTrigger(rating) {
+                if (!(ratingTrigger instanceof HTMLElement)) {
+                    return;
+                }
+                if (ratingTrigger.classList.contains("history-rate-chip")) {
+                    const badge = document.createElement("button");
+                    badge.type = "button";
+                    badge.className = "history-rating-badge";
+                    badge.setAttribute("data-rating-trigger", "");
+                    badge.dataset.ratingTitleType = ratingContext.titleType;
+                    badge.dataset.ratingTraktId = ratingContext.traktId;
+                    badge.dataset.ratingTitle = ratingContext.title;
+                    badge.dataset.ratingSeason = ratingContext.season;
+                    badge.dataset.ratingEpisode = ratingContext.episode;
+                    badge.textContent = `${rating} \u2605`;
+                    ratingTrigger.replaceWith(badge);
+                    return;
+                }
+                if (ratingTrigger.classList.contains("history-rating-badge")) {
+                    ratingTrigger.textContent = `${rating} \u2605`;
+                }
+            }
+
+            async function submitRating() {
+                if (!ratingContext || selectedRating < 1 || ratingSaving) {
+                    return;
+                }
+                ratingSaving = true;
+                if (ratingError) {
+                    ratingError.hidden = true;
+                    ratingError.textContent = "";
+                }
+                try {
+                    const response = await fetch("/ratings", {
+                        method: "POST",
+                        headers: {
+                            "Accept": "application/json",
+                            "Content-Type": "application/json",
+                        },
+                        cache: "no-store",
+                        body: JSON.stringify({
+                            title_type: ratingContext.titleType,
+                            trakt_id: ratingContext.traktId,
+                            title: ratingContext.title,
+                            season: ratingContext.season,
+                            episode: ratingContext.episode,
+                            rating: selectedRating,
+                        }),
+                    });
+                    const payload = await response.json();
+                    if (!response.ok || !payload.ok) {
+                        throw new Error(payload && payload.message ? payload.message : "Rating failed.");
+                    }
+                    applySavedRatingToTrigger(selectedRating);
+                    closeRatingModal({restoreFocus: false});
+                    if (window.pushFlashToast) {
+                        window.pushFlashToast(payload.message || "Rating saved.", 3200);
+                    }
+                } catch (error) {
+                    if (ratingError) {
+                        ratingError.textContent = error && error.message ? error.message : "Rating failed.";
+                        ratingError.hidden = false;
+                    }
+                    ratingSaving = false;
+                }
+            }
 
             function renderTitleMatrixLoading() {
                 if (!titleMatrixBody) {
@@ -377,7 +598,7 @@
                 titleMatrixOverlay.hidden = true;
                 titleMatrixOverlay.classList.remove("is-open");
                 titleMatrixOverlay.setAttribute("aria-hidden", "true");
-                document.body.classList.remove("has-title-matrix-overlay");
+                syncOverlayBodyLock();
                 if (restoreFocus && titleMatrixTrigger instanceof HTMLElement && document.contains(titleMatrixTrigger)) {
                     titleMatrixTrigger.focus();
                 }
@@ -686,7 +907,7 @@
                 titleMatrixOverlay.hidden = false;
                 titleMatrixOverlay.classList.add("is-open");
                 titleMatrixOverlay.setAttribute("aria-hidden", "false");
-                document.body.classList.add("has-title-matrix-overlay");
+                syncOverlayBodyLock();
                 renderTitleMatrixLoading();
                 loadTitleMatrixOverlay({provider: titleMatrixProvider});
             }
@@ -754,11 +975,39 @@
             window.addEventListener("pointerdown", unlockAudio, {passive: true});
             window.addEventListener("keydown", unlockAudio, {passive: true});
             window.addEventListener("keydown", (event) => {
-                if (event.key === "Escape" && titleMatrixOverlay && !titleMatrixOverlay.hidden) {
+                const ratingKeyTarget = event.target.closest("[data-rating-trigger]");
+                if (ratingKeyTarget && (event.key === "Enter" || event.key === " ")) {
+                    event.preventDefault();
+                    openRatingModalFromTrigger(ratingKeyTarget);
+                    return;
+                }
+                if (event.key !== "Escape") {
+                    return;
+                }
+                if (ratingOverlay && !ratingOverlay.hidden) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    closeRatingModal();
+                    return;
+                }
+                if (titleMatrixOverlay && !titleMatrixOverlay.hidden) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
                     closeTitleMatrixOverlay();
                 }
             });
             document.addEventListener("click", (event) => {
+                const ratingTarget = event.target.closest("[data-rating-trigger]");
+                if (ratingTarget) {
+                    event.preventDefault();
+                    openRatingModalFromTrigger(ratingTarget);
+                    return;
+                }
+                if (event.target.closest("[data-rating-close]")) {
+                    event.preventDefault();
+                    closeRatingModal();
+                    return;
+                }
                 const trigger = event.target.closest("[data-title-matrix-trigger]");
                 if (trigger) {
                     event.preventDefault();
@@ -843,13 +1092,42 @@
                 syncTitleMatrixHorizontalScroll(fragmentRoot);
                 hideTitleMatrixTooltip();
             });
+            if (ratingForm) {
+                ratingForm.addEventListener("submit", (event) => {
+                    event.preventDefault();
+                    submitRating();
+                });
+            }
+            for (const star of ratingStars) {
+                const value = Number(star.dataset.ratingStar || "0");
+                star.addEventListener("mouseenter", () => {
+                    hoverRating = value;
+                    updateRatingStars(hoverRating);
+                });
+                star.addEventListener("focus", () => {
+                    hoverRating = value;
+                    updateRatingStars(hoverRating);
+                });
+                star.addEventListener("mouseleave", () => {
+                    hoverRating = 0;
+                    updateRatingStars(selectedRating);
+                });
+                star.addEventListener("click", () => {
+                    selectedRating = value;
+                    updateRatingStars(selectedRating);
+                    submitRating();
+                });
+            }
 
             setupFlashToast();
             bindPlayPromptLinks();
             renderPlayPrompts();
-            pollNotifications();
+            document.querySelectorAll("[data-rating-autopen]").forEach((node) => openRatingModalFromTrigger(node));
+            if (NOTIFICATIONS_BROWSER_POLL_ENABLED) {
+                pollNotifications();
+                setInterval(pollNotifications, 60000);
+            }
             pollDebugEvents();
-            setInterval(pollNotifications, 60000);
             setInterval(pollDebugEvents, 2500);
         })();
     </script>

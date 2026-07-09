@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -21,6 +22,7 @@ from trakt_tracker.startup_profile import StartupProfiler
 from trakt_tracker.web.routes_catalog import register_catalog_routes
 from trakt_tracker.web.routes_history import register_history_routes
 from trakt_tracker.web.routes_progress import register_progress_routes
+from trakt_tracker.web.routes_ratings import register_rating_routes
 from trakt_tracker.web.routes_system import register_system_routes
 from trakt_tracker.web.viewmodels import (
     progress_effective_aired,
@@ -163,6 +165,34 @@ class _TraktEpisodeRatingsRefreshLoop:
             self._stop_event.wait(self._poll_interval_seconds)
 
 
+class _ArtworkCacheWarmLoop:
+    def __init__(self, app: FastAPI, *, poll_interval_seconds: float = 60.0, batch_size: int = 80) -> None:
+        self._app = app
+        self._poll_interval_seconds = max(30.0, float(poll_interval_seconds))
+        self._batch_size = max(1, int(batch_size))
+        self._stop_event = Event()
+        self._thread = Thread(target=self._run, name="web-artwork-cache-warm", daemon=True)
+
+    def start(self) -> None:
+        if not self._thread.is_alive():
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                services: ServiceContainer = self._app.state.services
+                bg_tasks = self._app.state.bg_tasks
+                if not bg_tasks.has_running_prefix("settings_full_sync", "settings_backfill_sync", "settings_timeout_sync", "settings_repair_sync"):
+                    services.sync.warm_missing_artwork_cache(limit=self._batch_size, timeout=5, max_workers=4)
+            except Exception:
+                pass
+            self._stop_event.wait(self._poll_interval_seconds)
+
+
 def _build_services_with_profiling() -> ServiceContainer:
     profile_path = get_app_data_dir() / "web_startup.log"
     profiler = StartupProfiler(profile_path)
@@ -193,7 +223,7 @@ def _build_templates() -> Jinja2Templates:
     templates.env.filters["progress_recent_release"] = progress_recent_release
     templates.env.filters["progress_rating_chip"] = lambda item: progress_rating_chip(item, _TemplateFilters.format_rating_with_votes)
     templates.env.filters["progress_episode_rating_chip"] = lambda item: progress_episode_rating_chip(item, _TemplateFilters.format_rating_with_votes)
-    templates.env.filters["cached_image_url"] = lambda value: (f"/cached-image?url={quote(str(value))}" if value else "")
+    templates.env.filters["cached_image_url"] = lambda value: (f"/cached-image?url={quote(str(value))}&v=3" if value else "")
     return templates
 
 
@@ -258,10 +288,15 @@ def create_app() -> FastAPI:
     app.state.bg_tasks = _BackgroundTaskManager()
     app.state.imdb_auto_sync_loop = _IMDbAutoSyncLoop(app)
     app.state.trakt_episode_ratings_refresh_loop = _TraktEpisodeRatingsRefreshLoop(app)
+    app.state.artwork_cache_warm_loop = _ArtworkCacheWarmLoop(app)
 
     templates = _build_templates()
     static_dir = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    try:
+        app.state.style_css_version = int((static_dir / "style.css").stat().st_mtime)
+    except OSError:
+        app.state.style_css_version = 0
 
     @app.middleware("http")
     async def capture_request_timing(request: Request, call_next):
@@ -289,11 +324,13 @@ def create_app() -> FastAPI:
     async def start_background_loops() -> None:
         app.state.imdb_auto_sync_loop.start()
         app.state.trakt_episode_ratings_refresh_loop.start()
+        app.state.artwork_cache_warm_loop.start()
 
     @app.on_event("shutdown")
     async def stop_background_loops() -> None:
         app.state.imdb_auto_sync_loop.stop()
         app.state.trakt_episode_ratings_refresh_loop.stop()
+        app.state.artwork_cache_warm_loop.stop()
 
     def render(request: Request, template_name: str, context: dict, status_code: int = 200) -> HTMLResponse:
         sound_path = Path(str(request.app.state.services.auth.config.notification_sound_path or "")).expanduser()
@@ -308,8 +345,10 @@ def create_app() -> FastAPI:
             "configured": request.app.state.services.auth.is_configured(),
             "settings_utc_offset": request.app.state.services.auth.config.utc_offset,
             "notification_sound_url": notification_sound_url,
+            "notifications_browser_poll_enabled": os.environ.get("TRAKT_TRACKER_TRAY_RUNTIME") != "1",
             "debug_mode": request.app.state.services.auth.config.debug_mode,
             "debug_initial_seq": request.app.state.services.operations.current_seq(),
+            "style_css_version": request.app.state.style_css_version,
         }
         base_context.update(context)
         return templates.TemplateResponse(request, template_name, base_context, status_code=status_code)
@@ -350,6 +389,7 @@ def create_app() -> FastAPI:
         return RedirectResponse(url=f"/progress?{query}", status_code=303)
 
     register_system_routes(app, render=render, template_filters=_TemplateFilters)
+    register_rating_routes(app)
     register_progress_routes(app, render=render, progress_redirect=progress_redirect)
     register_history_routes(app, render=render, render_fragment=render_fragment)
     register_catalog_routes(

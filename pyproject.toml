@@ -29,6 +29,7 @@ dev = [
 [project.scripts]
 trakt-tracker = "trakt_tracker.main:main"
 trakt-tracker-web = "trakt_tracker.web.main:main"
+trakt-tracker-web-tray = "trakt_tracker.web_tray:main"
 
 [tool.setuptools.packages.find]
 include = ["trakt_tracker*"]

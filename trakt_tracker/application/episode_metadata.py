@@ -10,6 +10,7 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_UNKNOWN,
 )
 from trakt_tracker.application.enrich_queue import TASK_RESULT_SKIPPED_ALREADY_RESOLVED
+from trakt_tracker.application.episode_imdb_resolver import EpisodeIMDbResolver
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_EPISODE_RATINGS,
     ASSET_KIND_STILL,
@@ -48,6 +49,7 @@ class EpisodeMetadataService:
         self._titles = titles_repo
         self._auth = auth_service
         self._tmdb_factory = tmdb_factory
+        self._imdb_resolver = EpisodeIMDbResolver(imdb_client)
 
     def _normalize_episode_refresh_requests(
         self,
@@ -186,32 +188,24 @@ class EpisodeMetadataService:
             key = (show_ids.get("trakt"), episode_payload.get("season"), episode_payload.get("number"))
             if key not in wanted:
                 continue
-            imdb_id = str(episode_ids.get("imdb", "") or "")
-            if not imdb_id:
-                show_imdb_id = str(show_ids.get("imdb", "") or "")
-                season_number = episode_payload.get("season")
-                episode_number = episode_payload.get("number")
-                if show_imdb_id and season_number is not None and episode_number is not None:
-                    imdb_id = self._imdb_client.lookup_episode_imdb_id(show_imdb_id, int(season_number), int(episode_number))
-                if not imdb_id and show_imdb_id:
-                    imdb_id = self._imdb_client.lookup_episode_imdb_id_by_title(
-                        show_imdb_id,
-                        str(episode_payload.get("title", "") or ""),
-                    )
-            if not imdb_id:
+            show_imdb_id = str(show_ids.get("imdb", "") or "")
+            season_number = episode_payload.get("season")
+            episode_number = episode_payload.get("number")
+            if not show_imdb_id or season_number is None or episode_number is None:
                 continue
-            episode = EpisodeSummary(
-                trakt_id=episode_ids.get("trakt", 0),
-                season=episode_payload.get("season", 0),
-                number=episode_payload.get("number", 0),
-                title=episode_payload.get("title", ""),
-                imdb_id=imdb_id,
+            resolution = self._imdb_resolver.resolve(
+                show_imdb_id=show_imdb_id,
+                season=int(season_number),
+                episode=int(episode_number),
+                title=str(episode_payload.get("title", "") or ""),
+                trakt_imdb_id=str(episode_ids.get("imdb", "") or ""),
             )
-            enriched = self._imdb_client.enrich_episode(episode)
+            if not resolution.imdb_id:
+                continue
             result[key] = {
-                "imdb_id": imdb_id,
-                "imdb_rating": enriched.imdb_rating,
-                "imdb_votes": enriched.imdb_votes,
+                "imdb_id": resolution.imdb_id,
+                "imdb_rating": resolution.imdb_rating,
+                "imdb_votes": resolution.imdb_votes,
             }
         return result
 
@@ -221,23 +215,50 @@ class EpisodeMetadataService:
         with self._db.session() as session:
             rows = self._episode_repo.list_all_with_imdb(session)
             for row in rows:
-                if not row.imdb_id:
+                show_imdb_id = self._show_imdb_id(session, int(row.show_trakt_id))
+                if not row.imdb_id and not show_imdb_id:
                     continue
-                episode = EpisodeSummary(
-                    trakt_id=row.episode_trakt_id,
-                    season=row.season,
-                    number=row.number,
+                resolution = self._imdb_resolver.resolve(
+                    show_imdb_id=show_imdb_id,
+                    season=int(row.season),
+                    episode=int(row.number),
                     title=row.title,
-                    imdb_id=row.imdb_id,
-                    imdb_rating=row.imdb_rating,
-                    imdb_votes=row.imdb_votes,
-                    first_aired=row.first_aired,
-                    runtime=row.runtime,
-                    overview=row.overview,
+                    trakt_imdb_id=row.imdb_id,
                 )
-                enriched = self._imdb_client.enrich_episode(episode)
-                row.imdb_rating = enriched.imdb_rating
-                row.imdb_votes = enriched.imdb_votes
+                row.imdb_id = resolution.imdb_id
+                row.imdb_rating = resolution.imdb_rating
+                row.imdb_votes = resolution.imdb_votes
+
+    def repair_episode_imdb_ratings(self, show_trakt_id: int | None = None) -> int:
+        if not self._imdb_client.is_ready() or self._titles is None:
+            return 0
+        changed = 0
+        with self._db.session() as session:
+            rows = self._episode_repo.list_all_episodes(session)
+            for row in rows:
+                if show_trakt_id is not None and int(row.show_trakt_id) != int(show_trakt_id):
+                    continue
+                show_imdb_id = self._show_imdb_id(session, int(row.show_trakt_id))
+                if not show_imdb_id:
+                    continue
+                resolution = self._imdb_resolver.resolve(
+                    show_imdb_id=show_imdb_id,
+                    season=int(row.season),
+                    episode=int(row.number),
+                    title=row.title,
+                    trakt_imdb_id=row.imdb_id,
+                )
+                if (
+                    row.imdb_id == resolution.imdb_id
+                    and row.imdb_rating == resolution.imdb_rating
+                    and row.imdb_votes == resolution.imdb_votes
+                ):
+                    continue
+                row.imdb_id = resolution.imdb_id
+                row.imdb_rating = resolution.imdb_rating
+                row.imdb_votes = resolution.imdb_votes
+                changed += 1
+        return changed
 
     def backfill_episode_imdb_ids_from_payloads(self, payloads: list[dict]) -> None:
         if not payloads:
@@ -258,18 +279,20 @@ class EpisodeMetadataService:
                 row = self._episode_repo.find_episode(session, show_trakt_id, season, number)
                 if row is None:
                     continue
-                imdb_id = str(episode_ids.get("imdb", "") or "")
-                if not imdb_id:
-                    show_imdb_id = str(show_ids.get("imdb", "") or "")
-                    if show_imdb_id:
-                        imdb_id = self._imdb_client.lookup_episode_imdb_id(show_imdb_id, int(season), int(number))
-                        if not imdb_id:
-                            imdb_id = self._imdb_client.lookup_episode_imdb_id_by_title(
-                                show_imdb_id,
-                                str(episode_payload.get("title", "") or ""),
-                            )
-                if imdb_id and not row.imdb_id:
-                    row.imdb_id = imdb_id
+                show_imdb_id = str(show_ids.get("imdb", "") or "")
+                if not show_imdb_id:
+                    continue
+                resolution = self._imdb_resolver.resolve(
+                    show_imdb_id=show_imdb_id,
+                    season=int(season),
+                    episode=int(number),
+                    title=str(episode_payload.get("title", "") or ""),
+                    trakt_imdb_id=str(episode_ids.get("imdb", "") or ""),
+                )
+                if resolution.imdb_id and not row.imdb_id:
+                    row.imdb_id = resolution.imdb_id
+                    row.imdb_rating = resolution.imdb_rating
+                    row.imdb_votes = resolution.imdb_votes
 
     def attach_progress_episode_metadata(self, session, progress, *, enrich_imdb: bool = False) -> None:
         if progress.next_episode is None:
@@ -286,22 +309,16 @@ class EpisodeMetadataService:
         progress.next_episode.trakt_votes = row.trakt_votes
         progress.next_episode.imdb_id = row.imdb_id
         if enrich_imdb and row.imdb_id and (row.imdb_rating is None or row.imdb_votes is None):
-            enriched = self._imdb_client.enrich_episode(
-                EpisodeSummary(
-                    trakt_id=row.episode_trakt_id,
-                    season=row.season,
-                    number=row.number,
-                    title=row.title,
-                    imdb_id=row.imdb_id,
-                    imdb_rating=row.imdb_rating,
-                    imdb_votes=row.imdb_votes,
-                    first_aired=row.first_aired,
-                    runtime=row.runtime,
-                    overview=row.overview,
-                )
+            resolution = self._imdb_resolver.resolve(
+                show_imdb_id=self._show_imdb_id(session, int(row.show_trakt_id)),
+                season=int(row.season),
+                episode=int(row.number),
+                title=row.title,
+                trakt_imdb_id=row.imdb_id,
             )
-            row.imdb_rating = enriched.imdb_rating
-            row.imdb_votes = enriched.imdb_votes
+            row.imdb_id = resolution.imdb_id
+            row.imdb_rating = resolution.imdb_rating
+            row.imdb_votes = resolution.imdb_votes
         progress.next_episode.still_url = row.still_url or ""
         progress.next_episode.still_status = row.still_status or ENRICH_STATUS_UNKNOWN
         progress.next_episode.still_refreshed_at = row.still_refreshed_at
@@ -424,6 +441,11 @@ class EpisodeMetadataService:
                             status=ENRICH_STATUS_CHECKED_NO_DATA,
                         )
                     else:
+                        self._resolve_episode_summary(
+                            session,
+                            show_trakt_id=show_trakt_id,
+                            episode=details,
+                        )
                         status = (
                             ENRICH_STATUS_CHECKED_NO_DATA
                             if details.trakt_rating is None or details.trakt_votes is None
@@ -460,6 +482,27 @@ class EpisodeMetadataService:
         ):
             return ENRICH_STATUS_READY
         return ENRICH_STATUS_CHECKED_NO_DATA
+
+    def _show_imdb_id(self, session, show_trakt_id: int) -> str:
+        if self._titles is None:
+            return ""
+        title = self._titles.get_title(session, show_trakt_id)
+        return str(title.imdb_id or "") if title is not None else ""
+
+    def _resolve_episode_summary(self, session, *, show_trakt_id: int, episode: EpisodeSummary) -> None:
+        show_imdb_id = self._show_imdb_id(session, show_trakt_id)
+        if not show_imdb_id:
+            return
+        resolution = self._imdb_resolver.resolve(
+            show_imdb_id=show_imdb_id,
+            season=episode.season,
+            episode=episode.number,
+            title=episode.title,
+            trakt_imdb_id=episode.imdb_id,
+        )
+        episode.imdb_id = resolution.imdb_id
+        episode.imdb_rating = resolution.imdb_rating
+        episode.imdb_votes = resolution.imdb_votes
 
     def can_enrich_episode_stills(self) -> bool:
         if self._auth is None or self._tmdb_factory is None:
