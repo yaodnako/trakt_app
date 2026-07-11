@@ -8,3 +8,4 @@ generated/
 tools/__pycache__/
 tools/visual_checks/.venv/
 tools/visual_checks/browsers/
+.codex-*.png
