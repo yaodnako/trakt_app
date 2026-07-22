@@ -90,7 +90,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             request,
             "progress.html",
             {
-                "page_title": "Progress",
+                "page_title": "Up next",
                 "new_items": new_items,
                 "progress_items": progress_items,
                 "unseen_episode_ids": unseen_episode_ids,
@@ -246,22 +246,13 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
         show_dropped_value = parse_bool_flag(str(form.get("show_dropped", "")))
         min_year_value = parse_progress_year(str(form.get("min_year", "")))
         use_year_filter_value = parse_bool_flag(str(form.get("use_year_filter", "")))
-        if services.enrich_queue.is_running():
-            return progress_redirect(
-                hide_upcoming=hide_upcoming_value,
-                show_dropped=show_dropped_value,
-                min_year=min_year_value,
-                use_year_filter=use_year_filter_value,
-                flash="Progress sync is waiting for current enrich tasks to finish.",
-            )
-        services.cache.clear_provider("images")
         started = bg_tasks.start(
             "progress_sync",
             source="Progress sync (manual full)",
             operations=services.operations,
             fn=lambda: services.progress.sync_progress(
                 dropped_only=show_dropped_value,
-                force_full_assets=True,
+                force_full_assets=False,
             ),
         )
         return progress_redirect(

@@ -17,6 +17,8 @@ from trakt_tracker.domain import TitleSummary
 
 SEARCH_SORT_MODES = ("IMDb votes", "Trakt votes", "Alphabetical")
 DEFAULT_SEARCH_SORT_MODE = "IMDb votes"
+WATCHLIST_SORT_MODES = ("Recently added", "Release date", "IMDb rating", "Alphabetical")
+DEFAULT_WATCHLIST_SORT_MODE = "Recently added"
 HISTORY_PAGE_SIZE = 50
 
 
@@ -67,6 +69,33 @@ def sort_search_results(results: list[TitleSummary], mode: str) -> list[TitleSum
         results,
         key=lambda item: (item.trakt_votes or 0, item.trakt_rating or 0.0, (item.title or "").lower()),
         reverse=True,
+    )
+
+
+def normalize_watchlist_sort_mode(value: str | None) -> str:
+    normalized = (value or "").strip()
+    return normalized if normalized in WATCHLIST_SORT_MODES else DEFAULT_WATCHLIST_SORT_MODE
+
+
+def sort_watchlist_results(results: list[TitleSummary], mode: str, *, descending: bool = True) -> list[TitleSummary]:
+    normalized_mode = normalize_watchlist_sort_mode(mode)
+    if normalized_mode == "Alphabetical":
+        return sorted(
+            results,
+            key=lambda item: ((item.title or "").casefold(), item.year or 0),
+            reverse=descending,
+        )
+    if normalized_mode == "IMDb rating":
+        return sorted(
+            results,
+            key=lambda item: (item.imdb_rating is not None, item.imdb_rating or 0.0, item.imdb_votes or 0),
+            reverse=descending,
+        )
+    attribute = "released_at" if normalized_mode == "Release date" else "watchlisted_at"
+    return sorted(
+        results,
+        key=lambda item: normalize_datetime(getattr(item, attribute, None)) or datetime.min.replace(tzinfo=UTC),
+        reverse=descending,
     )
 
 
@@ -268,3 +297,18 @@ def progress_query_string(
     if rate_title:
         params["rate_title"] = rate_title
     return urlencode(params)
+def format_release_distance(value: datetime | None, *, now: datetime | None = None) -> str:
+    if value is None:
+        return "Release date unknown"
+    target = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    current = now or datetime.now(tz=UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    days = max(0, (target.date() - current.astimezone(UTC).date()).days)
+    if days < 7:
+        return f"{days} day{'s' if days != 1 else ''}"
+    if days < 28:
+        return f"{days / 7:.1f} weeks"
+    if days <= 183:
+        return f"{days / 30.44:.1f} months"
+    return str(target.year)

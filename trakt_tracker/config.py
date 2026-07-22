@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 import json
-from dataclasses import dataclass, field, asdict
+import os
+import re
+import uuid
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 
 APP_DIR_NAME = "TraktTracker"
 CONFIG_FILE_NAME = "config.json"
+TRAKT_CLIENT_ID_ENV = "TRAKT_TRACKER_TRAKT_CLIENT_ID"
+TRAKT_CLIENT_SECRET_ENV = "TRAKT_TRACKER_TRAKT_CLIENT_SECRET"
+TMDB_API_KEY_ENV = "TRAKT_TRACKER_TMDB_API_KEY"
+TMDB_READ_ACCESS_TOKEN_ENV = "TRAKT_TRACKER_TMDB_READ_ACCESS_TOKEN"
 
 
 def get_app_data_dir() -> Path:
-    root = Path.home() / "AppData" / "Local" / APP_DIR_NAME
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    root = (Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local") / APP_DIR_NAME
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -33,9 +42,11 @@ class AppConfig:
     web_progress_year_filter_enabled: bool = False
     omdb_api_key: str = ""
     cache_ttl_hours: int = 24
+    explore_imdb_scan_page_limit: int = 10
     poll_interval_minutes: int = 30
     notification_repeat_minutes: int = 5
     notification_release_delay_minutes: int = 120
+    movie_release_notification_delay_minutes: int = 10080
     imdb_auto_sync_interval_minutes: int = 180
     imdb_auto_sync_interval_hours: int = 3
     notification_sound_path: str = ""
@@ -50,18 +61,30 @@ class AppConfig:
     window_maximized: bool = False
     database_path: str = ""
     last_user_slug: str = ""
+    active_profile_slug: str = ""
+    known_profile_slugs: list[str] = field(default_factory=list)
+    legacy_profile_migrated_slug: str = ""
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
     def resolved_database_path(self) -> Path:
-        if self.database_path:
-            return Path(self.database_path)
-        return get_app_data_dir() / "tracker.sqlite3"
+        slug = self.active_profile_slug or self.last_user_slug
+        if slug:
+            return profile_database_path(self, slug)
+        return get_app_data_dir() / "bootstrap.sqlite3"
+
+    @property
+    def active_slug(self) -> str:
+        return (self.active_profile_slug or self.last_user_slug).strip()
 
 
 class ConfigStore:
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or (get_app_data_dir() / CONFIG_FILE_NAME)
+
+    @property
+    def path(self) -> Path:
+        return self._path
 
     def load(self) -> AppConfig:
         if not self._path.exists():
@@ -71,13 +94,94 @@ class ConfigStore:
             raw["imdb_auto_sync_interval_minutes"] = max(1, int(raw.get("imdb_auto_sync_interval_hours", 3) or 3) * 60)
         if "imdb_auto_sync_interval_hours" not in raw:
             raw["imdb_auto_sync_interval_hours"] = max(1, int(raw["imdb_auto_sync_interval_minutes"]) // 60 or 1)
-        return AppConfig(**raw)
+        config = AppConfig(**raw)
+        active_slug = config.active_profile_slug.strip() or config.last_user_slug.strip()
+        config.active_profile_slug = active_slug
+        config.last_user_slug = active_slug
+        config.known_profile_slugs = normalize_profile_slugs(
+            [*config.known_profile_slugs, *([active_slug] if active_slug else [])]
+        )
+        return config
 
     def save(self, config: AppConfig) -> None:
-        self._path.write_text(
-            json.dumps(asdict(config), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        active_slug = config.active_profile_slug.strip() or config.last_user_slug.strip()
+        config.active_profile_slug = active_slug
+        config.last_user_slug = active_slug
+        config.known_profile_slugs = normalize_profile_slugs(
+            [*config.known_profile_slugs, *([active_slug] if active_slug else [])]
         )
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._path.with_name(f".{self._path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps(asdict(config), ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temporary, self._path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def normalize_profile_slugs(values: list[str] | tuple[str, ...]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        slug = str(value or "").strip()
+        key = slug.casefold()
+        if not slug or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(slug)
+    return normalized
+
+
+def profile_storage_id(slug: str) -> str:
+    normalized = str(slug or "").strip().casefold()
+    readable = re.sub(r"[^a-z0-9._-]+", "-", normalized).strip(".-") or "profile"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+    return f"{readable[:48]}-{digest}"
+
+
+def profile_root(config: AppConfig) -> Path:
+    if config.database_path:
+        return Path(config.database_path).expanduser().parent / "TraktTrackerProfiles"
+    return get_app_data_dir() / "profiles"
+
+
+def profile_database_path(config: AppConfig, slug: str) -> Path:
+    return profile_root(config) / profile_storage_id(slug) / "tracker.sqlite3"
+
+
+def legacy_database_path(config: AppConfig) -> Path:
+    if config.database_path:
+        return Path(config.database_path).expanduser()
+    return get_app_data_dir() / "tracker.sqlite3"
+
+
+def trakt_cache_provider(slug: str | None) -> str:
+    normalized = str(slug or "").strip()
+    return f"trakt/{profile_storage_id(normalized)}" if normalized else "trakt/bootstrap"
+
+
+def resolved_trakt_client_id(config: AppConfig) -> str:
+    return config.client_id.strip() or os.environ.get(TRAKT_CLIENT_ID_ENV, "").strip()
+
+
+def resolved_trakt_client_secret(config: AppConfig) -> str:
+    return config.client_secret.strip() or os.environ.get(TRAKT_CLIENT_SECRET_ENV, "").strip()
+
+
+def resolved_tmdb_api_key(config: AppConfig) -> str:
+    return config.tmdb_api_key.strip() or os.environ.get(TMDB_API_KEY_ENV, "").strip()
+
+
+def resolved_tmdb_read_access_token(config: AppConfig) -> str:
+    return config.tmdb_read_access_token.strip() or os.environ.get(TMDB_READ_ACCESS_TOKEN_ENV, "").strip()
+
+
+def trakt_credentials_source(config: AppConfig) -> str:
+    if config.client_id.strip() and config.client_secret.strip():
+        return "override"
+    if resolved_trakt_client_id(config) and resolved_trakt_client_secret(config):
+        return "application"
+    return "missing"
 
 
 def normalize_utc_offset(value: str | None, fallback: str = "+03:00") -> str:

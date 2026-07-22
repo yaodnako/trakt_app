@@ -1,17 +1,29 @@
 {% extends "base.html" %}
 
 {% block content %}
+<div id="catalog-page-region">
+{% if page_kind == 'search' %}
 <section class="panel panel-hero search-toolbar-panel">
     <form method="get" action="/search" class="filter-grid search-filter-grid">
-        <div class="search-query-field">
+        <div class="search-query-field" data-search-query-field>
             <input
                 type="text"
                 name="q"
                 value="{{ query }}"
                 placeholder="Search movie or show titles"
                 aria-label="Search query"
+                autocomplete="off"
+                {% if search_history %}role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="search-recent-queries" data-search-query-input{% endif %}
             >
+            {% if search_history %}
+            <div id="search-recent-queries" class="search-recent-menu" role="listbox" aria-label="Recent searches" data-search-recent-menu hidden>
+                {% for item in search_history %}
+                <button id="search-recent-query-{{ loop.index }}" type="button" role="option" data-search-recent-query="{{ item }}">{{ item }}</button>
+                {% endfor %}
+            </div>
+            {% endif %}
         </div>
+        <div class="catalog-filter-controls">
         <label class="search-inline-field">
             <span>Type</span>
             <select name="type">
@@ -28,12 +40,158 @@
                 {% endfor %}
             </select>
         </label>
+        <label class="search-rating-field">
+            <span>IMDb ≥</span>
+            <input type="number" name="imdb_min" value="{{ search_imdb_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum IMDb rating" data-catalog-auto-submit>
+        </label>
+        <label class="search-rating-field">
+            <span>Trakt ≥</span>
+            <input type="number" name="trakt_min" value="{{ search_trakt_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum Trakt rating" data-catalog-auto-submit>
+        </label>
+        <div class="catalog-exclusion-filters">
+            <input type="hidden" name="hide_watchlisted" value="0">
+            <label>
+                <input type="checkbox" name="hide_watchlisted" value="1" {% if search_hide_watchlisted %}checked{% endif %} data-catalog-auto-submit>
+                <span>Not in Watchlist</span>
+            </label>
+            <input type="hidden" name="hide_history" value="0">
+            <label>
+                <input type="checkbox" name="hide_history" value="1" {% if search_hide_history %}checked{% endif %} data-catalog-auto-submit>
+                <span>Not in History</span>
+            </label>
+        </div>
+        </div>
+        {% if search_imdb_min or search_trakt_min or search_hide_watchlisted or search_hide_history %}
+        <a class="icon-button catalog-filter-reset" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page=1&imdb_min=&trakt_min=&hide_watchlisted=0&hide_history=0" title="Reset filters" aria-label="Reset search filters">
+            <img src="{{ request.url_for('static', path='filter_reset.svg') }}" alt="" aria-hidden="true">
+        </a>
+        {% endif %}
         <div class="search-submit-slot">
             <button type="submit" class="button search-submit-button">Search</button>
         </div>
     </form>
 </section>
+{% elif page_kind == 'explore' %}
+<section class="panel panel-hero search-toolbar-panel explore-toolbar-panel">
+    <nav class="explore-toolbar" aria-label="Explore filters">
+        <div class="explore-tabs explore-media-tabs" aria-label="Media type">
+            <a class="chip{% if explore_type == 'show' %} active{% endif %}" href="/explore?type=show&feed={{ explore_feed }}&page=1{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}{% endif %}">Shows</a>
+            <a class="chip{% if explore_type == 'movie' %} active{% endif %}" href="/explore?type=movie&feed={{ explore_feed }}&page=1{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}{% endif %}">Movies</a>
+        </div>
+        <div class="explore-tabs explore-feed-tabs" aria-label="Explore feed">
+            <a class="chip{% if explore_feed == 'anticipated' %} active{% endif %}" href="/explore?type={{ explore_type }}&feed=anticipated&page=1&hide_releases={{ 1 if explore_hide_releases else 0 }}">Anticipated</a>
+            <a class="chip{% if explore_feed == 'trending' %} active{% endif %}" href="/explore?type={{ explore_type }}&feed=trending&page=1&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}">Trending</a>
+            <a class="chip{% if explore_feed == 'popular' %} active{% endif %}" href="/explore?type={{ explore_type }}&feed=popular&page=1&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}">Popular</a>
+        </div>
+        <form method="get" action="/explore" class="explore-rating-filters">
+            <input type="hidden" name="type" value="{{ explore_type }}">
+            <input type="hidden" name="feed" value="{{ explore_feed }}">
+            <input type="hidden" name="page" value="1">
+            {% if explore_feed != 'anticipated' %}<label>
+                <span>IMDb ≥</span>
+                <input type="number" name="imdb_min" value="{{ explore_imdb_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum IMDb rating" data-catalog-auto-submit>
+            </label>
+            <label>
+                <span>Trakt ≥</span>
+                <input type="number" name="trakt_min" value="{{ explore_trakt_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum Trakt rating" data-catalog-auto-submit>
+            </label>
+            {% endif %}
+            <div class="catalog-exclusion-filters">
+                <input type="hidden" name="{{ 'hide_releases' if explore_feed == 'anticipated' else 'hide_watchlisted' }}" value="0">
+                <label>
+                    <input type="checkbox" name="{{ 'hide_releases' if explore_feed == 'anticipated' else 'hide_watchlisted' }}" value="1" {% if (explore_hide_releases if explore_feed == 'anticipated' else explore_hide_watchlisted) %}checked{% endif %} data-catalog-auto-submit>
+                    <span>{{ 'Not in Releases' if explore_feed == 'anticipated' else 'Not in Watchlist' }}</span>
+                </label>
+                {% if explore_feed != 'anticipated' %}
+                <input type="hidden" name="hide_history" value="0">
+                <label>
+                    <input type="checkbox" name="hide_history" value="1" {% if explore_hide_history %}checked{% endif %} data-catalog-auto-submit>
+                    <span>Not in History</span>
+                </label>
+                {% endif %}
+            </div>
+            {% if explore_feed == 'anticipated' and explore_hide_releases %}
+            <a class="icon-button catalog-filter-reset" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page=1&hide_releases=0" title="Reset filters" aria-label="Reset Explore filters">
+                <img src="{{ request.url_for('static', path='filter_reset.svg') }}" alt="" aria-hidden="true">
+            </a>
+            {% elif explore_feed != 'anticipated' and (explore_imdb_min or explore_trakt_min or explore_hide_watchlisted or explore_hide_history) %}
+            <a class="icon-button catalog-filter-reset" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page=1&imdb_min=&trakt_min=&hide_watchlisted=0&hide_history=0" title="Reset filters" aria-label="Reset Explore filters">
+                <img src="{{ request.url_for('static', path='filter_reset.svg') }}" alt="" aria-hidden="true">
+            </a>
+            {% endif %}
+        </form>
+    </nav>
+</section>
+{% else %}
+<section class="panel panel-hero search-toolbar-panel">
+    <form method="get" action="/watchlist" class="filter-grid watchlist-filter-grid">
+        <label class="search-inline-field">
+            <span>Type</span>
+            <select name="type" data-catalog-auto-submit>
+                <option value="all" {% if watchlist_type == 'all' %}selected{% endif %}>All</option>
+                <option value="movie" {% if watchlist_type == 'movie' %}selected{% endif %}>Movies</option>
+                <option value="show" {% if watchlist_type == 'show' %}selected{% endif %}>Shows</option>
+            </select>
+        </label>
+        <label class="search-inline-field">
+            <span>Release</span>
+            <select name="release" data-catalog-auto-submit>
+                <option value="all" {% if watchlist_release == 'all' %}selected{% endif %}>All</option>
+                <option value="released" {% if watchlist_release == 'released' %}selected{% endif %}>Released</option>
+                <option value="upcoming" {% if watchlist_release == 'upcoming' %}selected{% endif %}>Upcoming</option>
+            </select>
+        </label>
+        <label class="search-inline-field">
+            <span>Sort</span>
+            <select name="sort" data-catalog-auto-submit>
+                {% for item in watchlist_sort_modes %}
+                <option value="{{ item }}" {% if watchlist_sort_mode == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <input type="hidden" name="direction" value="{{ watchlist_direction }}" data-watchlist-direction-input>
+        <button
+            type="button"
+            class="icon-button watchlist-direction-button"
+            title="{{ 'Descending' if watchlist_direction == 'desc' else 'Ascending' }}"
+            aria-label="Sort {{ 'descending' if watchlist_direction == 'desc' else 'ascending' }}; click to reverse"
+            data-watchlist-direction-toggle
+        >{{ '↓' if watchlist_direction == 'desc' else '↑' }}</button>
+        {% if watchlist_type != 'all' or watchlist_release != 'all' or watchlist_sort_mode != 'Recently added' or watchlist_direction != 'desc' %}
+        <a class="icon-button catalog-filter-reset" href="/watchlist" title="Reset filters" aria-label="Reset Watchlist filters">
+            <img src="{{ request.url_for('static', path='filter_reset.svg') }}" alt="" aria-hidden="true">
+        </a>
+        {% endif %}
+    </form>
+</section>
+{% endif %}
 
+{% if not catalog_loading %}
+<div class="catalog-results-summary" aria-live="polite">
+    <p>
+        {% if page_kind == 'search' %}
+            {% if query %}Results for <strong>{{ query }}</strong>{% else %}Search{% endif %}
+        {% elif page_kind == 'explore' %}
+            {{ explore_feed|capitalize }} {{ 'shows' if explore_type == 'show' else 'movies' }}
+        {% else %}
+            Watchlist: {{ results|length }} title{% if results|length != 1 %}s{% endif %}
+        {% endif %}
+        {% if page_kind != 'watchlist' %}<span>Page {{ page }} of {{ page_count|default(page) }}</span>{% endif %}
+    </p>
+</div>
+{% endif %}
+
+<div
+    id="catalog-results-region"
+    data-catalog-page-kind="{{ page_kind }}"
+    data-catalog-loading="{{ '1' if catalog_loading else '0' }}"
+>
+{% if catalog_loading %}
+<section class="catalog-loading-state" aria-live="polite">
+    <div class="catalog-loading-bar"></div>
+    <p>Loading…</p>
+</section>
+{% else %}
 {% if error_message %}
 <section class="banner error">{{ error_message }}</section>
 {% endif %}
@@ -41,21 +199,25 @@
 {% if results %}
 <section class="search-results-grid">
     {% for item in results %}
-    {% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ item.slug if item.slug else ('/titles/' ~ item.title_type ~ '/' ~ item.trakt_id) %}
+    {% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ (item.slug or item.trakt_id) %}
+    {% set actions_available = item.catalog_actions_available if page_kind == 'explore' else true %}
     <article class="result-card search-result-card">
         <div class="search-result-side">
             <div class="search-result-title-stack">
                 <h3 class="search-result-title{% if item.title|length > 18 %} is-long{% endif %}{% if item.title|length > 28 %} is-xlong{% endif %}">
-                    <a href="{{ trakt_title_url }}" {% if item.slug %}target="_blank" rel="noreferrer"{% endif %}>{{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}</a>
+                    <a href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">{{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}</a>
+                    {% if item.title_type == 'movie' %}<img class="search-result-type-icon" src="{{ request.url_for('static', path='film.svg') }}" alt="Movie" title="Movie">{% endif %}
                 </h3>
             </div>
             <div class="progress-poster-shell search-result-poster-shell">
-                {% if item.title_type == 'show' %}
+                {% if item.title_type == 'show' and actions_available %}
                 <button
                     type="button"
                     class="progress-poster search-result-poster search-watch-poster-trigger"
                     data-search-show-watch-trigger
                     data-watch-panel-url="/search/show/{{ item.trakt_id }}/watch-panel"
+                    data-title-type="show"
+                    data-trakt-id="{{ item.trakt_id }}"
                     data-title="{{ item.title }}"
                     aria-label="Open episode watch panel for {{ item.title }}"
                 >
@@ -64,17 +226,20 @@
                         src="{{ item.poster_url|cached_image_url }}"
                         alt="{{ item.title }} poster"
                         loading="lazy"
-                        onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
+                        decoding="async"
+                        fetchpriority="low"
                     >
                     {% else %}
-                    <div class="poster-fallback">No poster</div>
-                    {% endif %}
-                    {% if item.title_episode_avg_rating is defined and item.title_episode_avg_rating is not none %}
+                        <div class="poster-fallback">No poster</div>
+                        {% endif %}
+                        {% if item.is_in_history and page_kind in ('search', 'explore') %}<span class="catalog-seen-overlay" aria-label="Seen"><img src="{{ request.url_for('static', path='seen.svg') }}" alt=""></span>{% endif %}
+                        {% if item.title_episode_avg_rating is defined and item.title_episode_avg_rating is not none %}
                     <div class="history-rating-badge">
                         {{ item.title_episode_avg_rating|round(1) }} &#9733;
                     </div>
                     {% endif %}
                 </button>
+                {% if actions_available %}
                 <a
                     class="icon-button search-card-action search-play-button"
                     href="/search/{{ item.title_type }}/{{ item.trakt_id }}/play?title={{ item.title|urlencode }}"
@@ -85,6 +250,24 @@
                 >
                     <img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true">
                 </a>
+                {% if item.is_in_history %}
+                <button
+                    type="button"
+                    class="icon-button search-card-action search-watch-title-button"
+                    title="Choose watched history to remove"
+                    data-search-show-watch-trigger
+                    data-watch-panel-url="/search/show/{{ item.trakt_id }}/watch-panel"
+                    data-trakt-id="{{ item.trakt_id }}"
+                    data-title="{{ item.title }}"
+                    data-unwatch-focus="true"
+                    aria-label="Choose watched history to remove for {{ item.title }}"
+                >
+                    <span class="search-watch-action-glyphs" aria-hidden="true">
+                        <img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt="">
+                        <img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt="">
+                    </span>
+                </button>
+                {% else %}
                 <button
                     type="button"
                     class="icon-button search-card-action search-watch-title-button"
@@ -94,29 +277,34 @@
                     data-trakt-id="{{ item.trakt_id }}"
                     data-title="{{ item.title }}"
                     data-scope="title"
+                    data-remove-from-watchlist="{{ 'true' if page_kind == 'watchlist' else 'false' }}"
                     aria-label="Mark {{ item.title }} watched"
                 >
                     <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
                 </button>
+                {% endif %}
+                {% endif %}
                 {% else %}
-                <a class="progress-poster search-result-poster" href="{{ trakt_title_url }}" {% if item.slug %}target="_blank" rel="noreferrer"{% endif %}>
+                <a class="progress-poster search-result-poster" href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">
                     {% if item.poster_url %}
                     <img
                         src="{{ item.poster_url|cached_image_url }}"
                         alt="{{ item.title }} poster"
                         loading="lazy"
-                        onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
+                        decoding="async"
+                        fetchpriority="low"
                     >
                     {% else %}
-                    <div class="poster-fallback">No poster</div>
-                    {% endif %}
-                    {% if item.title_episode_avg_rating is defined and item.title_episode_avg_rating is not none %}
+                        <div class="poster-fallback">No poster</div>
+                        {% endif %}
+                        {% if item.is_in_history and page_kind in ('search', 'explore') %}<span class="catalog-seen-overlay" aria-label="Seen"><img src="{{ request.url_for('static', path='seen.svg') }}" alt=""></span>{% endif %}
+                        {% if item.title_episode_avg_rating is defined and item.title_episode_avg_rating is not none %}
                     <span
                         class="history-rating-badge"
                         role="button"
                         tabindex="0"
                         data-rating-trigger
-                        data-rating-title-type="movie"
+                        data-rating-title-type="{{ item.title_type }}"
                         data-rating-trakt-id="{{ item.trakt_id }}"
                         data-rating-title="{{ item.title }}"
                     >
@@ -124,6 +312,7 @@
                     </span>
                     {% endif %}
                 </a>
+                {% if actions_available %}
                 <a
                     class="icon-button search-card-action search-play-button"
                     href="/search/{{ item.title_type }}/{{ item.trakt_id }}/play?title={{ item.title|urlencode }}"
@@ -134,6 +323,24 @@
                 >
                     <img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true">
                 </a>
+                {% if item.is_in_history %}
+                <button
+                    type="button"
+                    class="icon-button search-card-action search-watch-title-button search-watch-movie-button"
+                    title="Remove from watched history"
+                    data-search-unwatch-action
+                    data-title-type="movie"
+                    data-trakt-id="{{ item.trakt_id }}"
+                    data-title="{{ item.title }}"
+                    data-scope="title"
+                    aria-label="Remove {{ item.title }} from watched history"
+                >
+                    <span class="search-watch-action-glyphs" aria-hidden="true">
+                        <img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt="">
+                        <img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt="">
+                    </span>
+                </button>
+                {% else %}
                 <button
                     type="button"
                     class="icon-button search-card-action search-watch-title-button search-watch-movie-button"
@@ -143,12 +350,54 @@
                     data-trakt-id="{{ item.trakt_id }}"
                     data-title="{{ item.title }}"
                     data-scope="title"
+                    data-remove-from-watchlist="{{ 'true' if page_kind == 'watchlist' else 'false' }}"
                     aria-label="Mark {{ item.title }} watched"
                 >
                     <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
                 </button>
                 {% endif %}
-                {% if item.title_type == 'show' %}
+                {% endif %}
+                {% endif %}
+                {% if (page_kind == 'explore' and explore_feed == 'anticipated') or (page_kind == 'search' and item.is_future_release) %}
+                <button
+                    type="button"
+                    class="icon-button search-card-action search-watchlist-button{% if item.is_release_tracked %} is-active{% endif %}"
+                    title="{{ 'Stop release tracking' if item.is_release_tracked else 'Track release' }}"
+                    data-release-toggle data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id }}"
+                    data-tracked="{{ 'true' if item.is_release_tracked else 'false' }}"
+                    data-list-count="{{ item.explore_metric_count if item.explore_metric_count is not none else '' }}"
+                    aria-pressed="{{ 'true' if item.is_release_tracked else 'false' }}"
+                >
+                    <img class="icon-glyph release-bell-icon" src="{{ request.url_for('static', path=('notification_on.svg' if item.is_release_tracked else 'notification_off.svg')) }}" data-on-src="{{ request.url_for('static', path='notification_on.svg') }}" data-off-src="{{ request.url_for('static', path='notification_off.svg') }}" alt="" aria-hidden="true">
+                </button>
+                {% else %}
+                <button
+                    type="button"
+                    class="icon-button search-card-action search-watchlist-button{% if item.is_watchlisted %} is-active{% endif %}"
+                    title="{{ 'Remove from watchlist' if item.is_watchlisted else 'Add to watchlist' }}"
+                    data-watchlist-toggle
+                    data-title-type="{{ item.title_type }}"
+                    data-trakt-id="{{ item.trakt_id }}"
+                    data-watchlisted="{{ 'true' if item.is_watchlisted else 'false' }}"
+                    aria-pressed="{{ 'true' if item.is_watchlisted else 'false' }}"
+                    aria-label="{{ 'Remove' if item.is_watchlisted else 'Add' }} {{ item.title }} {{ 'from' if item.is_watchlisted else 'to' }} watchlist"
+                >
+                    <img
+                        class="icon-glyph icon-glyph-bookmark {{ 'is-filled' if item.is_watchlisted else 'is-unfilled' }}"
+                        src="{{ request.url_for('static', path=('bookmark.svg' if item.is_watchlisted else 'bookmark_unfill.svg')) }}"
+                        data-filled-src="{{ request.url_for('static', path='bookmark.svg') }}"
+                        data-unfilled-src="{{ request.url_for('static', path='bookmark_unfill.svg') }}"
+                        alt=""
+                        aria-hidden="true"
+                    >
+                </button>
+                {% endif %}
+                {% if page_kind == 'explore' and explore_feed == 'anticipated' %}
+                <div class="poster-chip progress-title-chip search-title-ratings-chip anticipated-release-chip" aria-label="Release timing and list count">
+                    <span>{{ item.release_distance_text or 'Release date unknown' }}</span>
+                    <span class="anticipated-list-count"><img src="{{ request.url_for('static', path='bookmark.svg') }}" alt="" aria-hidden="true"> {{ item.explore_metric_count|compact_votes if item.explore_metric_count is not none else '—' }}</span>
+                </div>
+                {% elif item.title_type == 'show' %}
                 <button
                     type="button"
                     class="poster-chip progress-title-chip title-matrix-trigger search-title-ratings-chip"
@@ -185,6 +434,9 @@
             <p class="search-result-meta">
                 <span>{{ 'TV Series' if item.title_type == 'show' else 'Movie' }}</span>
                 {% if item.status %}<span>{{ item.status }}</span>{% endif %}
+                {% if item.explore_metric_count is not none and item.explore_metric_kind and explore_feed != 'anticipated' %}
+                <span class="explore-rank-metric">{{ item.explore_metric_count|compact_votes }} {{ item.explore_metric_kind }}</span>
+                {% endif %}
             </p>
             <p class="search-result-overview">{{ item.overview or "No overview yet." }}</p>
         </div>
@@ -193,32 +445,57 @@
 </section>
 <div class="pager">
     {% if page > 1 %}
-    <a class="button ghost" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page - 1 }}">Previous</a>
+    {% if page_kind == 'explore' %}
+    <a class="button ghost" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page - 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}{% endif %}">Previous</a>
+    {% else %}
+    <a class="button ghost" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page - 1 }}&imdb_min={{ search_imdb_min }}&trakt_min={{ search_trakt_min }}&hide_watchlisted={{ 1 if search_hide_watchlisted else 0 }}&hide_history={{ 1 if search_hide_history else 0 }}">Previous</a>
+    {% endif %}
     {% endif %}
     {% if has_next %}
-    <a class="button" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page + 1 }}">Next</a>
+    {% if page_kind == 'explore' %}
+    <a class="button" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page + 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}{% endif %}">Next</a>
+    {% else %}
+    <a class="button" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page + 1 }}&imdb_min={{ search_imdb_min }}&trakt_min={{ search_trakt_min }}&hide_watchlisted={{ 1 if search_hide_watchlisted else 0 }}&hide_history={{ 1 if search_hide_history else 0 }}">Next</a>
+    {% endif %}
     {% endif %}
 </div>
+{% elif page_kind == 'watchlist' and not error_message %}
+<section class="empty-state">
+    {% if watchlist_type != 'all' or watchlist_release != 'all' %}
+    <p>No titles match the selected filters.</p>
+    {% else %}
+    <h3>Your watchlist is empty</h3>
+    <p>Use the bookmark button in Search to save movies and shows for later.</p>
+    {% endif %}
+</section>
 {% elif query and not error_message %}
 <section class="empty-state">
     <h3>No matches</h3>
     <p>Try a broader title, or change the type filter.</p>
 </section>
-{% endif %}
-
-{% if search_history %}
-<section class="panel">
-    <div class="section-head">
-        <h3>Recent queries</h3>
-        <p>Reuses the existing saved desktop search history.</p>
-    </div>
-    <div class="chip-row">
-        {% for item in search_history %}
-        <a class="chip" href="/search?q={{ item }}">{{ item }}</a>
-        {% endfor %}
-    </div>
+{% elif page_kind == 'explore' and not error_message %}
+<section class="empty-state">
+    {% if explore_imdb_min or explore_trakt_min %}
+    <p>No titles on this page match the selected rating filters.</p>
+    {% else %}
+    <p>No titles are available in this Explore feed.</p>
+    {% endif %}
 </section>
+{% if page > 1 or has_next %}
+<div class="pager">
+    {% if page > 1 %}
+    <a class="button ghost" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page - 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}{% endif %}">Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a class="button" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page + 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}{% endif %}">Next</a>
+    {% endif %}
+</div>
 {% endif %}
+{% endif %}
+{% endif %}
+</div>
+
+</div>
 
 <div id="search-watch-overlay" class="search-watch-overlay" hidden aria-hidden="true">
     <div class="search-watch-backdrop" data-search-watch-close></div>
@@ -227,9 +504,18 @@
             <div class="title-matrix-dialog-copy">
                 <p class="title-matrix-eyebrow">Search Watch</p>
                 <h2 id="search-watch-title">Loading...</h2>
-                <p class="title-matrix-subtitle">Choose episodes to mark watched</p>
+                <p class="title-matrix-subtitle">Manage watched episodes</p>
             </div>
-            <button type="button" class="title-matrix-close" data-search-watch-close aria-label="Close search watch panel"><span class="title-matrix-close-glyph">Close</span></button>
+            <div class="search-watch-header-actions">
+                <button type="button" class="search-watch-scope-button search-watch-header-scope" data-search-watch-action data-search-watch-header-mark data-title-type="show" data-scope="title" hidden>
+                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"><span>All</span>
+                </button>
+                <button type="button" class="search-watch-scope-button is-danger search-watch-header-scope" data-search-unwatch-action data-search-watch-header-unwatch data-title-type="show" data-scope="title" hidden>
+                    <span class="search-watch-action-glyphs" aria-hidden="true"><img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt=""><img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt=""></span><span>All</span>
+                </button>
+                <a class="search-watch-scope-button search-watch-header-play" data-show-watch-play target="_blank" rel="noreferrer" hidden><img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true"></a>
+            </div>
+            <button type="button" class="title-matrix-close" data-search-watch-close aria-label="Close search watch panel"><span class="title-matrix-close-glyph">&times;</span></button>
         </div>
         <div id="search-watch-body" class="search-watch-body"></div>
     </section>
@@ -244,258 +530,20 @@
                 <h2 id="search-watch-date-title">Mark watched</h2>
                 <p class="title-matrix-subtitle">Choose how this appears in Trakt history</p>
             </div>
-            <button type="button" class="title-matrix-close" data-search-watch-date-close aria-label="Close watched date prompt"><span class="title-matrix-close-glyph">Close</span></button>
+            <button type="button" class="title-matrix-close" data-search-watch-date-close aria-label="Close watched date prompt"><span class="title-matrix-close-glyph">&times;</span></button>
         </div>
         <div class="search-watch-date-actions">
-            <button type="button" class="button search-watch-now-action" data-search-watch-date-mode="now">Сейчас</button>
+            <button type="button" class="button search-watch-now-action" data-search-watch-date-mode="now">Now</button>
             <label class="search-watch-custom-date">
-                <span>Своя дата</span>
+                <span>Custom date</span>
                 <input type="datetime-local" data-search-watch-custom-input>
             </label>
-            <button type="button" class="button ghost search-watch-custom-submit" data-search-watch-date-mode="custom">Отправить</button>
+            <button type="button" class="button ghost search-watch-custom-submit" data-search-watch-date-mode="custom">Submit</button>
         </div>
     </section>
 </div>
 {% endblock %}
 
 {% block page_scripts %}
-<script>
-(() => {
-    if (!window.fetch) {
-        return;
-    }
-    const watchOverlay = document.getElementById("search-watch-overlay");
-    const watchBody = document.getElementById("search-watch-body");
-    const watchTitle = document.getElementById("search-watch-title");
-    const dateOverlay = document.getElementById("search-watch-date-overlay");
-    const customInput = dateOverlay ? dateOverlay.querySelector("[data-search-watch-custom-input]") : null;
-    let activeTrigger = null;
-    let activePanelUrl = "";
-    let pendingAction = null;
-
-    function openOverlay(node) {
-        if (!node) {
-            return;
-        }
-        node.hidden = false;
-        node.classList.add("is-open");
-        node.setAttribute("aria-hidden", "false");
-        if (window.traktSyncOverlayBodyLock) {
-            window.traktSyncOverlayBodyLock();
-        } else {
-            document.body.classList.add("has-title-matrix-overlay");
-        }
-    }
-
-    function closeOverlay(node) {
-        if (!node) {
-            return;
-        }
-        node.hidden = true;
-        node.classList.remove("is-open");
-        node.setAttribute("aria-hidden", "true");
-        if (window.traktSyncOverlayBodyLock) {
-            window.traktSyncOverlayBodyLock();
-        } else if ((!watchOverlay || watchOverlay.hidden) && (!dateOverlay || dateOverlay.hidden)) {
-            document.body.classList.remove("has-title-matrix-overlay");
-        }
-    }
-
-    function renderWatchLoading() {
-        if (!watchBody) {
-            return;
-        }
-        watchBody.innerHTML = `
-            <div class="title-matrix-loading-shell">
-                <div class="title-matrix-loading-bar is-wide"></div>
-                <div class="title-matrix-loading-grid">
-                    <span></span><span></span><span></span><span></span>
-                    <span></span><span></span><span></span><span></span>
-                </div>
-            </div>
-        `;
-    }
-
-    async function loadWatchPanel(panelUrl) {
-        const requestUrl = panelUrl || activePanelUrl;
-        if (!requestUrl || !watchBody) {
-            return;
-        }
-        renderWatchLoading();
-        try {
-            const response = await fetch(requestUrl, {
-                headers: {"Accept": "text/html"},
-                cache: "no-store",
-            });
-            watchBody.innerHTML = await response.text();
-        } catch (_error) {
-            watchBody.innerHTML = `<div class="title-matrix-empty-state"><p>Could not load episodes.</p></div>`;
-        }
-    }
-
-    function openWatchPanel(trigger) {
-        activeTrigger = trigger;
-        activePanelUrl = trigger.dataset.watchPanelUrl || "";
-        if (watchTitle) {
-            watchTitle.textContent = trigger.dataset.title || "Episodes";
-        }
-        openOverlay(watchOverlay);
-        loadWatchPanel();
-    }
-
-    function actionFromElement(target) {
-        return {
-            title_type: target.dataset.titleType || "movie",
-            trakt_id: Number(target.dataset.traktId || "0"),
-            title: target.dataset.title || "",
-            scope: target.dataset.scope || "title",
-            season: target.dataset.season || "",
-            episode: target.dataset.episode || "",
-        };
-    }
-
-    function openDatePrompt(action) {
-        pendingAction = action;
-        if (customInput) {
-            customInput.value = "";
-        }
-        openOverlay(dateOverlay);
-    }
-
-    async function submitWatch(dateMode) {
-        if (!pendingAction) {
-            return;
-        }
-        const payload = {...pendingAction, date_mode: dateMode};
-        if (dateMode === "custom") {
-            payload.watched_at = customInput ? customInput.value : "";
-        }
-        try {
-            const response = await fetch("/search/watch", {
-                method: "POST",
-                headers: {
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-                cache: "no-store",
-                body: JSON.stringify(payload),
-            });
-            const result = await response.json();
-            if (!response.ok || !result.ok) {
-                if (window.pushFlashToast) {
-                    window.pushFlashToast(result.message || "Watch action failed.", 5200);
-                }
-                return;
-            }
-            if (window.pushFlashToast) {
-                window.pushFlashToast(result.message || "Marked watched.", 3600);
-            }
-            const completedAction = pendingAction;
-            closeOverlay(dateOverlay);
-            pendingAction = null;
-            if (watchOverlay && !watchOverlay.hidden && activePanelUrl) {
-                loadWatchPanel();
-            }
-            if (
-                completedAction
-                && window.traktOpenRatingModal
-                && (
-                    (completedAction.title_type === "movie" && completedAction.scope === "title")
-                    || (completedAction.title_type === "show" && completedAction.scope === "episode")
-                )
-            ) {
-                window.traktOpenRatingModal({
-                    titleType: completedAction.title_type,
-                    traktId: completedAction.trakt_id,
-                    title: completedAction.title,
-                    season: completedAction.season,
-                    episode: completedAction.episode,
-                });
-            }
-        } catch (_error) {
-            if (window.pushFlashToast) {
-                window.pushFlashToast("Watch action failed.", 5200);
-            }
-        }
-    }
-
-    document.addEventListener("click", (event) => {
-        const showTrigger = event.target.closest("[data-search-show-watch-trigger]");
-        if (showTrigger) {
-            event.preventDefault();
-            openWatchPanel(showTrigger);
-            return;
-        }
-        const actionTarget = event.target.closest("[data-search-watch-action]");
-        if (actionTarget) {
-            event.preventDefault();
-            if (actionTarget.disabled) {
-                return;
-            }
-            openDatePrompt(actionFromElement(actionTarget));
-            return;
-        }
-        const seasonTab = event.target.closest("[data-search-watch-season-tab]");
-        if (seasonTab && watchBody) {
-            event.preventDefault();
-            const season = seasonTab.dataset.searchWatchSeasonTab || "";
-            const selectedPanel = watchBody.querySelector(`[data-search-watch-season-panel="${season}"]`);
-            const episodeCount = selectedPanel ? selectedPanel.querySelectorAll(".search-watch-episode-card").length : 0;
-            const imageCount = selectedPanel ? selectedPanel.querySelectorAll(".search-watch-still img").length : 0;
-            const hasPendingImages = selectedPanel && (selectedPanel.textContent.includes("Loading") || (episodeCount > 0 && imageCount === 0));
-            if (hasPendingImages && activePanelUrl) {
-                const separator = activePanelUrl.includes("?") ? "&" : "?";
-                loadWatchPanel(`${activePanelUrl}${separator}season=${encodeURIComponent(season)}`);
-                return;
-            }
-            watchBody.querySelectorAll("[data-search-watch-season-tab]").forEach((tab) => {
-                const active = tab.dataset.searchWatchSeasonTab === season;
-                tab.classList.toggle("is-active", active);
-                tab.setAttribute("aria-selected", active ? "true" : "false");
-            });
-            watchBody.querySelectorAll("[data-search-watch-season-panel]").forEach((panel) => {
-                panel.classList.toggle("is-hidden", panel.dataset.searchWatchSeasonPanel !== season);
-            });
-            watchBody.querySelectorAll("[data-search-watch-season-action]").forEach((button) => {
-                button.classList.toggle("is-hidden", button.dataset.searchWatchSeasonAction !== season);
-            });
-            return;
-        }
-        if (event.target.closest("[data-search-watch-close]")) {
-            event.preventDefault();
-            closeOverlay(watchOverlay);
-            if (activeTrigger && document.contains(activeTrigger)) {
-                activeTrigger.focus();
-            }
-            activeTrigger = null;
-            return;
-        }
-        if (event.target.closest("[data-search-watch-date-close]")) {
-            event.preventDefault();
-            closeOverlay(dateOverlay);
-            pendingAction = null;
-            return;
-        }
-        const dateModeTarget = event.target.closest("[data-search-watch-date-mode]");
-        if (dateModeTarget) {
-            event.preventDefault();
-            submitWatch(dateModeTarget.dataset.searchWatchDateMode || "none");
-        }
-    });
-
-    window.addEventListener("keydown", (event) => {
-        if (event.key !== "Escape") {
-            return;
-        }
-        if (dateOverlay && !dateOverlay.hidden) {
-            closeOverlay(dateOverlay);
-            pendingAction = null;
-            return;
-        }
-        if (watchOverlay && !watchOverlay.hidden) {
-            closeOverlay(watchOverlay);
-        }
-    });
-})();
-</script>
+<script src="{{ request.url_for('static', path='catalog_page.js') }}?v={{ static_js_version }}"></script>
 {% endblock %}

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import UTC, datetime
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import text
@@ -48,6 +49,105 @@ class RepositoryTests(unittest.TestCase):
             rows = repo.list_recent(session)
         self.assertEqual(len(rows), 1)
 
+    def test_history_repository_returns_titles_with_any_watched_event(self) -> None:
+        repo = HistoryRepository()
+        watched_at = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            repo.add_event(
+                session,
+                trakt_history_id=11,
+                title_trakt_id=101,
+                title="Example Show",
+                title_type="show",
+                action="watched",
+                watched_at=watched_at,
+                season=1,
+                episode=1,
+            )
+            repo.add_event(
+                session,
+                trakt_history_id=12,
+                title_trakt_id=202,
+                title="Rated Only",
+                title_type="movie",
+                action="rated",
+                watched_at=watched_at,
+                rating=8,
+            )
+            keys = repo.watched_title_keys(session)
+        self.assertEqual(keys, {("show", 101)})
+
+    def test_history_reconciliation_removes_only_missing_trakt_watches_in_scanned_window(self) -> None:
+        repo = HistoryRepository()
+        now = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            for history_id, watched_at, source, action in (
+                (10, now, "trakt", "watched"),
+                (11, now - timedelta(minutes=1), "trakt", "watched"),
+                (12, now - timedelta(days=2), "trakt", "watched"),
+                (None, now, "local", "watched"),
+                (13, now, "trakt", "rated"),
+            ):
+                repo.add_event(
+                    session,
+                    trakt_history_id=history_id,
+                    title_trakt_id=100 + int(history_id or 0),
+                    title=f"Item {history_id}",
+                    title_type="show",
+                    action=action,
+                    watched_at=watched_at,
+                    season=1,
+                    episode=int(history_id or 1),
+                    source=source,
+                )
+            removed, removed_count = repo.delete_missing_trakt_watches(
+                session,
+                title_type="show",
+                present_history_ids={10},
+                watched_at_cutoff=now - timedelta(hours=1),
+            )
+            rows = repo.list_recent(session)
+
+        self.assertEqual(removed, {("show", 111)})
+        self.assertEqual(removed_count, 1)
+        self.assertEqual({row.trakt_history_id for row in rows}, {10, 12, 13, None})
+
+    def test_complete_history_reconciliation_is_type_scoped(self) -> None:
+        repo = HistoryRepository()
+        watched_at = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            repo.add_event(
+                session,
+                trakt_history_id=20,
+                title_trakt_id=1,
+                title="Show",
+                title_type="show",
+                action="watched",
+                watched_at=watched_at,
+                season=1,
+                episode=1,
+                source="trakt",
+            )
+            repo.add_event(
+                session,
+                trakt_history_id=21,
+                title_trakt_id=2,
+                title="Movie",
+                title_type="movie",
+                action="watched",
+                watched_at=watched_at,
+                source="trakt",
+            )
+            _removed, removed_count = repo.delete_missing_trakt_watches(
+                session,
+                title_type="show",
+                present_history_ids=set(),
+            )
+            rows = repo.list_recent(session)
+
+        self.assertEqual([(row.title_type, row.trakt_history_id) for row in rows], [("movie", 21)])
+        self.assertEqual(removed_count, 1)
+
     def test_progress_repository_roundtrip(self) -> None:
         repo = ProgressRepository()
         progress = ProgressSnapshot(
@@ -65,6 +165,23 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].title, "Sample Show")
         self.assertEqual(rows[0].next_episode.number, 9)
+
+    def test_progress_repository_hides_zero_completed_show(self) -> None:
+        repo = ProgressRepository()
+        with self.db.session() as session:
+            repo.upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=43,
+                    title="Unwatched Show",
+                    completed=0,
+                    aired=12,
+                    percent_completed=0.0,
+                    next_episode=EpisodeSummary(trakt_id=101, season=1, number=1, title="Pilot"),
+                ),
+            )
+            rows = repo.list_in_progress(session)
+        self.assertEqual(rows, [])
 
     def test_progress_repository_displays_cached_title_when_progress_title_is_fallback(self) -> None:
         titles = TitleRepository()
@@ -329,6 +446,30 @@ class RepositoryTests(unittest.TestCase):
         self.assertIsNotNone(poster_refreshed_at)
         self.assertEqual(still_status, ENRICH_STATUS_CHECKED_NO_DATA)
         self.assertIsNotNone(still_refreshed_at)
+
+    def test_existing_database_migration_is_backed_up_and_versioned_once(self) -> None:
+        path = Path(self.tmpdir.name) / "test.sqlite3"
+        self.db.close()
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute("DELETE FROM schema_migrations")
+            connection.commit()
+        finally:
+            connection.close()
+        self.db = Database(path)
+        self.db.create_schema()
+
+        backup = path.with_name(f"{path.name}.pre-migration.bak")
+        self.assertTrue(backup.exists())
+        first_backup_mtime = backup.stat().st_mtime_ns
+        with self.db.session() as session:
+            version = session.execute(text("SELECT MAX(version) FROM schema_migrations")).scalar()
+        self.assertEqual(version, 1)
+
+        self.db.close()
+        self.db = Database(path)
+        self.db.create_schema()
+        self.assertEqual(backup.stat().st_mtime_ns, first_backup_mtime)
 
 
 if __name__ == "__main__":

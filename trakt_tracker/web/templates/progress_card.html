@@ -14,10 +14,7 @@
         </button>
     </form>
     {% endif %}
-    {% set trakt_title_url = "" %}
-    {% if progress_item.slug %}
-        {% set trakt_title_url = "https://trakt.tv/shows/" ~ progress_item.slug %}
-    {% endif %}
+    {% set trakt_title_url = "https://trakt.tv/shows/" ~ (progress_item.slug or progress_item.trakt_id) %}
     {% set trakt_episode_url = "" %}
     {% if progress_item.slug and progress_item.next_episode and progress_item.next_episode.season is not none and progress_item.next_episode.number is not none %}
         {% set trakt_episode_url = "https://trakt.tv/shows/" ~ progress_item.slug ~ "/seasons/" ~ progress_item.next_episode.season ~ "/episodes/" ~ progress_item.next_episode.number %}
@@ -25,7 +22,7 @@
     <div class="progress-main">
         <div class="progress-side">
             <div class="progress-title-stack">
-                <h3>{{ progress_item.title }}</h3>
+                <h3><a href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">{{ progress_item.title }}</a></h3>
                 {% if progress_item.status %}
                 <p class="progress-status">{{ progress_item.status }}</p>
                 {% endif %}
@@ -33,9 +30,15 @@
             <div class="progress-poster-shell">
             {% set chip = progress_item|progress_rating_chip %}
             <a
-                href="{{ trakt_title_url or ('/titles/show/' ~ progress_item.trakt_id) }}"
+                href="{{ trakt_title_url }}"
                 class="progress-poster"
-                {% if trakt_title_url %}target="_blank" rel="noreferrer"{% endif %}
+                target="_blank"
+                rel="noreferrer"
+                data-history-show-watch-trigger
+                data-watch-panel-url="/search/show/{{ progress_item.trakt_id }}/watch-panel"
+                data-trakt-id="{{ progress_item.trakt_id }}"
+                data-title="{{ progress_item.title }}"
+                aria-label="Open episode watch panel for {{ progress_item.title }}"
             >
                 {% if progress_item.poster_url %}
                 <img src="{{ progress_item.poster_url|cached_image_url }}" alt="{{ progress_item.title }} poster" loading="lazy">
@@ -91,9 +94,10 @@
                 {% set episode_chip = progress_item|progress_episode_rating_chip %}
                 <div class="progress-episode-preview-shell">
                     <a
-                        href="{{ trakt_episode_url or ('/titles/show/' ~ progress_item.trakt_id) }}"
+                        href="{{ trakt_episode_url or trakt_title_url }}"
                         class="progress-episode-preview{% if not preview_url %} is-empty{% endif %}{% if preview_is_poster_fallback %} is-poster-fallback{% endif %}"
-                        {% if trakt_episode_url %}target="_blank" rel="noreferrer"{% endif %}
+                        target="_blank"
+                        rel="noreferrer"
                     >
                         {% if preview_url %}
                             {% if preview_is_poster_fallback %}
@@ -169,7 +173,11 @@
                 <form
                     method="post"
                     action="/progress/{{ progress_item.trakt_id }}/drop-toggle"
-                    {% if not progress_item.is_dropped %}onsubmit='return confirm({{ ("Drop " ~ progress_item.title ~ " from Progress?")|tojson }})'{% endif %}
+                    {% if not progress_item.is_dropped %}
+                    data-confirm-title="Remove from Up next?"
+                    data-confirm-message="Remove {{ progress_item.title }} from Up next?"
+                    data-confirm-label="Drop"
+                    {% endif %}
                 >
                     <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
                     <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">

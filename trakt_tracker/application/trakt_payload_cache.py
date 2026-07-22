@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 
-from trakt_tracker.config import get_app_data_dir
+from trakt_tracker.config import get_app_data_dir, trakt_cache_provider
 
 
-def load_cached_trakt_history_items() -> list[dict]:
-    cache_dir = get_app_data_dir() / "cache" / "trakt"
+def load_cached_trakt_history_items(profile_slug: str = "") -> list[dict]:
+    cache_dir = get_app_data_dir() / "cache" / trakt_cache_provider(profile_slug)
     if not cache_dir.exists():
         return []
     merged_payload: list[dict] = []
@@ -42,8 +42,8 @@ def load_cached_trakt_history_items() -> list[dict]:
     return merged_payload
 
 
-def load_cached_trakt_rating_items() -> list[dict]:
-    cache_dir = get_app_data_dir() / "cache" / "trakt"
+def load_cached_trakt_rating_items(profile_slug: str = "") -> list[dict]:
+    cache_dir = get_app_data_dir() / "cache" / trakt_cache_provider(profile_slug)
     if not cache_dir.exists():
         return []
     merged_payload: list[dict] = []

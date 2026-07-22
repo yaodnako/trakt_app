@@ -420,10 +420,10 @@ class EpisodeMetadataService:
         )
         if needs_details and self._auth is not None:
             client = self._auth.get_client()
-            with self._db.session() as session:
-                try:
-                    details = client.get_episode_details(show_trakt_id, season, episode, use_cache=not force_network)
-                except Exception:
+            try:
+                details = client.get_episode_details(show_trakt_id, season, episode, use_cache=not force_network)
+            except Exception:
+                with self._db.session() as session:
                     self._episode_repo.update_trakt_details_enrich_state(
                         session,
                         show_trakt_id,
@@ -431,8 +431,9 @@ class EpisodeMetadataService:
                         episode,
                         status=ENRICH_STATUS_RETRYABLE_FAILURE,
                     )
-                else:
-                    if details is None:
+            else:
+                if details is None:
+                    with self._db.session() as session:
                         self._episode_repo.update_trakt_details_enrich_state(
                             session,
                             show_trakt_id,
@@ -440,17 +441,16 @@ class EpisodeMetadataService:
                             episode,
                             status=ENRICH_STATUS_CHECKED_NO_DATA,
                         )
-                    else:
-                        self._resolve_episode_summary(
-                            session,
-                            show_trakt_id=show_trakt_id,
-                            episode=details,
-                        )
-                        status = (
-                            ENRICH_STATUS_CHECKED_NO_DATA
-                            if details.trakt_rating is None or details.trakt_votes is None
-                            else ENRICH_STATUS_READY
-                        )
+                else:
+                    with self._db.session() as session:
+                        show_imdb_id = self._show_imdb_id(session, show_trakt_id)
+                    self._resolve_episode_summary_for_show(show_imdb_id, details)
+                    status = (
+                        ENRICH_STATUS_CHECKED_NO_DATA
+                        if details.trakt_rating is None or details.trakt_votes is None
+                        else ENRICH_STATUS_READY
+                    )
+                    with self._db.session() as session:
                         self._episode_repo.update_trakt_details_enrich_state(
                             session,
                             show_trakt_id,
@@ -491,6 +491,9 @@ class EpisodeMetadataService:
 
     def _resolve_episode_summary(self, session, *, show_trakt_id: int, episode: EpisodeSummary) -> None:
         show_imdb_id = self._show_imdb_id(session, show_trakt_id)
+        self._resolve_episode_summary_for_show(show_imdb_id, episode)
+
+    def _resolve_episode_summary_for_show(self, show_imdb_id: str, episode: EpisodeSummary) -> None:
         if not show_imdb_id:
             return
         resolution = self._imdb_resolver.resolve(
@@ -538,66 +541,86 @@ class EpisodeMetadataService:
         client = self._auth.get_client()
         tmdb = self._tmdb_factory(self._auth.config)
         changed = False
-        with self._db.session() as session:
-            for show_trakt_id, episodes in missing_by_show.items():
+        for show_trakt_id, episodes in missing_by_show.items():
+            try:
+                show_tmdb_id = self._load_show_tmdb_id(show_trakt_id, client)
+            except Exception:
+                self._set_still_states(show_trakt_id, episodes, status=ENRICH_STATUS_RETRYABLE_FAILURE)
+                continue
+            if not show_tmdb_id:
+                self._set_still_states(show_trakt_id, episodes, status=ENRICH_STATUS_CHECKED_NO_DATA)
+                continue
+            episodes_by_season: dict[int, list[int]] = {}
+            for season, episode in episodes:
+                episodes_by_season.setdefault(season, []).append(episode)
+            for season, episode_numbers in episodes_by_season.items():
                 try:
-                    show_tmdb_id = self._load_show_tmdb_id(show_trakt_id, client)
+                    season_stills = self._season_still_urls(tmdb, show_tmdb_id, season, episode_numbers)
                 except Exception:
-                    for season, episode in episodes:
-                        self._episode_repo.update_still_enrich_state(
-                            session,
-                            show_trakt_id,
-                            season,
-                            episode,
-                            status=ENRICH_STATUS_RETRYABLE_FAILURE,
-                        )
+                    self._set_still_states(
+                        show_trakt_id,
+                        [(season, episode) for episode in episode_numbers],
+                        status=ENRICH_STATUS_RETRYABLE_FAILURE,
+                    )
                     continue
-                if not show_tmdb_id:
-                    for season, episode in episodes:
+                with self._db.session() as session:
+                    for episode in episode_numbers:
+                        still_url = season_stills.get(episode, "")
+                        row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
+                        if row is None:
+                            continue
+                        if still_url:
+                            if row.still_url != still_url or row.still_status != ENRICH_STATUS_READY:
+                                self._episode_repo.update_still_enrich_state(
+                                    session,
+                                    show_trakt_id,
+                                    season,
+                                    episode,
+                                    status=ENRICH_STATUS_READY,
+                                    still_url=still_url,
+                                )
+                                changed = True
+                            continue
                         self._episode_repo.update_still_enrich_state(
                             session,
                             show_trakt_id,
                             season,
                             episode,
                             status=ENRICH_STATUS_CHECKED_NO_DATA,
+                            still_url="",
                         )
-                    continue
-                for season, episode in episodes:
-                    try:
-                        still_url = tmdb.get_episode_still_url(show_tmdb_id, season, episode)
-                    except Exception:
-                        self._episode_repo.update_still_enrich_state(
-                            session,
-                            show_trakt_id,
-                            season,
-                            episode,
-                            status=ENRICH_STATUS_RETRYABLE_FAILURE,
-                        )
-                        continue
-                    row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
-                    if row is None:
-                        continue
-                    if still_url:
-                        if row.still_url != still_url or row.still_status != ENRICH_STATUS_READY:
-                            self._episode_repo.update_still_enrich_state(
-                                session,
-                                show_trakt_id,
-                                season,
-                                episode,
-                                status=ENRICH_STATUS_READY,
-                                still_url=still_url,
-                            )
-                            changed = True
-                        continue
-                    self._episode_repo.update_still_enrich_state(
-                        session,
-                        show_trakt_id,
-                        season,
-                        episode,
-                        status=ENRICH_STATUS_CHECKED_NO_DATA,
-                        still_url="",
-                    )
         return changed
+
+    def _set_still_states(
+        self,
+        show_trakt_id: int,
+        episodes: list[tuple[int, int]],
+        *,
+        status: str,
+    ) -> None:
+        """Apply a provider result in one short transaction, never during I/O."""
+        with self._db.session() as session:
+            for season, episode in episodes:
+                update = {"status": status}
+                if status == ENRICH_STATUS_CHECKED_NO_DATA:
+                    update["still_url"] = ""
+                self._episode_repo.update_still_enrich_state(
+                    session,
+                    show_trakt_id,
+                    season,
+                    episode,
+                    **update,
+                )
+
+    @staticmethod
+    def _season_still_urls(tmdb, show_tmdb_id: int, season: int, episodes: list[int]) -> dict[int, str]:
+        load_season_stills = getattr(tmdb, "get_season_episode_still_urls", None)
+        if callable(load_season_stills):
+            return load_season_stills(show_tmdb_id, season)
+        return {
+            episode: tmdb.get_episode_still_url(show_tmdb_id, season, episode)
+            for episode in episodes
+        }
 
     def force_refresh_show_stills(self, show_trakt_id: int) -> bool:
         with self._db.session() as session:

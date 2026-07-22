@@ -3,32 +3,34 @@
     data-history-title-key="{{ title_group.title_key }}"
     data-history-entry-count="{{ title_group.entries|length }}"
 >
-    {% set title_filter_url = "/history?type=" ~ title_group.type ~ "&title=" ~ (title_group.title|urlencode) ~ "&rated_only=" ~ ('1' if history_rated_only else '0') ~ "&page=1&view=" ~ (history_view or 'episodes') %}
     {% set trakt_title_url = "" %}
-    {% if title_group.title_slug %}
-        {% if title_group.type == 'show' %}
-            {% set trakt_title_url = "https://trakt.tv/shows/" ~ title_group.title_slug %}
-        {% elif title_group.type == 'movie' %}
-            {% set trakt_title_url = "https://trakt.tv/movies/" ~ title_group.title_slug %}
-        {% endif %}
+    {% if title_group.type in ('show', 'movie') %}
+        {% set trakt_title_url = "https://trakt.tv/" ~ title_group.type ~ "s/" ~ (title_group.title_slug or title_group.title_trakt_id) %}
     {% endif %}
     <div class="history-title-summary">
         <div class="history-title-heading">
-            <a href="{{ title_filter_url }}">{{ title_group.title }}</a>
+            <a href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">{{ title_group.title }}</a>
         </div>
         <div class="history-title-poster-shell">
         {% set title_poster_status = title_group.title_poster_status or 'unknown' %}
         <a
-            href="{{ trakt_title_url or ('/titles/' ~ title_group.type ~ '/' ~ title_group.title_trakt_id) }}"
+            href="{{ trakt_title_url }}"
             class="history-title-poster"
-            {% if trakt_title_url %}target="_blank" rel="noreferrer"{% endif %}
+            target="_blank"
+            rel="noreferrer"
+            {% if title_group.type == 'show' %}
+            data-history-show-watch-trigger
+            data-watch-panel-url="/search/show/{{ title_group.title_trakt_id }}/watch-panel"
+            data-trakt-id="{{ title_group.title_trakt_id }}"
+            data-title="{{ title_group.title }}"
+            aria-label="Open episode watch panel for {{ title_group.title }}"
+            {% endif %}
         >
             {% if title_group.poster_url %}
             <img
                 src="{{ title_group.poster_url|cached_image_url }}"
                 alt="{{ title_group.title }} poster"
                 loading="lazy"
-                onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
             >
             {% elif title_poster_status == 'checked_no_data' %}
             <div class="poster-fallback">No poster</div>
@@ -125,7 +127,10 @@
     </div>
     <div class="history-episode-grid">
         {% for row in title_group.entries %}
-        <article class="history-episode-card{% if row.type != 'show' %} history-episode-card-compact{% endif %}">
+        <article
+            class="history-episode-card{% if row.type != 'show' %} history-episode-card-compact{% endif %}"
+            data-history-entry-card
+        >
             {% set episode_heading = row.episode_title or row.title %}
             {% set trakt_episode_url = "" %}
             {% set still_status = row.episode_still_status or 'unknown' %}
@@ -147,15 +152,15 @@
             <div class="history-entry-still-shell">
                 {% if preview_url %}
                 <a
-                    href="{{ trakt_episode_url or ('/titles/' ~ row.type ~ '/' ~ row.title_trakt_id) }}"
+                    href="{{ trakt_episode_url or trakt_title_url }}"
                     class="history-entry-still"
-                    {% if trakt_episode_url %}target="_blank" rel="noreferrer"{% endif %}
+                    target="_blank"
+                    rel="noreferrer"
                 >
                     <img
                         src="{{ preview_url|cached_image_url }}"
                         alt="{{ preview_alt }}"
                         loading="lazy"
-                        onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
                     >
                 </a>
                 {% elif still_status == 'checked_no_data' or still_status == 'retryable_failure' %}
@@ -195,39 +200,78 @@
                 {% endif %}
             </div>
             {% if row.type == 'show' and row.season is not none and row.episode is not none %}
-            <div class="poster-chip history-episode-ratings">
-                <span class="poster-chip-part">
-                    <img
-                        class="poster-chip-icon"
-                        src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
-                        alt="trakt"
-                    >
-                    <span>
-                        {% if row.episode_trakt_rating is not none %}
-                        {{ row.episode_trakt_rating|rating_with_votes(row.episode_trakt_votes) }}
-                        {% elif trakt_status == 'checked_no_data' %}
-                        n/a
-                        {% else %}
-                        Loading
-                        {% endif %}
+            <div class="history-episode-footer">
+                <div class="poster-chip history-episode-ratings">
+                    <span class="poster-chip-part">
+                        <img
+                            class="poster-chip-icon"
+                            src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
+                            alt="trakt"
+                        >
+                        <span>
+                            {% if row.episode_trakt_rating is not none %}
+                            {{ row.episode_trakt_rating|rating_with_votes(row.episode_trakt_votes) }}
+                            {% elif trakt_status == 'checked_no_data' %}
+                            n/a
+                            {% else %}
+                            Loading
+                            {% endif %}
+                        </span>
                     </span>
-                </span>
-                <span class="poster-chip-part">
-                    <img
-                        class="poster-chip-icon"
-                        src="{{ request.url_for('static', path='imdb_icon.png') }}"
-                        alt="imdb"
-                    >
-                    <span>
-                        {% if row.episode_imdb_rating is not none %}
-                        {{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}
-                        {% elif imdb_status == 'checked_no_data' %}
-                        n/a
-                        {% else %}
-                        Loading
-                        {% endif %}
+                    <span class="poster-chip-part">
+                        <img
+                            class="poster-chip-icon"
+                            src="{{ request.url_for('static', path='imdb_icon.png') }}"
+                            alt="imdb"
+                        >
+                        <span>
+                            {% if row.episode_imdb_rating is not none %}
+                            {{ row.episode_imdb_rating|rating_with_votes(row.episode_imdb_votes) }}
+                            {% elif imdb_status == 'checked_no_data' %}
+                            n/a
+                            {% else %}
+                            Loading
+                            {% endif %}
+                        </span>
                     </span>
-                </span>
+                </div>
+                <button
+                    type="button"
+                    class="icon-button history-unwatch-action"
+                    title="Remove episode from watched history"
+                    aria-label="Remove {{ title_group.title }} {{ row.season|episode_label(row.episode) }} from watched history"
+                    data-search-unwatch-action
+                    data-title-type="show"
+                    data-trakt-id="{{ row.title_trakt_id }}"
+                    data-title="{{ row.title }}"
+                    data-scope="episode"
+                    data-season="{{ row.season }}"
+                    data-episode="{{ row.episode }}"
+                >
+                    <span class="search-watch-action-glyphs" aria-hidden="true">
+                        <img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt="">
+                        <img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt="">
+                    </span>
+                </button>
+            </div>
+            {% elif row.type == 'movie' %}
+            <div class="history-episode-footer history-movie-footer">
+                <button
+                    type="button"
+                    class="icon-button history-unwatch-action"
+                    title="Remove movie from watched history"
+                    aria-label="Remove {{ row.title }} from watched history"
+                    data-search-unwatch-action
+                    data-title-type="movie"
+                    data-trakt-id="{{ row.title_trakt_id }}"
+                    data-title="{{ row.title }}"
+                    data-scope="title"
+                >
+                    <span class="search-watch-action-glyphs" aria-hidden="true">
+                        <img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt="">
+                        <img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt="">
+                    </span>
+                </button>
             </div>
             {% endif %}
         </article>

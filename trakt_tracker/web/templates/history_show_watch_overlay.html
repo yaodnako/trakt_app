@@ -1,0 +1,45 @@
+<div id="history-watch-overlay" class="search-watch-overlay" hidden aria-hidden="true">
+    <div class="search-watch-backdrop" data-history-watch-close></div>
+    <section class="search-watch-dialog" role="dialog" aria-modal="true" aria-labelledby="history-watch-title">
+        <div class="title-matrix-dialog-head">
+            <div class="title-matrix-dialog-copy">
+                <p class="title-matrix-eyebrow">Episode Watch</p>
+                <h2 id="history-watch-title">Loading...</h2>
+                <p class="title-matrix-subtitle">Manage watched episodes</p>
+            </div>
+            <div class="search-watch-header-actions">
+                <button type="button" class="search-watch-scope-button search-watch-header-scope" data-search-watch-action data-search-watch-header-mark data-title-type="show" data-scope="title" hidden>
+                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"><span>All</span>
+                </button>
+                <button type="button" class="search-watch-scope-button is-danger search-watch-header-scope" data-search-unwatch-action data-search-watch-header-unwatch data-title-type="show" data-scope="title" hidden>
+                    <span class="search-watch-action-glyphs" aria-hidden="true"><img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt=""><img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt=""></span><span>All</span>
+                </button>
+                <a class="search-watch-scope-button search-watch-header-play" data-show-watch-play target="_blank" rel="noreferrer" hidden><img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true"></a>
+            </div>
+            <button type="button" class="title-matrix-close" data-history-watch-close aria-label="Close history watch panel"><span class="title-matrix-close-glyph">&times;</span></button>
+        </div>
+        <div id="history-watch-body" class="search-watch-body"></div>
+    </section>
+</div>
+
+<div id="history-watch-date-overlay" class="search-watch-date-overlay" hidden aria-hidden="true">
+    <div class="search-watch-backdrop" data-history-watch-date-close></div>
+    <section class="search-watch-date-dialog" role="dialog" aria-modal="true" aria-labelledby="history-watch-date-title">
+        <div class="title-matrix-dialog-head">
+            <div class="title-matrix-dialog-copy">
+                <p class="title-matrix-eyebrow">Watched Date</p>
+                <h2 id="history-watch-date-title">Mark watched</h2>
+                <p class="title-matrix-subtitle">Choose how this appears in Trakt history</p>
+            </div>
+            <button type="button" class="title-matrix-close" data-history-watch-date-close aria-label="Close watched date prompt"><span class="title-matrix-close-glyph">&times;</span></button>
+        </div>
+        <div class="search-watch-date-actions">
+            <button type="button" class="button search-watch-now-action" data-history-watch-date-mode="now">Now</button>
+            <label class="search-watch-custom-date">
+                <span>Custom date</span>
+                <input type="datetime-local" data-history-watch-custom-input>
+            </label>
+            <button type="button" class="button ghost search-watch-custom-submit" data-history-watch-date-mode="custom">Submit</button>
+        </div>
+    </section>
+</div>

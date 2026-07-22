@@ -109,6 +109,350 @@ class HistoryService:
                     for remote_item in remote_items:
                         client.add_history_item(remote_item)
 
+    def remove_episode_watch(self, *, show_trakt_id: int, season: int, episode: int) -> dict:
+        client = self._auth.get_client()
+        with self._db.session() as session:
+            episode_row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
+            if episode_row is None:
+                episodes = client.get_show_episodes(show_trakt_id)
+                self._episode_repo.replace_show_episodes(session, show_trakt_id, episodes)
+                episode_row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
+            if episode_row is None or not episode_row.episode_trakt_id:
+                raise RuntimeError("Episode metadata was not found for the selected season/episode")
+
+            previous = self._history.episode_watch(
+                session,
+                show_trakt_id=show_trakt_id,
+                season=season,
+                episode=episode,
+            )
+            if previous is None:
+                raise RuntimeError("This episode is not marked watched.")
+            restore_watched_at = previous.watched_at
+            restore_watched_at_known = bool(previous.watched_at_known)
+            restore_title = previous.title
+
+            client.remove_history_items(
+                [
+                    HistoryItemInput(
+                        title_type="show",
+                        trakt_id=int(episode_row.episode_trakt_id),
+                        watched_at=None,
+                        season=season,
+                        episode=episode,
+                        title=restore_title,
+                    )
+                ]
+            )
+
+            self._history.remove_episode_watch(
+                session,
+                show_trakt_id=show_trakt_id,
+                season=season,
+                episode=episode,
+            )
+            title = self._titles.get_title(session, show_trakt_id)
+            if title is not None:
+                state = self._user_states.ensure_state(session, title.id)
+                latest = self._history.latest_watch_for_title(session, title_type="show", trakt_id=show_trakt_id)
+                state.in_history = latest is not None
+                state.last_watched_at = (
+                    latest.watched_at
+                    if latest is not None and bool(latest.watched_at_known)
+                    else None
+                )
+                if latest is None:
+                    state.tracked = False
+
+        normalized_watched_at = restore_watched_at
+        if normalized_watched_at.tzinfo is None:
+            normalized_watched_at = normalized_watched_at.replace(tzinfo=UTC)
+        return {
+            "title_type": "show",
+            "trakt_id": int(show_trakt_id),
+            "title": restore_title,
+            "season": int(season),
+            "episode": int(episode),
+            "watched_at": normalized_watched_at.astimezone(UTC).isoformat(),
+            "watched_at_known": restore_watched_at_known,
+        }
+
+    def remove_watch_scope(
+        self,
+        *,
+        title_type: str,
+        trakt_id: int,
+        scope: str,
+        season: int | None = None,
+    ) -> dict:
+        normalized_type = "show" if title_type == "show" else "movie"
+        if normalized_type == "movie":
+            scope = "title"
+            season = None
+        elif scope not in {"season", "title"}:
+            raise RuntimeError("Unsupported watched-history scope.")
+        if scope == "season" and season is None:
+            raise RuntimeError("Missing season identity.")
+
+        client = self._auth.get_client()
+        with self._db.session() as session:
+            rows = self._history.watches_for_scope(
+                session,
+                title_type=normalized_type,
+                trakt_id=trakt_id,
+                season=season if scope == "season" else None,
+            )
+            if not rows:
+                raise RuntimeError("This title is not marked watched.")
+
+            remote_items: list[HistoryItemInput] = []
+            if normalized_type == "movie":
+                remote_items.append(
+                    HistoryItemInput(
+                        title_type="movie",
+                        trakt_id=trakt_id,
+                        watched_at=None,
+                        title=rows[0].title,
+                    )
+                )
+            else:
+                keys = {
+                    (int(row.season), int(row.episode))
+                    for row in rows
+                    if row.season is not None and row.episode is not None
+                }
+                episode_rows = {
+                    key: self._episode_repo.find_episode(session, trakt_id, key[0], key[1])
+                    for key in keys
+                }
+                if any(row is None or not row.episode_trakt_id for row in episode_rows.values()):
+                    episodes = client.get_show_episodes(trakt_id)
+                    self._episode_repo.replace_show_episodes(session, trakt_id, episodes)
+                    episode_rows = {
+                        key: self._episode_repo.find_episode(session, trakt_id, key[0], key[1])
+                        for key in keys
+                    }
+                if any(row is None or not row.episode_trakt_id for row in episode_rows.values()):
+                    raise RuntimeError("Episode metadata was not found for all watched episodes.")
+                remote_items.extend(
+                    HistoryItemInput(
+                        title_type="show",
+                        trakt_id=int(episode_rows[key].episode_trakt_id),
+                        watched_at=None,
+                        season=key[0],
+                        episode=key[1],
+                        title=rows[0].title,
+                    )
+                    for key in sorted(keys)
+                )
+
+            client.remove_history_items(remote_items)
+            removed = self._history.remove_watches_for_scope(
+                session,
+                title_type=normalized_type,
+                trakt_id=trakt_id,
+                season=season if scope == "season" else None,
+            )
+            title = self._titles.get_title(session, trakt_id)
+            if title is not None:
+                state = self._user_states.ensure_state(session, title.id)
+                latest = self._history.latest_watch_for_title(
+                    session,
+                    title_type=normalized_type,
+                    trakt_id=trakt_id,
+                )
+                state.in_history = latest is not None
+                state.last_watched_at = (
+                    latest.watched_at
+                    if latest is not None and bool(latest.watched_at_known)
+                    else None
+                )
+                if normalized_type == "show" and latest is None:
+                    state.tracked = False
+            still_watched = self._history.latest_watch_for_title(
+                session,
+                title_type=normalized_type,
+                trakt_id=trakt_id,
+            ) is not None
+
+        return {
+            "kind": "scope",
+            "title_type": normalized_type,
+            "trakt_id": int(trakt_id),
+            "title": removed[0].title,
+            "scope": scope,
+            "season": season,
+            "still_watched": still_watched,
+            "items": [self._watch_restore_item(row) for row in removed],
+        }
+
+    def restore_watch_scope(self, *, items: list[dict]) -> None:
+        if not items:
+            raise RuntimeError("Missing watched-history restore data.")
+        client = self._auth.get_client()
+        with self._db.session() as session:
+            remote_items: list[HistoryItemInput] = []
+            episode_remote_ids: dict[tuple[int, int, int], int] = {}
+            show_ids = {
+                int(item["trakt_id"])
+                for item in items
+                if item.get("title_type") == "show"
+            }
+            for show_id in show_ids:
+                keys = {
+                    (show_id, int(item["season"]), int(item["episode"]))
+                    for item in items
+                    if item.get("title_type") == "show" and int(item["trakt_id"]) == show_id
+                }
+                missing = False
+                for key in keys:
+                    row = self._episode_repo.find_episode(session, key[0], key[1], key[2])
+                    if row is None or not row.episode_trakt_id:
+                        missing = True
+                    else:
+                        episode_remote_ids[key] = int(row.episode_trakt_id)
+                if missing:
+                    episodes = client.get_show_episodes(show_id)
+                    self._episode_repo.replace_show_episodes(session, show_id, episodes)
+                    for key in keys:
+                        row = self._episode_repo.find_episode(session, key[0], key[1], key[2])
+                        if row is None or not row.episode_trakt_id:
+                            raise RuntimeError("Episode metadata was not found for all watched episodes.")
+                        episode_remote_ids[key] = int(row.episode_trakt_id)
+
+            for item in items:
+                title_type = "show" if item.get("title_type") == "show" else "movie"
+                parent_trakt_id = int(item["trakt_id"])
+                watched_at = item["watched_at"]
+                watched_at_known = bool(item.get("watched_at_known", True))
+                season_number = int(item["season"]) if item.get("season") is not None else None
+                episode_number = int(item["episode"]) if item.get("episode") is not None else None
+                remote_trakt_id = parent_trakt_id
+                if title_type == "show":
+                    remote_trakt_id = episode_remote_ids[(parent_trakt_id, season_number, episode_number)]
+                remote_items.append(
+                    HistoryItemInput(
+                        title_type=title_type,
+                        trakt_id=remote_trakt_id,
+                        watched_at=watched_at if watched_at_known else UNDATED_HISTORY_AT,
+                        season=season_number,
+                        episode=episode_number,
+                        title=str(item.get("title") or ""),
+                    )
+                )
+
+            client.add_history_items(remote_items)
+            latest_by_title: dict[tuple[str, int], datetime] = {}
+            for item in items:
+                title_type = "show" if item.get("title_type") == "show" else "movie"
+                trakt_id = int(item["trakt_id"])
+                watched_at = item["watched_at"]
+                watched_at_known = bool(item.get("watched_at_known", True))
+                title_text = str(item.get("title") or f"{title_type.capitalize()} {trakt_id}")
+                title = self._titles.get_title(session, trakt_id)
+                if title is None:
+                    title = self._titles.upsert_title(
+                        session,
+                        TitleSummary(trakt_id=trakt_id, title_type=title_type, title=title_text),
+                    )
+                state = self._user_states.ensure_state(session, title.id)
+                state.in_history = True
+                state.tracked = title_type == "show"
+                if watched_at_known:
+                    key = (title_type, trakt_id)
+                    latest_by_title[key] = max(latest_by_title.get(key, watched_at), watched_at)
+                self._history.add_event(
+                    session,
+                    trakt_history_id=None,
+                    title_trakt_id=trakt_id,
+                    title=title.title,
+                    title_type=title_type,
+                    action="watched",
+                    watched_at=watched_at,
+                    watched_at_known=watched_at_known,
+                    season=int(item["season"]) if item.get("season") is not None else None,
+                    episode=int(item["episode"]) if item.get("episode") is not None else None,
+                    source="local",
+                )
+            for (title_type, trakt_id), watched_at in latest_by_title.items():
+                title = self._titles.get_title(session, trakt_id)
+                if title is not None:
+                    self._user_states.ensure_state(session, title.id).last_watched_at = watched_at
+
+    @staticmethod
+    def _watch_restore_item(row) -> dict:
+        watched_at = row.watched_at
+        if watched_at.tzinfo is None:
+            watched_at = watched_at.replace(tzinfo=UTC)
+        return {
+            "title_type": row.title_type,
+            "trakt_id": int(row.title_trakt_id),
+            "title": row.title,
+            "season": row.season,
+            "episode": row.episode,
+            "watched_at": watched_at.astimezone(UTC).isoformat(),
+            "watched_at_known": bool(row.watched_at_known),
+        }
+
+    def restore_episode_watch(
+        self,
+        *,
+        show_trakt_id: int,
+        title: str,
+        season: int,
+        episode: int,
+        watched_at: datetime,
+        watched_at_known: bool,
+    ) -> None:
+        if watched_at_known:
+            self.add_history_item(
+                HistoryItemInput(
+                    title_type="show",
+                    trakt_id=show_trakt_id,
+                    watched_at=watched_at,
+                    season=season,
+                    episode=episode,
+                    title=title,
+                )
+            )
+            return
+
+        client = self._auth.get_client()
+        with self._db.session() as session:
+            episode_row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
+            if episode_row is None or not episode_row.episode_trakt_id:
+                raise RuntimeError("Episode metadata was not found for the selected season/episode")
+            client.add_history_items(
+                [
+                    HistoryItemInput(
+                        title_type="show",
+                        trakt_id=int(episode_row.episode_trakt_id),
+                        watched_at=UNDATED_HISTORY_AT,
+                        season=season,
+                        episode=episode,
+                        title=title,
+                    )
+                ]
+            )
+            title_row = self._titles.get_title(session, show_trakt_id)
+            if title_row is not None:
+                state = self._user_states.ensure_state(session, title_row.id)
+                state.in_history = True
+                state.tracked = True
+            self._history.add_event(
+                session,
+                trakt_history_id=None,
+                title_trakt_id=show_trakt_id,
+                title=title,
+                title_type="show",
+                action="watched",
+                watched_at=UNDATED_HISTORY_AT,
+                watched_at_known=False,
+                season=season,
+                episode=episode,
+                source="local",
+            )
+
     def set_rating(self, item: RatingInput, title: str = "") -> None:
         client = self._auth.get_client()
         with self._db.session() as session:

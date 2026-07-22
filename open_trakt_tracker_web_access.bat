@@ -19,5 +19,5 @@ if errorlevel 1 (
     netsh advfirewall firewall set rule name="%FIREWALL_RULE_NAME%" new enable=Yes >nul
 )
 
-start "%WEB_WINDOW_TITLE%" cmd /k "title %WEB_WINDOW_TITLE% && python -c \"import uvicorn; uvicorn.run('trakt_tracker.web.app:app', host='0.0.0.0', port=8000, reload=False)\""
+start "%WEB_WINDOW_TITLE%" cmd /k "title %WEB_WINDOW_TITLE% && python -m trakt_tracker.web.main --host 0.0.0.0 --port 8000"
 echo External access enabled on port 8000.

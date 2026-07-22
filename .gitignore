@@ -4,8 +4,6 @@ __pycache__/
 *.sqlite3
 .vs/
 *.egg-info/
-generated/
-tools/__pycache__/
-tools/visual_checks/.venv/
-tools/visual_checks/browsers/
+build/
+dist/
 .codex-*.png

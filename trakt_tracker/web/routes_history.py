@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 from collections import OrderedDict
 from datetime import UTC
 from urllib.parse import quote
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from sqlalchemy.exc import OperationalError
 
 from trakt_tracker.application.enrich_queue import (
     TASK_STATUS_COMPLETED,
@@ -108,20 +106,17 @@ def register_history_routes(app, *, render, render_fragment) -> None:
     async def history_auto_sync(request: Request) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
         bg_tasks = request.app.state.bg_tasks
-        if bg_tasks.is_running("history_sync") or services.enrich_queue.is_running():
-            return JSONResponse({"changed": False, "message": "History auto-sync: busy."})
-        try:
-            changed = await asyncio.to_thread(services.sync.maybe_refresh_history)
-        except OperationalError as exc:
-            if "database is locked" in str(exc).lower():
-                return JSONResponse({"changed": False, "message": "History auto-sync: busy."})
-            return JSONResponse({"changed": False, "error": str(exc), "message": f"History auto-sync failed: {exc}"})
-        except Exception as exc:
-            return JSONResponse({"changed": False, "error": str(exc), "message": f"History auto-sync failed: {exc}"})
+        started = bg_tasks.start(
+            "history_sync",
+            source="History sync (auto)",
+            operations=services.operations,
+            fn=services.sync.maybe_refresh_history,
+        )
         return JSONResponse(
             {
-                "changed": bool(changed),
-                "message": "History auto-sync updated rows." if changed else "History auto-sync: no changes.",
+                "changed": False,
+                "started": started,
+                "message": "History auto-sync started." if started else "History auto-sync: already running or queued.",
             }
         )
 
@@ -273,19 +268,11 @@ def register_history_routes(app, *, render, render_fragment) -> None:
             page = max(1, int(str(form.get("page", "1") or "1")))
         except ValueError:
             page = 1
-        if services.enrich_queue.is_running():
-            flash = "History sync is waiting for current enrich tasks to finish."
-            redirect_url = (
-                f"/history?type={history_type}&title={quote(title_filter)}&page={page}"
-                f"&rated_only={'1' if rated_only else '0'}&view={history_view}&flash={quote(flash)}"
-            )
-            return RedirectResponse(url=redirect_url, status_code=303)
-        services.cache.clear_provider("images")
         started = bg_tasks.start(
             "history_sync",
             source="History sync (manual full)",
             operations=services.operations,
-            fn=lambda: services.sync.refresh_history(force_full_assets=True),
+            fn=services.sync.sync_assets_full,
         )
         flash = "History sync started." if started else "History sync is already running."
         redirect_url = (

@@ -44,7 +44,7 @@
 {% if results %}
 <section class="search-results-grid">
     {% for item in results %}
-    {% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ item.slug if item.slug else ('/titles/' ~ item.title_type ~ '/' ~ item.trakt_id) %}
+    {% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ (item.slug or item.trakt_id) %}
     <article class="result-card">
         <a class="poster-shell search-result-poster" href="{{ trakt_title_url }}" {% if item.slug %}target="_blank" rel="noreferrer"{% endif %}>
             {% if item.poster_url %}
@@ -82,7 +82,7 @@
 <section class="panel">
     <div class="section-head">
         <h3>Recent queries</h3>
-        <p>Reuses the existing saved desktop search history.</p>
+        <p>Saved search history.</p>
     </div>
     <div class="chip-row">
         {% for item in search_history %}

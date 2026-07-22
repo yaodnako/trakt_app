@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from trakt_tracker.application.episode_metadata import EpisodeMetadataService
@@ -19,6 +19,13 @@ from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 
 
 WATCH_HISTORY_STREAM_TYPES = (None, "movie")
+
+
+@dataclass(slots=True)
+class _HistoryReconciliationScope:
+    title_type: str
+    present_history_ids: set[int]
+    watched_at_cutoff: datetime | None
 
 
 class HistorySyncWorkflow:
@@ -51,11 +58,32 @@ class HistorySyncWorkflow:
         self._episode_metadata = episode_metadata
         self._catalog = catalog
 
-    def initial_import(self) -> None:
+    def initial_import(self, *, status_callback=None, defer_enrichment: bool = False) -> None:
+        def report(message: str) -> None:
+            self._operations.publish("Initial sync", message)
+            if status_callback is not None:
+                status_callback(message)
+
+        report("Fetching complete Trakt history (5%)")
         client = self._auth.get_client()
         history_items = self._fetch_all_watch_history(client)
+        report("Fetching Trakt ratings (35%)")
         ratings = self._fetch_all_ratings(client)
-        self._sync_history_and_ratings(history_items, ratings)
+        self._sync_history_and_ratings(
+            history_items,
+            ratings,
+            reconciliation_scopes=self._complete_reconciliation_scopes(history_items),
+            run_enrichment=not defer_enrichment,
+        )
+        report("Saving history and ratings (85%)")
+        signature = self._current_history_activity_signature()
+        now = datetime.now(tz=UTC).isoformat()
+        with self._db.session() as session:
+            if signature:
+                self._sync_state.set_value(session, SyncPolicy.HISTORY_SIGNATURE_KEY, signature)
+            self._sync_state.set_value(session, SyncPolicy.HISTORY_LAST_SYNC_KEY, now)
+            self._sync_state.set_value(session, SyncPolicy.HISTORY_LAST_FULL_RECONCILE_KEY, now)
+        report("History import completed (100%)")
 
     def refresh_history(self, *, force_full_assets: bool = False, status_callback=None) -> None:
         self.sync_updates(force_full_assets=force_full_assets, status_callback=status_callback)
@@ -98,11 +126,32 @@ class HistorySyncWorkflow:
         client = self._auth.get_client()
         client.clear_cache()
         report("Preparing sync (5%)")
-        history_items = self._fetch_recent_history_updates(client)
+        history_items, reconciliation_scopes = self._fetch_recent_history_updates(client)
+        with self._db.session() as session:
+            last_full_reconcile_at = self._sync_state.get_value(
+                session,
+                SyncPolicy.HISTORY_LAST_FULL_RECONCILE_KEY,
+            )
+        full_reconcile = self._policy.should_run_history_full_reconcile(last_full_reconcile_at)
+        if full_reconcile:
+            reconciliation_scopes = self._fetch_full_history_reconciliation(client)
         report("Fetched recent history updates (15%)")
         ratings = self._fetch_all_ratings(client)
         report("Fetched ratings (25%)")
-        self._sync_history_and_ratings(history_items, ratings)
+        removed_count = self._sync_history_and_ratings(
+            history_items,
+            ratings,
+            reconciliation_scopes=reconciliation_scopes,
+        )
+        if full_reconcile:
+            with self._db.session() as session:
+                self._sync_state.set_value(
+                    session,
+                    SyncPolicy.HISTORY_LAST_FULL_RECONCILE_KEY,
+                    datetime.now(tz=UTC).isoformat(),
+                )
+        if removed_count:
+            report(f"Removed {removed_count} history item(s) no longer present on Trakt")
         report("Merged history and ratings (55%)")
         if force_full_assets:
             self._force_refresh_all_assets(status_callback=status_callback)
@@ -199,10 +248,19 @@ class HistorySyncWorkflow:
                 upcoming=self._episode_repo.list_upcoming(session),
             )
 
-    def _sync_history_and_ratings(self, history_items: list[dict], ratings: list[dict]) -> None:
+    def _sync_history_and_ratings(
+        self,
+        history_items: list[dict],
+        ratings: list[dict],
+        *,
+        reconciliation_scopes: list[_HistoryReconciliationScope] | None = None,
+        run_enrichment: bool = True,
+    ) -> int:
         show_ids: set[int] = set()
         title_sync_targets: set[tuple[int, str]] = set()
         episode_sync_targets: set[tuple[int, int, int]] = set()
+        removed_title_keys: set[tuple[str, int]] = set()
+        removed_count = 0
         with self._db.session() as session:
             for item in history_items:
                 imported = self._import_history_item(session, item)
@@ -213,6 +271,22 @@ class HistorySyncWorkflow:
                     title_sync_targets.add(title_target)
                 if episode_target is not None:
                     episode_sync_targets.add(episode_target)
+            for scope in reconciliation_scopes or []:
+                scope_removed_title_keys, scope_removed_count = self._history.delete_missing_trakt_watches(
+                    session,
+                    title_type=scope.title_type,
+                    present_history_ids=scope.present_history_ids,
+                    watched_at_cutoff=scope.watched_at_cutoff,
+                )
+                removed_title_keys.update(scope_removed_title_keys)
+                removed_count += scope_removed_count
+            for title_type, trakt_id in removed_title_keys:
+                if self._history.has_watched_title(session, title_type=title_type, trakt_id=trakt_id):
+                    continue
+                title_model = self._titles.get_title(session, trakt_id)
+                if title_model is None or str(title_model.title_type) != title_type:
+                    continue
+                self._user_states.ensure_state(session, title_model.id).in_history = False
             self._history.delete_trakt_rated(session)
             for item in ratings:
                 self._import_rating_item(session, item)
@@ -224,9 +298,11 @@ class HistorySyncWorkflow:
             self._sync_state.set_value(session, "initial_import_at", datetime.now(tz=UTC).isoformat())
         for trakt_id in show_ids:
             self.refresh_show(trakt_id)
-        self._run_sync_event_refreshes(title_sync_targets, episode_sync_targets)
-        self._episode_metadata.backfill_episode_imdb_ids_from_payloads(history_items + ratings)
-        self._episode_metadata.enrich_episode_imdb_ratings()
+        if run_enrichment:
+            self._run_sync_event_refreshes(title_sync_targets, episode_sync_targets)
+            self._episode_metadata.backfill_episode_imdb_ids_from_payloads(history_items + ratings)
+            self._episode_metadata.enrich_episode_imdb_ratings()
+        return removed_count
 
     @staticmethod
     def _sync_event_targets_from_item(item: dict) -> tuple[tuple[int, str] | None, tuple[int, int, int] | None]:
@@ -574,26 +650,147 @@ class HistorySyncWorkflow:
                 page += 1
         return items
 
-    def _fetch_recent_history_updates(self, client, page_size: int = 100) -> list[dict]:
+    def _fetch_recent_history_updates(
+        self,
+        client,
+        page_size: int = 100,
+    ) -> tuple[list[dict], list[_HistoryReconciliationScope]]:
         with self._db.session() as session:
             known_ids = self._history.known_trakt_history_ids(session)
         if not known_ids:
-            return self._fetch_all_watch_history(client, page_size=page_size)
+            items = self._fetch_all_watch_history(client, page_size=page_size)
+            return items, self._complete_reconciliation_scopes(items)
         items: list[dict] = []
         seen_history_ids: set[int] = set()
+        reconciliation_scopes: list[_HistoryReconciliationScope] = []
         for title_type in WATCH_HISTORY_STREAM_TYPES:
+            scope_title_type = "show" if title_type is None else "movie"
+            scanned_scope_items: list[dict] = []
+            complete = False
             page = 1
             while True:
                 batch = client.get_watch_history(title_type=title_type, limit=page_size, page=page)
                 if not batch:
+                    complete = True
                     break
+                scanned_scope_items.extend(
+                    item for item in batch if self._history_item_title_type(item) == scope_title_type
+                )
                 unseen = [item for item in batch if item.get("id") not in known_ids]
                 if unseen:
                     self._extend_unique_history_items(items, unseen, seen_history_ids)
-                if not unseen or len(batch) < page_size:
+                if len(batch) < page_size:
+                    complete = True
+                    break
+                if not unseen:
                     break
                 page += 1
-        return items
+            scope = self._reconciliation_scope(
+                scope_title_type,
+                scanned_scope_items,
+                complete=complete,
+            )
+            if scope is not None:
+                reconciliation_scopes.append(scope)
+        return items, reconciliation_scopes
+
+    @classmethod
+    def _fetch_full_history_reconciliation(
+        cls,
+        client,
+        page_size: int = 100,
+    ) -> list[_HistoryReconciliationScope]:
+        scopes: list[_HistoryReconciliationScope] = []
+        load_page = getattr(client, "get_watch_history_page", None)
+        for title_type in WATCH_HISTORY_STREAM_TYPES:
+            scope_title_type = "show" if title_type is None else "movie"
+            scanned_scope_items: list[dict] = []
+            page = 1
+            while True:
+                page_count = None
+                if callable(load_page):
+                    batch, headers = load_page(title_type=title_type, limit=1000, page=page)
+                    try:
+                        page_count = int(
+                            headers.get("x-pagination-page-count")
+                            or headers.get("X-Pagination-Page-Count")
+                            or 0
+                        )
+                    except (TypeError, ValueError):
+                        page_count = None
+                else:
+                    batch = client.get_watch_history(title_type=title_type, limit=page_size, page=page)
+                scanned_scope_items.extend(
+                    item for item in batch if cls._history_item_title_type(item) == scope_title_type
+                )
+                if page_count is not None and page_count > 0:
+                    if page >= page_count:
+                        break
+                elif not batch or (not callable(load_page) and len(batch) < page_size):
+                    break
+                page += 1
+            scope = cls._reconciliation_scope(scope_title_type, scanned_scope_items, complete=True)
+            assert scope is not None
+            scopes.append(scope)
+        return scopes
+
+    @classmethod
+    def _complete_reconciliation_scopes(cls, items: list[dict]) -> list[_HistoryReconciliationScope]:
+        return [
+            scope
+            for title_type in ("show", "movie")
+            if (
+                scope := cls._reconciliation_scope(
+                    title_type,
+                    [item for item in items if cls._history_item_title_type(item) == title_type],
+                    complete=True,
+                )
+            ) is not None
+        ]
+
+    @classmethod
+    def _reconciliation_scope(
+        cls,
+        title_type: str,
+        items: list[dict],
+        *,
+        complete: bool,
+    ) -> _HistoryReconciliationScope | None:
+        timestamps = [
+            watched_at
+            for item in items
+            if (watched_at := cls._parse_history_watched_at(item.get("watched_at"))) is not None
+        ]
+        if not complete and not timestamps:
+            return None
+        return _HistoryReconciliationScope(
+            title_type=title_type,
+            present_history_ids={
+                int(item["id"])
+                for item in items
+                if item.get("id") is not None
+            },
+            watched_at_cutoff=None if complete else min(timestamps),
+        )
+
+    @staticmethod
+    def _history_item_title_type(item: dict) -> str:
+        raw_type = str(item.get("type", "") or "")
+        if raw_type == "movie":
+            return "movie"
+        if raw_type in {"episode", "show"}:
+            return "show"
+        return ""
+
+    @staticmethod
+    def _parse_history_watched_at(value) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
 
     @staticmethod
     def _extend_unique_history_items(target: list[dict], batch: list[dict], seen_history_ids: set[int]) -> None:

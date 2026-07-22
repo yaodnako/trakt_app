@@ -45,6 +45,10 @@ class IMDbDatasetClient:
     def db_path(self) -> Path:
         return self._db_path
 
+    def close(self) -> None:
+        """Release the persistent HTTP connection pool owned by this client."""
+        self._client.close()
+
     def is_ready(self) -> bool:
         return self._db_path.exists() and self._has_required_schema()
 

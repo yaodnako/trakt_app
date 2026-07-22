@@ -2,369 +2,234 @@
 
 {% block content %}
 <section class="panel">
-    <div class="section-head">
-        <h2>Settings</h2>
-    </div>
-    <form method="post" action="/settings" class="settings-form" id="settings-form" enctype="multipart/form-data">
-        <label>
-            <span>Client ID</span>
-            <input type="text" name="client_id" value="{{ config.client_id }}">
-        </label>
-        <label>
-            <span>Client Secret</span>
-            <input type="password" name="client_secret" value="{{ config.client_secret }}">
-        </label>
-        <label>
-            <span>Redirect URI</span>
-            <input type="text" name="redirect_uri" value="{{ config.redirect_uri }}">
-        </label>
-        <label>
-            <span>TMDb API Key</span>
-            <input type="text" name="tmdb_api_key" value="{{ config.tmdb_api_key }}">
-        </label>
-        <label>
-            <span>TMDb Read Token</span>
-            <input type="password" name="tmdb_read_access_token" value="{{ config.tmdb_read_access_token }}">
-        </label>
-        <label>
-            <span>Kinopoisk API Key</span>
-            <input type="password" name="kinopoisk_api_key" value="{{ config.kinopoisk_api_key }}">
-        </label>
-        <div class="settings-row settings-sync-row">
-            <label class="settings-inline-field">
-                <span>Kinopoisk domain tail</span>
-                <select name="kinopoisk_domain_tail">
-                    {% for option in kinopoisk_domain_options %}
-                    <option value="{{ option }}" {% if option == config.kinopoisk_domain_tail %}selected{% endif %}>{{ option }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <label class="settings-inline-field">
-                <span>Available tails (comma)</span>
-                <input type="text" name="kinopoisk_domain_options" value="{{ config.kinopoisk_domain_options }}" placeholder="net,ru,cx">
-            </label>
+    <section class="settings-accounts">
+        <div class="settings-accounts-head">
+            <strong>Trakt accounts</strong>
+            <form method="post" action="/settings/trakt-authorize">
+                <input type="hidden" name="return_to" value="/setup">
+                <button type="submit" class="button" {% if not trakt_configured %}disabled{% endif %}>Add account</button>
+            </form>
         </div>
-        <label>
-            <span>Cache TTL (hours)</span>
-            <input type="number" name="cache_ttl_hours" min="1" max="168" value="{{ config.cache_ttl_hours }}">
-        </label>
-        <label>
-            <span>Polling interval (minutes)</span>
-            <input type="number" name="poll_interval_minutes" min="5" max="240" value="{{ config.poll_interval_minutes }}">
-        </label>
-        <label>
-            <span>Notification repeat (minutes)</span>
-            <input type="number" name="notification_repeat_minutes" min="1" max="240" value="{{ config.notification_repeat_minutes }}">
-        </label>
-        <label>
-            <span>Notification release delay (minutes)</span>
-            <input type="number" name="notification_release_delay_minutes" min="0" max="10080" value="{{ config.notification_release_delay_minutes }}">
-        </label>
-        <div class="settings-row settings-sync-row">
-            <label class="settings-inline-field">
-                <span>IMDb auto-sync (minutes)</span>
-                <input type="number" name="imdb_auto_sync_interval_minutes" min="1" max="10080" value="{{ config.imdb_auto_sync_interval_minutes }}">
-            </label>
-            <button
-                type="submit"
-                class="button settings-sync-button"
-                formaction="/settings/imdb-sync"
-                formmethod="post"
-                formnovalidate
-                data-imdb-sync-button
-            >Sync IMDb</button>
-            <div class="settings-sync-meta">
-                <span>Last updated</span>
-                <strong data-imdb-current-status>{{ imdb_sync_status }}</strong>
+        {% if profiles %}
+        <div class="settings-profile-list">
+            {% for profile in profiles %}
+            <div class="settings-profile-row">
+                <div>
+                    <strong>{{ profile.slug }}</strong>
+                    <span>{{ 'Active' if profile.active else ('Connected' if profile.authorized else 'Disconnected') }}</span>
+                </div>
+                <div class="settings-inline-actions">
+                    {% if not profile.active and profile.authorized %}
+                    <form method="post" action="/settings/profiles/switch">
+                        <input type="hidden" name="slug" value="{{ profile.slug }}">
+                        <button type="submit" class="button ghost">Switch</button>
+                    </form>
+                    {% endif %}
+                    {% if profile.active or not profile.authorized %}
+                    <form method="post" action="/settings/trakt-authorize">
+                        <input type="hidden" name="return_to" value="/settings">
+                        <button type="submit" class="button ghost" {% if not trakt_configured %}disabled{% endif %}>Reconnect</button>
+                    </form>
+                    {% endif %}
+                    {% if profile.authorized %}
+                    <form method="post" action="/settings/profiles/disconnect">
+                        <input type="hidden" name="slug" value="{{ profile.slug }}">
+                        <button type="submit" class="button ghost">Disconnect</button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="settings-muted">No saved Trakt profiles yet.</p>
+        {% endif %}
+    </section>
+    <form id="trakt-defaults-form" method="post" action="/settings/provider-defaults">
+        <input type="hidden" name="provider" value="trakt">
+    </form>
+    <form id="tmdb-defaults-form" method="post" action="/settings/provider-defaults">
+        <input type="hidden" name="provider" value="tmdb">
+    </form>
+    <form method="post" action="/settings" class="settings-form settings-form-modern" id="settings-form" enctype="multipart/form-data">
+        <div class="settings-section-grid">
+            <section class="settings-card">
+                <div class="settings-card-head">
+                    <div><p class="eyebrow">Portal</p><h2>General</h2></div>
+                </div>
+                <div class="settings-field-grid">
+                    <label>
+                        <span>UTC offset</span>
+                        <input type="text" name="utc_offset" value="{{ config.utc_offset }}" placeholder="+03:00">
+                    </label>
+                    <label class="settings-checkbox">
+                        <input type="checkbox" name="open_in_embedded_player" value="1" {% if config.open_in_embedded_player %}checked{% endif %}>
+                        <span>Open Kinopoisk in embedded player</span>
+                    </label>
+                    <label class="settings-checkbox">
+                        <input type="checkbox" name="web_portal_start_with_windows" value="1" {% if config.web_portal_start_with_windows %}checked{% endif %}>
+                        <span>Start web portal with Windows</span>
+                    </label>
+                    <label class="settings-checkbox">
+                        <input type="checkbox" name="debug_mode" value="1" {% if config.debug_mode %}checked{% endif %}>
+                        <span>Enable debug toasts</span>
+                    </label>
+                </div>
+            </section>
+
+            <section class="settings-card">
+                <div class="settings-card-head">
+                    <div><p class="eyebrow">Alerts</p><h2>Notifications</h2></div>
+                </div>
+                <div class="settings-field-grid settings-field-grid-two">
+                    <label class="settings-checkbox settings-field-span">
+                        <input type="checkbox" name="notifications_enabled" value="1" {% if config.notifications_enabled %}checked{% endif %}>
+                        <span>Enable notifications</span>
+                    </label>
+                    <label>
+                        <span>Repeat (minutes)</span>
+                        <input type="number" name="notification_repeat_minutes" min="1" max="240" value="{{ config.notification_repeat_minutes }}">
+                    </label>
+                    <label>
+                        <span>Show/episode delay (minutes)</span>
+                        <input type="number" name="notification_release_delay_minutes" min="0" max="10080" value="{{ config.notification_release_delay_minutes }}">
+                    </label>
+                    <label>
+                        <span>Movie delay (minutes)</span>
+                        <input type="number" name="movie_release_notification_delay_minutes" min="0" max="43200" value="{{ config.movie_release_notification_delay_minutes }}">
+                    </label>
+                    <label class="settings-field-span">
+                        <span>Notification sound path</span>
+                        <input type="text" name="notification_sound_path" value="{{ config.notification_sound_path }}" placeholder="C:\\Sounds\\notify.mp3 or .wav">
+                    </label>
+                </div>
+                <div class="settings-inline-actions">
+                    <input type="file" name="notification_sound_file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" data-notification-sound-picker hidden>
+                    <button type="button" class="button ghost" data-browse-notification-sound>Browse...</button>
+                    <button type="button" class="button ghost" data-test-notification-sound>Test sound</button>
+                </div>
+            </section>
+
+            <section class="settings-card">
+                <div class="settings-card-head">
+                    <div><p class="eyebrow">Playback</p><h2>Kinopoisk</h2></div>
+                </div>
+                <div class="settings-field-grid settings-field-grid-two">
+                    <label class="settings-field-span">
+                        <span>Kinopoisk API Key</span>
+                        <input type="password" name="kinopoisk_api_key" value="" autocomplete="off" placeholder="{{ 'Saved — leave blank to keep' if config.kinopoisk_api_key else '' }}">
+                    </label>
+                    <label>
+                        <span>Domain tail</span>
+                        <select name="kinopoisk_domain_tail">
+                            {% for option in kinopoisk_domain_options %}
+                            <option value="{{ option }}" {% if option == config.kinopoisk_domain_tail %}selected{% endif %}>{{ option }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label>
+                        <span>Available tails (comma)</span>
+                        <input type="text" name="kinopoisk_domain_options" value="{{ config.kinopoisk_domain_options }}" placeholder="net,ru,cx">
+                    </label>
+                </div>
+            </section>
+        </div>
+
+        <details class="settings-provider-details settings-collapsible">
+            <summary>Provider credentials <span>{{ credentials_source }} Trakt · {{ 'configured' if tmdb_configured else 'missing' }} TMDb</span></summary>
+            <div class="settings-provider-grid">
+                <label><span>Client ID</span><input type="text" name="client_id" value="{{ config.client_id }}"></label>
+                <label><span>Client Secret</span><input type="password" name="client_secret" value="" autocomplete="off" placeholder="{{ 'Saved override — leave blank to keep' if config.client_secret else 'Leave blank to use application default' }}"></label>
+                <label><span>Redirect URI</span><input type="text" name="redirect_uri" value="{{ config.redirect_uri }}"></label>
+                <button type="submit" class="button ghost settings-default-button" form="trakt-defaults-form">Use application Trakt defaults</button>
+                <label><span>TMDb API Key</span><input type="password" name="tmdb_api_key" value="" autocomplete="off" placeholder="{{ 'Saved override — leave blank to keep' if config.tmdb_api_key else 'Leave blank to use application default' }}"></label>
+                <label><span>TMDb Read Token</span><input type="password" name="tmdb_read_access_token" value="" autocomplete="off" placeholder="{{ 'Saved override — leave blank to keep' if config.tmdb_read_access_token else 'Leave blank to use application default' }}"></label>
+                <button type="submit" class="button ghost settings-default-button" form="tmdb-defaults-form">Use application TMDb defaults</button>
+            </div>
+        </details>
+
+        <details class="settings-provider-details settings-collapsible">
+            <summary>Advanced sync and cache <span>Performance limits</span></summary>
+            <div class="settings-field-grid settings-field-grid-two">
+                <label><span>Cache TTL (hours)</span><input type="number" name="cache_ttl_hours" min="1" max="168" value="{{ config.cache_ttl_hours }}"></label>
+                <label><span>Catalog IMDb scan page limit</span><input type="number" name="explore_imdb_scan_page_limit" min="1" max="100" value="{{ config.explore_imdb_scan_page_limit }}"></label>
+                <label><span>Polling interval (minutes)</span><input type="number" name="poll_interval_minutes" min="5" max="240" value="{{ config.poll_interval_minutes }}"></label>
+                <label><span>IMDb auto-sync (minutes)</span><input type="number" name="imdb_auto_sync_interval_minutes" min="1" max="10080" value="{{ config.imdb_auto_sync_interval_minutes }}"></label>
+            </div>
+        </details>
+
+        <div class="settings-save-bar" data-settings-save-bar hidden>
+            <span>Unsaved changes</span>
+            <div class="settings-inline-actions">
+                <button type="reset" class="button ghost" data-settings-discard>Discard changes</button>
+                <button type="submit" class="button">Save settings</button>
             </div>
         </div>
-        <label>
-            <span>Notification sound path</span>
-            <input type="text" name="notification_sound_path" value="{{ config.notification_sound_path }}" placeholder="C:\\Sounds\\notify.mp3 or .wav">
-        </label>
-        <div class="settings-inline-actions">
-            <input type="file" name="notification_sound_file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" data-notification-sound-picker hidden>
-            <button type="button" class="button ghost" data-browse-notification-sound>Browse...</button>
-            <button type="button" class="button ghost" data-test-notification-sound>Test sound</button>
+    </form>
+
+    <section class="settings-card settings-data-update">
+        <div class="settings-card-head">
+            <div><p class="eyebrow">Local data</p><h2>Data update</h2></div>
+            <span class="settings-sync-pill" data-operation-summary>Idle</span>
         </div>
-        <div class="settings-inline-actions">
-            <button type="submit" class="button" formaction="/settings/full-sync" formmethod="post" formnovalidate>Full Sync</button>
-            <button type="submit" class="button ghost" formaction="/settings/sync-missing" formmethod="post" formnovalidate>Sync</button>
-            <button type="submit" class="button ghost" formaction="/settings/sync-timeout" formmethod="post" formnovalidate>Timeout Sync</button>
-            <button type="submit" class="button ghost" formaction="/settings/sync-repair" formmethod="post" formnovalidate>Repair Sync</button>
+        <div class="settings-operation-grid">
+            <form method="post" action="/settings/full-sync">
+                <button type="submit" class="button" data-sync-task="full_sync" data-idle-label="Update Trakt data">Update Trakt data</button>
+            </form>
         </div>
-        <section
-            class="settings-sync-status {% if not imdb_sync_running %}is-hidden{% endif %}"
-            data-imdb-status
-            data-after="0"
-        >
+        <p class="settings-hint">Updates history, ratings, and progress. Images continue downloading independently in the background.</p>
+    </section>
+
+    <details class="settings-provider-details settings-collapsible settings-maintenance">
+        <summary>Metadata maintenance <span>Bounded repair batches</span></summary>
+        <div class="settings-operation-grid">
+            <form method="post" action="/settings/sync-missing">
+                <button type="submit" class="button ghost" data-sync-task="backfill_sync" data-idle-label="Backfill missing metadata (80)">Backfill missing metadata (80)</button>
+            </form>
+            <form method="post" action="/settings/sync-timeout">
+                <button type="submit" class="button ghost" data-sync-task="timeout_sync" data-idle-label="Retry failed metadata (40)">Retry failed metadata (40)</button>
+            </form>
+            <form method="post" action="/settings/sync-repair">
+                <button type="submit" class="button ghost" data-sync-task="repair_sync" data-idle-label="Recheck no-data metadata (40)">Recheck no-data metadata (40)</button>
+            </form>
+            <form method="post" action="/settings/imdb-sync">
+                <button type="submit" class="button ghost" data-imdb-sync-button data-idle-label="Sync IMDb">Sync IMDb</button>
+            </form>
+        </div>
+        <div class="settings-sync-meta">
+            <span>IMDb last updated</span>
+            <strong data-imdb-current-status>{{ imdb_sync_status }}</strong>
+        </div>
+        <section class="settings-sync-status {% if not imdb_sync_running %}is-hidden{% endif %}" data-imdb-status data-after="0">
             <div class="settings-sync-head">
                 <strong>IMDb sync status</strong>
-                <span class="settings-sync-pill {% if imdb_sync_running %}is-running{% endif %}" data-imdb-running>
-                    {% if imdb_sync_running %}Running{% else %}Idle{% endif %}
-                </span>
+                <span class="settings-sync-pill {% if imdb_sync_running %}is-running{% endif %}" data-imdb-running>{{ 'Running' if imdb_sync_running else 'Idle' }}</span>
             </div>
             <div class="settings-sync-progress" data-imdb-progress></div>
-            <div class="settings-sync-log" data-imdb-log>
-                <div class="settings-sync-log-line">Preparing sync status...</div>
-            </div>
+            <div class="settings-sync-log" data-imdb-log><div class="settings-sync-log-line">Preparing sync status...</div></div>
         </section>
+    </details>
+
+    <details class="settings-provider-details settings-collapsible settings-diagnostics" data-diagnostics-details {% if imdb_sync_running or config.debug_mode %}open{% endif %}>
+        <summary>Diagnostics <span data-refresh-running>Idle</span></summary>
         <section class="settings-sync-status" data-refresh-status>
-            <div class="settings-sync-head">
-                <strong>Refresh status</strong>
-                <span class="settings-sync-pill" data-refresh-running>Idle</span>
-            </div>
             <p class="settings-sync-current" data-history-progress>History: n/a</p>
             <p class="settings-sync-current" data-history-last>Last history: n/a</p>
+            <p class="settings-sync-current" data-history-reconcile>Last full reconcile: n/a</p>
             <p class="settings-sync-current" data-progress-last>Last progress: n/a</p>
             <p class="settings-sync-current" data-refresh-last>Last refresh: n/a</p>
             <div class="settings-sync-log">
+                <div class="settings-sync-log-line" data-provider-health>Providers: ...</div>
+                <div class="settings-sync-log-line" data-queue-health>Queue: ...</div>
+                <div class="settings-sync-log-line" data-artwork-health>Artwork: ...</div>
                 <div class="settings-sync-log-line" data-poster-stats>Posters: ...</div>
                 <div class="settings-sync-log-line" data-still-stats>Stills: ...</div>
             </div>
         </section>
-        <label>
-            <span>UTC offset</span>
-            <input type="text" name="utc_offset" value="{{ config.utc_offset }}" placeholder="+03:00">
-        </label>
-        <label class="settings-checkbox">
-            <input type="checkbox" name="notifications_enabled" value="1" {% if config.notifications_enabled %}checked{% endif %}>
-            <span>Enable notifications</span>
-        </label>
-        <label class="settings-checkbox">
-            <input type="checkbox" name="debug_mode" value="1" {% if config.debug_mode %}checked{% endif %}>
-            <span>Enable debug toasts</span>
-        </label>
-        <label class="settings-checkbox">
-            <input type="checkbox" name="open_in_embedded_player" value="1" {% if config.open_in_embedded_player %}checked{% endif %}>
-            <span>Open Kinopoisk in embedded player</span>
-        </label>
-        <label class="settings-checkbox">
-            <input type="checkbox" name="web_portal_start_with_windows" value="1" {% if config.web_portal_start_with_windows %}checked{% endif %}>
-            <span>Start web portal with Windows</span>
-        </label>
-        <div class="settings-actions">
-            <button type="submit" class="button">Save settings</button>
-        </div>
-    </form>
+    </details>
 </section>
 {% endblock %}
 
 {% block page_scripts %}
-<script>
-(() => {
-    const root = document.querySelector("[data-imdb-status]");
-    if (!root || !window.fetch) {
-        return;
-    }
-    const runningNode = root.querySelector("[data-imdb-running]");
-    const statusNode = root.querySelector("[data-imdb-current-status]");
-    const progressNode = root.querySelector("[data-imdb-progress]");
-    const logNode = root.querySelector("[data-imdb-log]");
-    const syncButton = document.querySelector("[data-imdb-sync-button]");
-    const soundPathInput = document.querySelector('input[name="notification_sound_path"]');
-    const soundPickerInput = document.querySelector("[data-notification-sound-picker]");
-    const browseSoundButton = document.querySelector("[data-browse-notification-sound]");
-    const testSoundButton = document.querySelector("[data-test-notification-sound]");
-    let pendingSoundObjectUrl = "";
-    let after = Number(root.dataset.after || "0");
-    let keepVisibleUntil = root.classList.contains("is-hidden") ? 0 : Date.now() + 15000;
-    let lastProgressMessage = "";
-    let recentMessages = [];
-    const refreshRoot = document.querySelector("[data-refresh-status]");
-    const refreshRunningNode = refreshRoot ? refreshRoot.querySelector("[data-refresh-running]") : null;
-    const historyProgressNode = refreshRoot ? refreshRoot.querySelector("[data-history-progress]") : null;
-    const historyLastNode = refreshRoot ? refreshRoot.querySelector("[data-history-last]") : null;
-    const progressLastNode = refreshRoot ? refreshRoot.querySelector("[data-progress-last]") : null;
-    const refreshLastNode = refreshRoot ? refreshRoot.querySelector("[data-refresh-last]") : null;
-    const posterStatsNode = refreshRoot ? refreshRoot.querySelector("[data-poster-stats]") : null;
-    const stillStatsNode = refreshRoot ? refreshRoot.querySelector("[data-still-stats]") : null;
-
-    function renderLog() {
-        if (!logNode) {
-            return;
-        }
-        logNode.replaceChildren();
-        if (!recentMessages.length) {
-            const line = document.createElement("div");
-            line.className = "settings-sync-log-line";
-            line.textContent = "Waiting for sync activity.";
-            logNode.appendChild(line);
-            return;
-        }
-        for (const message of recentMessages) {
-            const line = document.createElement("div");
-            line.className = "settings-sync-log-line";
-            line.textContent = message;
-            logNode.appendChild(line);
-        }
-    }
-
-    function rememberMessage(message) {
-        if (!message) {
-            return;
-        }
-        recentMessages = [message, ...recentMessages.filter((item) => item !== message)].slice(0, 4);
-        renderLog();
-    }
-
-    function setPanelVisible(visible) {
-        root.classList.toggle("is-hidden", !visible);
-    }
-
-    async function pollStatus() {
-        try {
-            const response = await fetch(`/settings/imdb-sync-status?after=${after}`, {
-                headers: {"Accept": "application/json"},
-                cache: "no-store",
-            });
-            if (!response.ok) {
-                return;
-            }
-            const payload = await response.json();
-            if (statusNode && payload.status) {
-                statusNode.textContent = payload.status;
-            }
-            if (runningNode) {
-                runningNode.textContent = payload.running ? "Running" : "Idle";
-                runningNode.classList.toggle("is-running", Boolean(payload.running));
-            }
-            if (progressNode) {
-                const message = payload.progress_message || "";
-                progressNode.textContent = message;
-                progressNode.classList.toggle("is-hidden", !message);
-            }
-            if (payload.running) {
-                keepVisibleUntil = Date.now() + 15000;
-            }
-            if (Array.isArray(payload.events)) {
-                for (const event of payload.events) {
-                    if (typeof event.seq === "number") {
-                        after = Math.max(after, event.seq);
-                    }
-                    rememberMessage(event.message || "");
-                    keepVisibleUntil = Date.now() + 15000;
-                }
-            }
-            if (payload.progress_message && payload.progress_message !== lastProgressMessage) {
-                lastProgressMessage = payload.progress_message;
-                keepVisibleUntil = Date.now() + 15000;
-            }
-            setPanelVisible(Boolean(payload.running) || Date.now() < keepVisibleUntil);
-        } catch (_error) {
-        }
-    }
-
-    if (syncButton) {
-        syncButton.addEventListener("click", () => {
-            keepVisibleUntil = Date.now() + 15000;
-            setPanelVisible(true);
-        });
-    }
-
-    function formatStats(label, stats) {
-        if (!stats || typeof stats !== "object") {
-            return `${label}: n/a`;
-        }
-        return `${label}: ready ${stats.ready}/${stats.total}, no_data ${stats.checked_no_data}, retry ${stats.retryable_failure}, unknown ${stats.unknown}`;
-    }
-
-    async function pollRefreshStatus() {
-        if (!refreshRoot) {
-            return;
-        }
-        try {
-            const response = await fetch("/settings/refresh-status", {
-                headers: {"Accept": "application/json"},
-                cache: "no-store",
-            });
-            if (!response.ok) {
-                return;
-            }
-            const payload = await response.json();
-            const running = payload && payload.running ? payload.running : {};
-            const isRunning = Boolean(
-                running.history_sync
-                || running.progress_sync
-                || running.enrich_queue
-                || running.full_sync
-                || running.backfill_sync
-                || running.timeout_sync
-                || running.repair_sync
-            );
-            if (refreshRunningNode) {
-                refreshRunningNode.textContent = isRunning
-                    ? `Running${running.history_sync ? " history" : ""}${running.progress_sync ? " progress" : ""}${running.enrich_queue ? " queue" : ""}${running.full_sync ? " full" : ""}${running.backfill_sync ? " backfill" : ""}${running.timeout_sync ? " timeout" : ""}${running.repair_sync ? " repair" : ""}`
-                    : "Idle";
-                refreshRunningNode.classList.toggle("is-running", isRunning);
-            }
-            if (historyProgressNode) {
-                const progressText = payload && payload.history && payload.history.progress_message
-                    ? payload.history.progress_message
-                    : "n/a";
-                historyProgressNode.textContent = `History: ${progressText}`;
-            }
-            if (historyLastNode) {
-                const message = payload && payload.history && payload.history.last_message ? payload.history.last_message : "n/a";
-                historyLastNode.textContent = `Last history: ${message}`;
-            }
-            if (progressLastNode) {
-                const message = payload && payload.progress && payload.progress.last_message ? payload.progress.last_message : "n/a";
-                progressLastNode.textContent = `Last progress: ${message}`;
-            }
-            if (refreshLastNode) {
-                const message = payload && payload.refresh && payload.refresh.last_message ? payload.refresh.last_message : "n/a";
-                refreshLastNode.textContent = `Last refresh: ${message}`;
-            }
-            if (posterStatsNode) {
-                posterStatsNode.textContent = formatStats("Posters", payload ? payload.posters : null);
-            }
-            if (stillStatsNode) {
-                stillStatsNode.textContent = formatStats("Stills", payload ? payload.stills : null);
-            }
-        } catch (_error) {
-        }
-    }
-
-    if (browseSoundButton && soundPickerInput && soundPathInput) {
-        browseSoundButton.addEventListener("click", () => {
-            soundPickerInput.click();
-        });
-        soundPickerInput.addEventListener("change", () => {
-            const file = soundPickerInput.files && soundPickerInput.files[0];
-            if (!file) {
-                return;
-            }
-            soundPathInput.value = file.name;
-            if (pendingSoundObjectUrl) {
-                URL.revokeObjectURL(pendingSoundObjectUrl);
-            }
-            pendingSoundObjectUrl = URL.createObjectURL(file);
-        });
-    }
-
-    if (testSoundButton) {
-        testSoundButton.addEventListener("click", () => {
-            if (pendingSoundObjectUrl) {
-                const previewAudio = new Audio(pendingSoundObjectUrl);
-                previewAudio.play().catch(() => {
-                    if (window.traktPlayAlertTone) {
-                        window.traktPlayAlertTone();
-                    }
-                });
-                return;
-            }
-            if (window.traktPlayAlertTone) {
-                window.traktPlayAlertTone();
-            }
-        });
-    }
-
-    renderLog();
-    pollStatus();
-    pollRefreshStatus();
-    window.setInterval(pollStatus, 1200);
-    window.setInterval(pollRefreshStatus, 2000);
-})();
-</script>
+<script src="{{ request.url_for('static', path='settings_page.js') }}?v={{ static_js_version }}"></script>
 {% endblock %}

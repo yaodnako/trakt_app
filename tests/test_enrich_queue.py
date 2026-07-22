@@ -64,6 +64,51 @@ class EnrichQueueTests(unittest.TestCase):
         self.assertEqual(pending.priority, 1)
         gate.set()
 
+    def test_merges_running_task_into_follow_up_work(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[set[str]] = []
+
+        def handler(task) -> str:
+            calls.append(
+                {
+                    part
+                    for request in task.payload["refresh_requests"]
+                    for part in request["requested_parts"]
+                }
+            )
+            if len(calls) == 1:
+                started.set()
+                release.wait(timeout=1)
+            return TASK_RESULT_READY
+
+        queue = EnrichQueueService({"history_title": handler}, max_workers=1)
+        try:
+            queue.submit(
+                build_history_title_task(
+                    title_key="show:1",
+                    trakt_id=1,
+                    title_type="show",
+                    requested_parts=("poster",),
+                )
+            )
+            self.assertTrue(started.wait(timeout=1))
+            queue.submit(
+                build_history_title_task(
+                    title_key="show:1",
+                    trakt_id=1,
+                    title_type="show",
+                    requested_parts=("title_ratings",),
+                )
+            )
+            release.set()
+            self._wait_until(lambda: len(calls) == 2)
+            self.assertEqual(calls[0], {"poster"})
+            self.assertEqual(calls[1], {"poster", "title_ratings"})
+        finally:
+            release.set()
+            self.assertTrue(queue.close())
+
     def test_emits_completed_failed_and_dropped_updates_with_results(self) -> None:
         def handler(task) -> str:
             if task.task_key.endswith(":1"):
@@ -111,6 +156,25 @@ class EnrichQueueTests(unittest.TestCase):
         self._wait_until(lambda: not queue.is_running(), timeout=3.0)
         self.assertLessEqual(state["max_active"], 2)
 
+    def test_paused_queue_keeps_new_metadata_work_pending_until_bulk_barrier_ends(self) -> None:
+        started: list[str] = []
+
+        def handler(task) -> str:
+            started.append(task.task_key)
+            return TASK_RESULT_READY
+
+        queue = EnrichQueueService({"history_title": handler}, max_workers=1)
+        try:
+            queue.pause()
+            queue.submit(build_history_title_task(title_key="show:1", trakt_id=1, title_type="show"))
+            time.sleep(0.05)
+            self.assertEqual(started, [])
+            self.assertEqual(queue.status_snapshot()["pending"], 1)
+            queue.resume()
+            self._wait_until(lambda: started == ["title:show:1"])
+        finally:
+            self.assertTrue(queue.close())
+
     def test_retryable_failure_enters_backoff_and_does_not_requeue_immediately(self) -> None:
         started: list[str] = []
 
@@ -125,6 +189,12 @@ class EnrichQueueTests(unittest.TestCase):
         queue.submit_history_refresh(viewport_tasks=[task], nearby_tasks=[], page_tasks=[])
         time.sleep(0.05)
         self.assertEqual(started, ["title:show:1"])
+        status = queue.status_snapshot()
+        self.assertEqual(status["pending"], 0)
+        self.assertEqual(status["running"], 0)
+        self.assertEqual(status["cooldown"], 1)
+        self.assertEqual(status["failed"], 1)
+        self.assertEqual(status["last_failure"]["task_key"], "title:show:1")
 
     @staticmethod
     def _wait_until(predicate, *, timeout: float = 2.0) -> None:

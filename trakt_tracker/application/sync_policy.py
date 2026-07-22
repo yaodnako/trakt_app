@@ -7,11 +7,13 @@ from datetime import UTC, datetime, timedelta
 class SyncPolicy:
     HISTORY_AUTO_SYNC_INTERVAL = timedelta(minutes=5)
     HISTORY_ACTIVITY_PROBE_INTERVAL = timedelta(seconds=45)
+    HISTORY_FULL_RECONCILE_INTERVAL = timedelta(minutes=30)
     PROGRESS_FULL_SYNC_INTERVAL = timedelta(minutes=30)
 
     HISTORY_PROBE_KEY = "history_last_probe_at"
     HISTORY_SIGNATURE_KEY = "history_activity_signature"
     HISTORY_LAST_SYNC_KEY = "history_last_sync_at"
+    HISTORY_LAST_FULL_RECONCILE_KEY = "history_last_full_reconcile_at"
     PROGRESS_SIGNATURE_KEY = "progress_activity_signature"
     PROGRESS_LAST_FULL_SYNC_KEY = "progress_last_full_sync_at"
 
@@ -101,6 +103,13 @@ class SyncPolicy:
         if last_sync_at is None:
             return True
         return datetime.now(tz=UTC) - last_sync_at >= cls.HISTORY_AUTO_SYNC_INTERVAL
+
+    @classmethod
+    def should_run_history_full_reconcile(cls, last_reconcile_at_raw: str) -> bool:
+        last_reconcile_at = cls.parse_timestamp(last_reconcile_at_raw)
+        if last_reconcile_at is None:
+            return True
+        return datetime.now(tz=UTC) - last_reconcile_at >= cls.HISTORY_FULL_RECONCILE_INTERVAL
 
     @classmethod
     def can_skip_full_progress_sync(

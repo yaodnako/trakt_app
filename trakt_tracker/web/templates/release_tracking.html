@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+
+{% macro release_card(item, is_released) %}
+{% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ (item.slug or item.trakt_id) %}
+<article class="result-card search-result-card release-tracking-card{% if is_released and not item.release_acknowledged %} is-unacknowledged{% endif %}" data-release-card>
+    <div class="search-result-side">
+        <div class="search-result-title-stack">
+            <h3 class="search-result-title{% if item.title|length > 18 %} is-long{% endif %}{% if item.title|length > 28 %} is-xlong{% endif %}">
+                <a href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">{{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}</a>
+                {% if item.title_type == 'movie' %}<img class="search-result-type-icon" src="{{ request.url_for('static', path='film.svg') }}" alt="Movie" title="Movie">{% endif %}
+            </h3>
+        </div>
+        <div class="progress-poster-shell search-result-poster-shell">
+            {% if is_released and item.title_type == 'show' %}
+            <button
+                type="button"
+                class="progress-poster search-result-poster search-watch-poster-trigger"
+                data-release-show-watch-trigger
+                data-watch-panel-url="/search/show/{{ item.trakt_id }}/watch-panel"
+                data-trakt-id="{{ item.trakt_id }}"
+                data-title="{{ item.title }}"
+                aria-label="Open episode watch panel for {{ item.title }}"
+            >
+                {% if item.poster_url %}<img src="{{ item.poster_url|cached_image_url }}" alt="{{ item.title }} poster" loading="lazy" decoding="async" fetchpriority="low">
+                {% else %}<div class="poster-fallback">No poster</div>{% endif %}
+            </button>
+            {% else %}
+            <a class="progress-poster search-result-poster" href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">
+                {% if item.poster_url %}<img src="{{ item.poster_url|cached_image_url }}" alt="{{ item.title }} poster" loading="lazy" decoding="async" fetchpriority="low">
+                {% else %}<div class="poster-fallback">No poster</div>{% endif %}
+            </a>
+            {% endif %}
+            <button type="button" class="icon-button search-card-action search-watchlist-button is-active" data-release-toggle data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id }}" title="Stop release tracking" aria-label="Stop tracking {{ item.title }}">
+                <img class="release-bell-icon" src="{{ request.url_for('static', path='notification_on.svg') }}" alt="" aria-hidden="true">
+            </button>
+            {% if is_released %}
+            <a class="icon-button search-card-action search-play-button" href="/search/{{ item.title_type }}/{{ item.trakt_id }}/play?title={{ item.title|urlencode }}" title="Play" aria-label="Play {{ item.title }}" target="_blank" rel="noreferrer"><img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true"></a>
+            <button type="button" class="icon-button search-card-action search-watch-title-button" data-release-watched data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id }}" data-title="{{ item.title }}" title="Mark watched" aria-label="Mark {{ item.title }} watched"><img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"></button>
+            <button type="button" class="icon-button search-card-action release-acknowledge-button{% if item.release_acknowledged %} is-active{% endif %}" data-release-acknowledge data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id }}" data-acknowledged="{{ 'true' if item.release_acknowledged else 'false' }}" title="{{ 'Resume notifications' if item.release_acknowledged else 'Acknowledge release' }}" aria-label="Acknowledge release for {{ item.title }}"><img src="{{ request.url_for('static', path='eye.svg') }}" alt="" aria-hidden="true"></button>
+            {% endif %}
+            {% if item.title_type == 'show' %}
+            <button
+                type="button"
+                class="poster-chip progress-title-chip search-title-ratings-chip anticipated-release-chip title-matrix-trigger"
+                data-title-matrix-trigger
+                data-title-matrix-title="{{ item.title }}"
+                data-title-matrix-trakt-id="{{ item.trakt_id }}"
+                data-title-matrix-url="/titles/show/{{ item.trakt_id }}/episode-ratings-matrix"
+                aria-label="Open episode IMDb ratings matrix for {{ item.title }}"
+            >
+            {% else %}
+            <div class="poster-chip progress-title-chip search-title-ratings-chip anticipated-release-chip" aria-label="Release timing, list count, and title ratings">
+            {% endif %}
+                <span>{{ (item.released_at|dt) if is_released else (item.released_at|release_distance) }}</span>
+                <span class="anticipated-list-count"><img src="{{ request.url_for('static', path='bookmark.svg') }}" alt="" aria-hidden="true"> {{ item.explore_metric_count|compact_votes if item.explore_metric_count is not none else '—' }}</span>
+                {% if is_released %}
+                <span class="poster-chip-part anticipated-rating-part">
+                    <img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt">
+                    <span>{% if item.trakt_rating is not none %}{{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
+                </span>
+                <span class="poster-chip-part anticipated-rating-part">
+                    <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="imdb">
+                    <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
+                </span>
+                {% endif %}
+            {% if item.title_type == 'show' %}
+            </button>
+            {% else %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="search-result-body">
+        <p class="search-result-meta"><span>{{ 'TV Series' if item.title_type == 'show' else 'Movie' }}</span>{% if item.status %}<span>{{ item.status }}</span>{% endif %}</p>
+        <p class="search-result-overview">{{ item.overview or "No overview yet." }}</p>
+    </div>
+</article>
+{% endmacro %}
+
+{% block content %}
+{% if error_message %}<section class="banner error">{{ error_message }}</section>{% endif %}
+
+<section class="release-tracking-section">
+    <div class="section-head"><h2>Released</h2><p>{{ released|length }} title{% if released|length != 1 %}s{% endif %}</p></div>
+    {% if released %}<div class="search-results-grid">{% for item in released %}{{ release_card(item, true) }}{% endfor %}</div>
+    {% elif not error_message %}<div class="empty-state"><p>No tracked titles have been released yet.</p></div>{% endif %}
+</section>
+
+<section class="release-tracking-section">
+    <div class="section-head"><h2>Awaiting release</h2><p>{{ upcoming|length }} title{% if upcoming|length != 1 %}s{% endif %}</p></div>
+    {% if upcoming %}<div class="search-results-grid">{% for item in upcoming %}{{ release_card(item, false) }}{% endfor %}</div>
+    {% elif not error_message %}<div class="empty-state"><p>No upcoming tracked releases.</p></div>{% endif %}
+</section>
+
+<div id="release-watch-overlay" class="search-watch-overlay" hidden aria-hidden="true">
+    <div class="search-watch-backdrop" data-release-watch-close></div>
+    <section class="search-watch-dialog" role="dialog" aria-modal="true" aria-labelledby="release-watch-title">
+        <div class="title-matrix-dialog-head">
+            <div class="title-matrix-dialog-copy">
+                <p class="title-matrix-eyebrow">Release Watch</p>
+                <h2 id="release-watch-title">Loading...</h2>
+                <p class="title-matrix-subtitle">Manage watched episodes</p>
+            </div>
+            <div class="search-watch-header-actions">
+                <button type="button" class="search-watch-scope-button search-watch-header-scope" data-search-watch-action data-search-watch-header-mark data-title-type="show" data-scope="title" hidden>
+                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"><span>All</span>
+                </button>
+                <button type="button" class="search-watch-scope-button is-danger search-watch-header-scope" data-search-unwatch-action data-search-watch-header-unwatch data-title-type="show" data-scope="title" hidden>
+                    <span class="search-watch-action-glyphs" aria-hidden="true"><img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt=""><img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt=""></span><span>All</span>
+                </button>
+                <a class="search-watch-scope-button search-watch-header-play" data-show-watch-play target="_blank" rel="noreferrer" hidden><img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true"></a>
+            </div>
+            <button type="button" class="title-matrix-close" data-release-watch-close aria-label="Close release watch panel"><span class="title-matrix-close-glyph">&times;</span></button>
+        </div>
+        <div id="release-watch-body" class="search-watch-body"></div>
+    </section>
+</div>
+
+<div id="release-watch-date-overlay" class="search-watch-date-overlay" hidden aria-hidden="true">
+    <div class="search-watch-backdrop" data-release-watch-date-close></div>
+    <section class="search-watch-date-dialog" role="dialog" aria-modal="true" aria-labelledby="release-watch-date-title">
+        <div class="title-matrix-dialog-head">
+            <div class="title-matrix-dialog-copy">
+                <p class="title-matrix-eyebrow">Watched Date</p>
+                <h2 id="release-watch-date-title">Mark watched</h2>
+                <p class="title-matrix-subtitle">Choose how this appears in Trakt history</p>
+            </div>
+            <button type="button" class="title-matrix-close" data-release-watch-date-close aria-label="Close watched date prompt"><span class="title-matrix-close-glyph">&times;</span></button>
+        </div>
+        <div class="search-watch-date-actions">
+            <button type="button" class="button search-watch-now-action" data-release-watch-date-mode="now">Now</button>
+            <label class="search-watch-custom-date">
+                <span>Custom date</span>
+                <input type="datetime-local" data-release-watch-custom-input>
+            </label>
+            <button type="button" class="button ghost search-watch-custom-submit" data-release-watch-date-mode="custom">Submit</button>
+        </div>
+    </section>
+</div>
+
+<script src="{{ request.url_for('static', path='release_tracking_page.js') }}?v={{ static_js_version }}"></script>
+{% endblock %}

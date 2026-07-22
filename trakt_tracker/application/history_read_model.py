@@ -61,10 +61,7 @@ class HistoryReadModelService:
                 rows = rows[offset:]
             if limit is not None:
                 rows = rows[:limit]
-            title_models = {
-                row.title_trakt_id: self._titles.get_title(session, row.title_trakt_id)
-                for row in rows
-            }
+            title_models = self._titles.by_trakt_ids(session, [row.title_trakt_id for row in rows])
             ratings = self._user_states.ratings_by_trakt_ids(session, [row.title_trakt_id for row in rows])
             episode_metadata = self._episode_repo.metadata_by_episode_keys(
                 session,
@@ -273,10 +270,10 @@ class HistoryReadModelService:
                 filtered_groups = filtered_groups[offset:]
             if limit is not None:
                 filtered_groups = filtered_groups[:limit]
-            title_models = {
-                int(group["title_trakt_id"]): self._titles.get_title(session, int(group["title_trakt_id"]))
-                for group in filtered_groups
-            }
+            title_models = self._titles.by_trakt_ids(
+                session,
+                [int(group["title_trakt_id"]) for group in filtered_groups],
+            )
             return [
                 {
                     "title_key": f"{group['type']}:{group['title_trakt_id']}",

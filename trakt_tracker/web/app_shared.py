@@ -1,3 +1,1 @@
 from __future__ import annotations
-
-from trakt_tracker.infrastructure.artwork_cache import image_cache_suffix

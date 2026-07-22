@@ -20,7 +20,7 @@ from trakt_tracker.application.metadata_refresh_policy import (
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.sync_policy import SyncPolicy
 from trakt_tracker.config import AppConfig
-from trakt_tracker.domain import EpisodeSummary, ProgressSnapshot, TitleSummary
+from trakt_tracker.domain import ProgressSnapshot, TitleSummary
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 from trakt_tracker.infrastructure.tmdb import TMDbClient
 
@@ -57,10 +57,24 @@ class ProgressSyncWorkflow:
         self._episode_metadata = episode_metadata
         self._catalog = catalog
 
-    def refresh_show_progress(self, trakt_id: int, *, fresh: bool = False) -> ProgressSnapshot:
+    def refresh_show_progress(
+        self,
+        trakt_id: int,
+        *,
+        fresh: bool = False,
+        enrich_assets: bool = True,
+    ) -> ProgressSnapshot:
         client = self._auth.get_client()
         progress = client.get_show_progress(trakt_id, use_cache=not fresh)
-        title = self._load_or_fetch_show_summary(trakt_id, fallback_title=progress.title)
+        if int(progress.completed or 0) <= 0:
+            with self._db.session() as session:
+                self._progress_repo.delete_progress(session, trakt_id)
+            return progress
+        title = self._load_or_fetch_show_summary(
+            trakt_id,
+            fallback_title=progress.title,
+            enrich_metadata=enrich_assets,
+        )
         progress.title = title.title or progress.title
         progress.poster_url = title.poster_url
         progress.status = title.status
@@ -105,8 +119,12 @@ class ProgressSyncWorkflow:
                         ),
                         details=detailed_episode,
                     )
-            self._episode_metadata.attach_progress_episode_metadata(session, progress, enrich_imdb=True)
-        if fresh and self._catalog is not None:
+            self._episode_metadata.attach_progress_episode_metadata(
+                session,
+                progress,
+                enrich_imdb=enrich_assets,
+            )
+        if fresh and enrich_assets and self._catalog is not None:
             self._catalog.enrich_title_key(
                 trakt_id,
                 "show",
@@ -126,16 +144,16 @@ class ProgressSyncWorkflow:
     def dashboard_progress(self, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
         with self._db.session() as session:
             items = self._progress_repo.list_in_progress(session, dropped_only=dropped_only)
-            watched_rows = self._history.list_filtered(session, title_type="show", action="watched") if self._history is not None else []
-            rated_map = self._history.latest_rated_map(session, title_type="show") if self._history is not None else {}
-        _, cached_episode_ratings = self._episode_metadata.load_cached_trakt_rating_maps()
-        title_episode_stats = self._build_title_episode_rating_stats(
-            watched_rows,
-            rated_map=rated_map,
-            cached_episode_ratings=cached_episode_ratings,
-        )
+            title_episode_averages = (
+                self._history.watched_episode_average_ratings(
+                    session,
+                    [int(item.trakt_id) for item in items],
+                )
+                if self._history is not None
+                else {}
+            )
         for item in items:
-            item.title_episode_avg_rating = (title_episode_stats.get(int(item.trakt_id)) or {}).get("avg_rating")
+            item.title_episode_avg_rating = title_episode_averages.get(int(item.trakt_id))
         return items
 
     def select_title_enrich_keys(
@@ -195,6 +213,7 @@ class ProgressSyncWorkflow:
         *,
         dropped_only: bool = False,
         force_full_assets: bool = False,
+        defer_assets: bool = False,
     ) -> list[ProgressSnapshot]:
         if trakt_ids is None and self._can_skip_full_progress_sync():
             self._operations.publish("Progress sync", "Policy skipped full progress sync; using local dashboard state.")
@@ -209,7 +228,7 @@ class ProgressSyncWorkflow:
             self._operations.publish("Progress sync", f"Focused progress refresh for {len(show_ids)} show(s).")
         snapshots: list[ProgressSnapshot] = []
         for trakt_id in show_ids:
-            snapshots.append(self.refresh_show_progress(trakt_id, fresh=True))
+            snapshots.append(self.refresh_show_progress(trakt_id, fresh=True, enrich_assets=not defer_assets))
         if force_full_assets:
             self._force_refresh_assets_for_shows(show_ids)
         if trakt_ids is None:
@@ -247,7 +266,14 @@ class ProgressSyncWorkflow:
         with self._db.session() as session:
             self._user_states.sync_progress_archived_states(session, dropped_ids)
 
-    def _load_or_fetch_show_summary(self, trakt_id: int, fallback_title: str = "", persist: bool = True) -> TitleSummary:
+    def _load_or_fetch_show_summary(
+        self,
+        trakt_id: int,
+        fallback_title: str = "",
+        persist: bool = True,
+        *,
+        enrich_metadata: bool = True,
+    ) -> TitleSummary:
         with self._db.session() as session:
             stored = self._titles.get_title(session, trakt_id)
             if stored is not None and stored.title and stored.poster_url:
@@ -264,10 +290,11 @@ class ProgressSyncWorkflow:
         client = self._auth.get_client()
         try:
             title = client.get_title_details(trakt_id, "show")
-            tmdb = self._tmdb_factory(self._auth.config)
-            if tmdb.is_configured():
-                title = tmdb.enrich_title(title)
-            title = self._imdb_client.enrich_title(title)
+            if enrich_metadata:
+                tmdb = self._tmdb_factory(self._auth.config)
+                if tmdb.is_configured():
+                    title = tmdb.enrich_title(title)
+                title = self._imdb_client.enrich_title(title)
         except Exception:
             with self._db.session() as session:
                 stored = self._titles.get_title(session, trakt_id)
@@ -329,37 +356,3 @@ class ProgressSyncWorkflow:
                 )
         for show_trakt_id in unique_show_ids:
             self._episode_metadata.force_refresh_show_stills(show_trakt_id)
-
-    @staticmethod
-    def _build_title_episode_rating_stats(
-        rows: list,
-        *,
-        rated_map: dict[tuple[int, int | None, int | None], int],
-        cached_episode_ratings: dict[tuple[int, int, int], int],
-    ) -> dict[int, dict]:
-        seen: set[tuple[int, int, int]] = set()
-        totals: dict[int, dict[str, float | int]] = {}
-        for row in rows:
-            if row.title_type != "show" or row.season is None or row.episode is None:
-                continue
-            episode_key = (int(row.title_trakt_id), int(row.season), int(row.episode))
-            if episode_key in seen:
-                continue
-            seen.add(episode_key)
-            display_rating = (
-                row.rating
-                or rated_map.get((row.title_trakt_id, row.season, row.episode))
-                or cached_episode_ratings.get((row.title_trakt_id, row.season, row.episode))
-            )
-            if display_rating is None:
-                continue
-            item = totals.setdefault(int(row.title_trakt_id), {"sum_rating": 0.0, "rated_count": 0})
-            item["sum_rating"] += float(display_rating)
-            item["rated_count"] += 1
-        return {
-            trakt_id: {
-                "avg_rating": (item["sum_rating"] / item["rated_count"]) if item["rated_count"] else None,
-                "rated_count": int(item["rated_count"]),
-            }
-            for trakt_id, item in totals.items()
-        }

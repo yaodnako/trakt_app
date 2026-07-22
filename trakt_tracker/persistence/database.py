@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import sqlite3
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Iterator
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -9,10 +13,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from .models import Base
 
 
+LATEST_SCHEMA_VERSION = 1
+
+
 class Database:
     def __init__(self, path: Path) -> None:
+        self._path = Path(path)
         self._engine = create_engine(
-            f"sqlite:///{path}",
+            f"sqlite:///{self._path}",
             future=True,
             connect_args={"timeout": 15, "check_same_thread": False},
         )
@@ -23,10 +31,7 @@ class Database:
     def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
         cursor = dbapi_connection.cursor()
         try:
-            try:
-                cursor.execute("PRAGMA journal_mode=WAL")
-            except Exception:
-                pass
+            cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA busy_timeout=15000")
             cursor.execute("PRAGMA foreign_keys=ON")
@@ -34,60 +39,106 @@ class Database:
             cursor.close()
 
     def create_schema(self) -> None:
-        Base.metadata.create_all(self._engine)
-        self._apply_migrations()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with _exclusive_file_lock(self._path.with_name(f".{self._path.name}.schema.lock")):
+            existed_before_open = self._path.exists()
+            if existed_before_open:
+                self._quick_check()
+            current_version = self._current_schema_version()
+            if current_version < LATEST_SCHEMA_VERSION and existed_before_open:
+                self._backup_before_migration()
+            Base.metadata.create_all(self._engine)
+            self._ensure_schema_migration_table()
+            current_version = self._current_schema_version()
+            if current_version < 1:
+                self._apply_migrations()
+                with self._engine.begin() as conn:
+                    conn.execute(
+                        text("INSERT INTO schema_migrations (version, applied_at) VALUES (:version, :applied_at)"),
+                        {"version": 1, "applied_at": datetime.now(tz=UTC).isoformat()},
+                    )
+            else:
+                # Derived enrich states are intentionally repaired on every startup.
+                self._apply_migrations()
+            self._quick_check()
+
+    def _ensure_schema_migration_table(self) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                    "version INTEGER PRIMARY KEY, "
+                    "applied_at TEXT NOT NULL"
+                    ")"
+                )
+            )
+
+    def _current_schema_version(self) -> int:
+        with self._engine.connect() as conn:
+            exists = conn.execute(
+                text("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+            ).scalar()
+            if not exists:
+                return 0
+            version = conn.execute(text("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")).scalar()
+        return int(version or 0)
+
+    def _quick_check(self) -> None:
+        with self._engine.connect() as conn:
+            result = str(conn.execute(text("PRAGMA quick_check")).scalar() or "")
+        if result.casefold() != "ok":
+            raise RuntimeError(f"SQLite quick_check failed for {self._path.name}: {result}")
+
+    def _backup_before_migration(self) -> None:
+        backup_path = self._path.with_name(f"{self._path.name}.pre-migration.bak")
+        temporary = backup_path.with_name(f".{backup_path.name}.{os.getpid()}.tmp")
+        temporary.unlink(missing_ok=True)
+        source = sqlite3.connect(str(self._path))
+        destination = sqlite3.connect(str(temporary))
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+            source.close()
+        os.replace(temporary, backup_path)
 
     def _apply_migrations(self) -> None:
-        statements = [
-            "ALTER TABLE titles ADD COLUMN trakt_rating FLOAT",
-            "ALTER TABLE titles ADD COLUMN trakt_votes INTEGER",
-            "ALTER TABLE titles ADD COLUMN tmdb_id INTEGER",
-            "ALTER TABLE titles ADD COLUMN tmdb_rating FLOAT",
-            "ALTER TABLE titles ADD COLUMN tmdb_votes INTEGER",
-            "ALTER TABLE titles ADD COLUMN imdb_id VARCHAR(32) DEFAULT ''",
-            "ALTER TABLE titles ADD COLUMN imdb_rating FLOAT",
-            "ALTER TABLE titles ADD COLUMN imdb_votes INTEGER",
-            "ALTER TABLE titles ADD COLUMN poster_status VARCHAR(32) DEFAULT 'unknown'",
-            "ALTER TABLE titles ADD COLUMN poster_refreshed_at DATETIME",
-            "ALTER TABLE titles ADD COLUMN backdrop_url VARCHAR(512) DEFAULT ''",
-            "ALTER TABLE titles ADD COLUMN backdrop_status VARCHAR(32) DEFAULT 'unknown'",
-            "ALTER TABLE titles ADD COLUMN backdrop_refreshed_at DATETIME",
-            "ALTER TABLE titles ADD COLUMN ratings_status VARCHAR(32) DEFAULT 'unknown'",
-            "ALTER TABLE titles ADD COLUMN ratings_refreshed_at DATETIME",
-            "ALTER TABLE episodes_cache ADD COLUMN still_url VARCHAR(512) DEFAULT ''",
-            "ALTER TABLE episodes_cache ADD COLUMN still_missing BOOLEAN DEFAULT 0",
-            "ALTER TABLE episodes_cache ADD COLUMN imdb_id VARCHAR(32) DEFAULT ''",
-            "ALTER TABLE episodes_cache ADD COLUMN imdb_rating FLOAT",
-            "ALTER TABLE episodes_cache ADD COLUMN imdb_votes INTEGER",
-            "ALTER TABLE episodes_cache ADD COLUMN trakt_rating FLOAT",
-            "ALTER TABLE episodes_cache ADD COLUMN trakt_votes INTEGER",
-            "ALTER TABLE episodes_cache ADD COLUMN still_status VARCHAR(32) DEFAULT 'unknown'",
-            "ALTER TABLE episodes_cache ADD COLUMN still_refreshed_at DATETIME",
-            "ALTER TABLE episodes_cache ADD COLUMN trakt_details_status VARCHAR(32) DEFAULT 'unknown'",
-            "ALTER TABLE episodes_cache ADD COLUMN trakt_details_refreshed_at DATETIME",
-            "ALTER TABLE history_events ADD COLUMN watched_at_known BOOLEAN DEFAULT 1",
-            "ALTER TABLE notifications_log ADD COLUMN last_sent_at DATETIME",
-            "ALTER TABLE notifications_log ADD COLUMN seen_at DATETIME",
-            "ALTER TABLE notifications_log ADD COLUMN notify_count INTEGER DEFAULT 1",
-        ]
+        additions = {
+            "titles": (
+                "trakt_rating FLOAT", "trakt_votes INTEGER", "tmdb_id INTEGER", "tmdb_rating FLOAT", "tmdb_votes INTEGER",
+                "imdb_id VARCHAR(32) DEFAULT ''", "imdb_rating FLOAT", "imdb_votes INTEGER",
+                "poster_status VARCHAR(32) DEFAULT 'unknown'", "poster_refreshed_at DATETIME",
+                "backdrop_url VARCHAR(512) DEFAULT ''", "backdrop_status VARCHAR(32) DEFAULT 'unknown'",
+                "backdrop_refreshed_at DATETIME", "ratings_status VARCHAR(32) DEFAULT 'unknown'", "ratings_refreshed_at DATETIME",
+            ),
+            "episodes_cache": (
+                "still_url VARCHAR(512) DEFAULT ''", "still_missing BOOLEAN DEFAULT 0", "imdb_id VARCHAR(32) DEFAULT ''",
+                "imdb_rating FLOAT", "imdb_votes INTEGER", "trakt_rating FLOAT", "trakt_votes INTEGER",
+                "still_status VARCHAR(32) DEFAULT 'unknown'", "still_refreshed_at DATETIME",
+                "trakt_details_status VARCHAR(32) DEFAULT 'unknown'", "trakt_details_refreshed_at DATETIME",
+            ),
+            "history_events": ("watched_at_known BOOLEAN DEFAULT 1",),
+            "notifications_log": ("last_sent_at DATETIME", "seen_at DATETIME", "notify_count INTEGER DEFAULT 1"),
+            "release_tracking_state": ("list_count INTEGER",),
+        }
         with self._engine.begin() as conn:
-            for statement in statements:
-                try:
-                    conn.execute(text(statement))
-                except Exception:
-                    continue
-            try:
-                conn.execute(
+            for table, definitions in additions.items():
+                existing = {
+                    str(row[1]).casefold()
+                    for row in conn.execute(text(f'PRAGMA table_info("{table}")'))
+                }
+                for definition in definitions:
+                    column = definition.split(None, 1)[0]
+                    if column.casefold() not in existing:
+                        conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {definition}'))
+            conn.execute(
                     text(
                         "UPDATE notifications_log "
                         "SET last_sent_at = COALESCE(last_sent_at, sent_at), "
                         "notify_count = COALESCE(notify_count, 1)"
                     )
-                )
-            except Exception:
-                pass
-            try:
-                conn.execute(
+            )
+            conn.execute(
                     text(
                         "UPDATE titles "
                         "SET poster_status = CASE "
@@ -111,11 +162,8 @@ class Database:
                         "WHEN COALESCE(ratings_status, '') = '' THEN 'unknown' "
                         "ELSE ratings_status END"
                     )
-                )
-            except Exception:
-                pass
-            try:
-                conn.execute(
+            )
+            conn.execute(
                     text(
                         "UPDATE episodes_cache "
                         "SET still_status = CASE "
@@ -132,12 +180,10 @@ class Database:
                         "WHEN COALESCE(trakt_details_status, '') = '' THEN 'unknown' "
                         "ELSE trakt_details_status END"
                     )
-                )
-            except Exception:
-                pass
+            )
 
     @contextmanager
-    def session(self) -> Session:
+    def session(self) -> Iterator[Session]:
         session = self._session_factory()
         try:
             yield session
@@ -150,3 +196,37 @@ class Database:
 
     def close(self) -> None:
         self._engine.dispose()
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:  # pragma: no cover - the product runtime is Windows-first
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:  # pragma: no cover - the product runtime is Windows-first
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()

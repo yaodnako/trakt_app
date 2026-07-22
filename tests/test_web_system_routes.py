@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,30 +11,38 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.testclient import TestClient
 
-import trakt_tracker.web.routes_system as routes_system
 from trakt_tracker.infrastructure.cache import BinaryCache
+from trakt_tracker.persistence.database import Database
+from trakt_tracker.persistence.repositories import SyncStateRepository
+from trakt_tracker.application.sync_policy import SyncPolicy
 from trakt_tracker.web.routes_system import register_system_routes
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class WebSystemRouteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = FastAPI()
-        templates_dir = Path("D:/CodexProjects/Trakt_app/trakt_tracker/web/templates")
-        static_dir = Path("D:/CodexProjects/Trakt_app/trakt_tracker/web/static")
+        templates_dir = PROJECT_ROOT / "trakt_tracker" / "web" / "templates"
+        static_dir = PROJECT_ROOT / "trakt_tracker" / "web" / "static"
         self.templates = Jinja2Templates(directory=str(templates_dir))
         self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
         self.app.state.services = SimpleNamespace(
             auth=SimpleNamespace(
                 config=SimpleNamespace(
                     cache_ttl_hours=24,
+                    explore_imdb_scan_page_limit=10,
                     notifications_enabled=False,
                     debug_mode=False,
                     open_in_embedded_player=False,
                     utc_offset="+03:00",
                     poll_interval_minutes=30,
                     imdb_auto_sync_interval_hours=3,
+                    tmdb_api_key="test-key",
+                    tmdb_read_access_token="",
                 ),
                 update_config=lambda *args, **kwargs: SimpleNamespace(),
+                authorize=lambda: "test-user",
                 is_authorized=lambda: True,
                 is_configured=lambda: True,
             ),
@@ -41,6 +50,10 @@ class WebSystemRouteTests(unittest.TestCase):
             notifications=SimpleNamespace(poll_upcoming=lambda send_native=False: []),
             operations=SimpleNamespace(list_after=lambda after=0: []),
             enrich_queue=SimpleNamespace(is_running=lambda: False),
+        )
+        self.image_jobs: list[tuple[str, int]] = []
+        self.app.state.services.image_queue = SimpleNamespace(
+            submit=lambda url, *, priority: self.image_jobs.append((url, priority)) or True,
         )
         self.started: list[tuple[str, str]] = []
         self.app.state.bg_tasks = SimpleNamespace(
@@ -66,42 +79,33 @@ class WebSystemRouteTests(unittest.TestCase):
         register_system_routes(self.app, render=render, template_filters=SimpleNamespace(utc_offset="+03:00"))
         self.client = TestClient(self.app)
 
-    def test_cached_image_returns_error_and_warms_cache_on_fetch_miss(self) -> None:
-        original_fetch = routes_system.fetch_and_cache_image
-        original_warm = routes_system.warm_image_cache_in_background
-        warmed: list[tuple[str, int]] = []
-        routes_system.fetch_and_cache_image = lambda cache, target_url, timeout: None
-        routes_system.warm_image_cache_in_background = lambda cache, target_url, timeout: warmed.append((target_url, timeout))
-        try:
-            response = self.client.get(
-                "/cached-image",
-                params={"url": "https://example.com/image.jpg"},
-                follow_redirects=False,
-            )
-        finally:
-            routes_system.fetch_and_cache_image = original_fetch
-            routes_system.warm_image_cache_in_background = original_warm
-        self.assertEqual(response.status_code, 502)
-        self.assertNotIn("location", response.headers)
-        self.assertEqual(warmed, [("https://example.com/image.jpg", 5)])
+    def test_cached_image_returns_pending_placeholder_and_queues_cache_miss(self) -> None:
+        target_url = "https://image.tmdb.org/t/p/w342/image.jpg"
+        response = self.client.get("/cached-image", params={"url": target_url}, follow_redirects=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/gif")
+        self.assertEqual(response.headers["x-trakt-image-pending"], "1")
+        self.assertEqual(self.image_jobs, [(target_url, 1)])
 
-    def test_cached_image_returns_fetched_payload_on_cache_miss(self) -> None:
-        original_fetch = routes_system.fetch_and_cache_image
-        routes_system.fetch_and_cache_image = lambda cache, target_url, timeout: (b"\xff\xd8\xffpayload", "image/jpeg")
-        try:
-            response = self.client.get(
-                "/cached-image",
-                params={"url": "https://example.com/image.jpg"},
-                follow_redirects=False,
-            )
-        finally:
-            routes_system.fetch_and_cache_image = original_fetch
+    def test_cached_image_rejects_arbitrary_and_private_urls_before_fetch(self) -> None:
+        arbitrary = self.client.get("/cached-image", params={"url": "https://example.com/image.jpg"})
+        loopback = self.client.get("/cached-image", params={"url": "https://127.0.0.1/image.jpg"})
+        insecure = self.client.get("/cached-image", params={"url": "http://image.tmdb.org/t/p/w342/image.jpg"})
+        self.assertEqual(arbitrary.status_code, 400)
+        self.assertEqual(loopback.status_code, 400)
+        self.assertEqual(insecure.status_code, 400)
+
+    def test_cached_image_serves_fresh_payload_without_duplicating_queue_work(self) -> None:
+        target_url = "https://image.tmdb.org/t/p/w342/image.jpg"
+        self.app.state.image_cache.set_bytes(target_url, b"\xff\xd8\xffpayload", suffix=".jpg")
+        response = self.client.get("/cached-image", params={"url": target_url}, follow_redirects=False)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"\xff\xd8\xffpayload")
         self.assertEqual(response.headers["content-type"], "image/jpeg")
+        self.assertEqual(self.image_jobs, [])
 
     def test_cached_image_returns_cached_payload_with_no_store_header(self) -> None:
-        target_url = "https://example.com/cached.png"
+        target_url = "https://image.tmdb.org/t/p/w342/cached.png"
         self.app.state.image_cache.set_bytes(target_url, b"\x89PNG\r\n\x1a\npayload", suffix=".png")
         response = self.client.get(
             "/cached-image",
@@ -114,7 +118,7 @@ class WebSystemRouteTests(unittest.TestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
 
     def test_cached_image_detects_webp_payload_for_jpg_url(self) -> None:
-        target_url = "https://example.com/image.jpg"
+        target_url = "https://image.tmdb.org/t/p/w342/image.jpg"
         webp_payload = b"RIFF1234WEBPpayload"
         self.app.state.image_cache.set_bytes(target_url, webp_payload, suffix=".jpg")
         response = self.client.get(
@@ -130,8 +134,57 @@ class WebSystemRouteTests(unittest.TestCase):
     def test_settings_sync_repair_starts_background_task(self) -> None:
         response = self.client.post("/settings/sync-repair", follow_redirects=False)
         self.assertEqual(response.status_code, 303)
-        self.assertIn("/settings?flash=Repair%20sync%20started.", response.headers["location"])
-        self.assertEqual(self.started, [("settings_repair_sync", "Repair sync")])
+        self.assertIn("/settings?flash=Metadata%20recheck%20started.", response.headers["location"])
+        self.assertEqual(self.started, [("settings_repair_sync", "Metadata recheck")])
+
+    def test_settings_template_separates_save_and_operation_forms(self) -> None:
+        template = (PROJECT_ROOT / "trakt_tracker" / "web" / "templates" / "settings.html").read_text(
+            encoding="utf-8"
+        )
+        script = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "settings_page.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('data-settings-save-bar', template)
+        self.assertIn('form method="post" action="/settings/full-sync"', template)
+        self.assertIn('data-sync-task="full_sync"', template)
+        self.assertNotIn('formaction="/settings/full-sync"', template)
+        self.assertIn('button.textContent = active ? "Running" : waiting ? "Queued"', script)
+
+    def test_settings_can_authorize_trakt_without_desktop_ui(self) -> None:
+        response = self.client.post("/settings/trakt-authorize", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("/settings?flash=Trakt%20authorized%20as%20test-user.", response.headers["location"])
+
+    def test_refresh_status_exposes_provider_queue_and_artwork_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "status.sqlite3")
+            db.create_schema()
+            sync_state = SyncStateRepository()
+            with db.session() as session:
+                sync_state.set_value(session, SyncPolicy.HISTORY_LAST_SYNC_KEY, "2026-07-16T10:00:00+00:00")
+                sync_state.set_value(session, SyncPolicy.HISTORY_LAST_FULL_RECONCILE_KEY, "2026-07-16T09:30:00+00:00")
+            self.app.state.services.sync._db = db
+            self.app.state.services.sync._sync_state = sync_state
+            self.app.state.services.enrich_queue.status_snapshot = lambda: {
+                "pending": 2, "running": 1, "cooldown": 3, "failed": 4, "last_failure": None,
+            }
+            self.app.state.artwork_cache_warm_loop = SimpleNamespace(
+                status_snapshot=lambda: {"status": "partial", "at": "2026-07-16T10:01:00+00:00", "failed": 1}
+            )
+
+            response = self.client.get("/settings/refresh-status")
+            db.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["trakt"]["authorized"])
+        self.assertTrue(payload["tmdb"]["configured"])
+        self.assertEqual(payload["history"]["last_success_at"], "2026-07-16T10:00:00+00:00")
+        self.assertEqual(payload["queue"]["cooldown"], 3)
+        self.assertEqual(payload["artwork"]["failed"], 1)
+        self.assertFalse(payload["queued"]["repair_sync"])
 
 
 if __name__ == "__main__":

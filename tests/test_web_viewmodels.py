@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 
 from trakt_tracker.domain import TitleSummary
 from trakt_tracker.web.viewmodels import (
@@ -8,6 +9,7 @@ from trakt_tracker.web.viewmodels import (
     normalize_title_type,
     saved_search_matches,
     sort_search_results,
+    sort_watchlist_results,
 )
 
 
@@ -42,6 +44,32 @@ class WebViewModelTests(unittest.TestCase):
         ]
         ordered = sort_search_results(results, "Alphabetical")
         self.assertEqual([item.trakt_id for item in ordered], [2, 1])
+
+    def test_sort_watchlist_results_uses_available_trakt_dates_and_imdb_rating(self) -> None:
+        older = TitleSummary(
+            trakt_id=1,
+            title_type="movie",
+            title="Zulu",
+            imdb_rating=8.5,
+            watchlisted_at=datetime(2026, 1, 1, tzinfo=UTC),
+            released_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        newer = TitleSummary(
+            trakt_id=2,
+            title_type="show",
+            title="Alpha",
+            imdb_rating=7.0,
+            watchlisted_at=datetime(2026, 2, 1, tzinfo=UTC),
+            released_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        self.assertEqual([item.trakt_id for item in sort_watchlist_results([older, newer], "Recently added")], [2, 1])
+        self.assertEqual([item.trakt_id for item in sort_watchlist_results([older, newer], "Release date")], [2, 1])
+        self.assertEqual([item.trakt_id for item in sort_watchlist_results([older, newer], "IMDb rating")], [1, 2])
+        self.assertEqual([item.trakt_id for item in sort_watchlist_results([older, newer], "Alphabetical")], [1, 2])
+        self.assertEqual(
+            [item.trakt_id for item in sort_watchlist_results([older, newer], "Alphabetical", descending=False)],
+            [2, 1],
+        )
 
 
 if __name__ == "__main__":

@@ -1,13 +1,25 @@
 {% if panel and panel.seasons %}
-<div class="search-watch-panel" data-search-watch-panel data-search-watch-title="{{ panel.title }}" data-search-watch-trakt-id="{{ panel.trakt_id }}">
+<div
+    class="search-watch-panel"
+    data-search-watch-panel
+    data-search-watch-title="{{ panel.title }}"
+    data-search-watch-trakt-id="{{ panel.trakt_id }}"
+    data-search-watch-watched-count="{{ panel.watched_count }}"
+    data-search-watch-released-count="{{ panel.released_count }}"
+    data-search-watch-released-watched-count="{{ panel.released_watched_count }}"
+    {% if panel.default_episode_key %}data-default-episode-key="{{ panel.default_episode_key[0] }}-{{ panel.default_episode_key[1] }}"{% endif %}
+>
     <div class="search-watch-seasons" role="tablist" aria-label="Seasons">
         {% for season in panel.seasons %}
         <button
             type="button"
             class="search-watch-season-tab{% if season.is_default %} is-active{% endif %}"
             data-search-watch-season-tab="{{ season.season }}"
+            id="search-watch-tab-{{ panel.trakt_id }}-{{ season.season }}"
             role="tab"
             aria-selected="{{ 'true' if season.is_default else 'false' }}"
+            aria-controls="search-watch-panel-{{ panel.trakt_id }}-{{ season.season }}"
+            tabindex="{{ '0' if season.is_default else '-1' }}"
         >
             {{ season.label }}
             <span>{{ season.watched_count }}/{{ season.released_count }}</span>
@@ -16,9 +28,10 @@
     </div>
     <div class="search-watch-bulk-actions">
         {% for season in panel.seasons %}
+        {% if season.released_count > season.watched_count %}
         <button
             type="button"
-            class="button ghost search-watch-season-action{% if not season.is_default %} is-hidden{% endif %}"
+            class="search-watch-scope-button search-watch-season-action{% if not season.is_default %} is-hidden{% endif %}"
             data-search-watch-action
             data-title-type="show"
             data-trakt-id="{{ panel.trakt_id }}"
@@ -26,43 +39,94 @@
             data-scope="season"
             data-season="{{ season.season }}"
             data-search-watch-season-action="{{ season.season }}"
-            {% if season.released_count == 0 %}disabled{% endif %}
+            title="Mark all released episodes in {{ season.label }} watched"
+            aria-label="Mark all released episodes in {{ season.label }} watched"
         >
-            Mark season
+            <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
+            <span>{{ season.label }}</span>
         </button>
-        {% endfor %}
+        {% endif %}
+        {% if season.watched_count > 0 %}
         <button
             type="button"
-            class="button search-watch-title-action"
-            data-search-watch-action
+            class="search-watch-scope-button is-danger search-watch-season-action{% if not season.is_default %} is-hidden{% endif %}"
+            data-search-unwatch-action
             data-title-type="show"
             data-trakt-id="{{ panel.trakt_id }}"
             data-title="{{ panel.title }}"
-            data-scope="title"
+            data-scope="season"
+            data-season="{{ season.season }}"
+            data-search-watch-season-action="{{ season.season }}"
+            title="Remove watched history for {{ season.label }}"
+            aria-label="Remove watched history for {{ season.label }}"
         >
-            Mark series
+            <span class="search-watch-action-glyphs" aria-hidden="true">
+                <img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt="">
+                <img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt="">
+            </span>
+            <span>{{ season.label }}</span>
         </button>
+        {% endif %}
+        {% endfor %}
     </div>
     {% for season in panel.seasons %}
-    <section class="search-watch-episode-grid{% if not season.is_default %} is-hidden{% endif %}" data-search-watch-season-panel="{{ season.season }}">
+    <section
+        class="search-watch-episode-grid{% if not season.is_default %} is-hidden{% endif %}"
+        data-search-watch-season-panel="{{ season.season }}"
+        id="search-watch-panel-{{ panel.trakt_id }}-{{ season.season }}"
+        role="tabpanel"
+        aria-labelledby="search-watch-tab-{{ panel.trakt_id }}-{{ season.season }}"
+        {% if not season.is_default %}hidden{% endif %}
+    >
         {% for episode in season.episodes %}
-        <article class="search-watch-episode-card{% if episode.is_watched %} is-watched{% endif %}{% if not episode.is_released %} is-unreleased{% endif %}">
-            <div class="search-watch-still">
+        <article
+            class="search-watch-episode-card{% if episode.is_watched %} is-watched{% endif %}{% if not episode.is_released %} is-unreleased{% endif %}"
+            data-episode-key="{{ episode.season }}-{{ episode.number }}"
+        >
+            <div class="search-watch-still-shell">
+                <a
+                    class="search-watch-still"
+                    href="https://trakt.tv/shows/{{ panel.slug or panel.trakt_id }}/seasons/{{ episode.season }}/episodes/{{ episode.number }}"
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label="Open {{ panel.title }} S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }} on Trakt"
+                    data-episode-key="{{ episode.season }}-{{ episode.number }}"
+                    {% if not episode.still_url and episode.is_released %}data-still-pending="1"{% endif %}
+                >
                 {% if episode.still_url %}
                 <img
-                    src="{{ episode.still_url|cached_image_url }}"
+                    src="{{ episode.still_url|episode_preview_url|cached_image_url }}"
                     alt="{{ episode.title }} still"
-                    loading="eager"
-                    onerror="if (!this.dataset.proxyRetryApplied) { this.dataset.proxyRetryApplied = '1'; this.src = this.src + '&cb=' + Date.now(); }"
+                    loading="lazy"
                 >
                 {% elif episode.still_status == 'unknown' %}
                 <span>Loading</span>
+                {% elif episode.still_status == 'retryable_failure' %}
+                <span>Retrying...</span>
                 {% else %}
                 <span>No preview</span>
                 {% endif %}
-                <span class="search-watch-episode-label">S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}</span>
                 {% if episode.is_watched %}
-                <span class="search-watch-state">Watched</span>
+                <span class="search-watch-seen-overlay" aria-label="Watched">
+                    <svg viewBox="0 6 32 20" preserveAspectRatio="xMidYMid meet" width="60%" height="60%" fill="#fff" opacity="0.5" aria-hidden="true">
+                        <path d="M16 25.5a17.85 17.85 0 0 1-15.4-9 1 1 0 0 1 0-1A17.71 17.71 0 0 1 31.4 15.5a1 1 0 0 1 0 1 17.85 17.85 0 0 1-15.4 9ZM2.6 16a15.7 15.7 0 0 0 26.8 0 15.7 15.7 0 0 0-26.8 0Zm13.4 5.85A5.85 5.85 0 1 1 21.85 16 5.86 5.86 0 0 1 16 21.85Zm0-9.7A3.85 3.85 0 1 0 19.85 16 3.85 3.85 0 0 0 16 12.15Z"/>
+                    </svg>
+                </span>
+                {% endif %}
+                <span class="search-watch-episode-label">S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}</span>
+                </a>
+                {% if episode.is_watched %}
+                <button
+                    type="button"
+                    class="{% if episode.user_rating is not none %}history-rating-badge{% else %}history-rate-chip{% endif %} search-watch-user-rating"
+                    data-rating-trigger
+                    data-rating-title-type="show"
+                    data-rating-trakt-id="{{ panel.trakt_id }}"
+                    data-rating-title="{{ panel.title }}"
+                    data-rating-season="{{ episode.season }}"
+                    data-rating-episode="{{ episode.number }}"
+                    aria-label="{% if episode.user_rating is not none %}Change rating for{% else %}Rate{% endif %} {{ panel.title }} S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}"
+                >{% if episode.user_rating is not none %}{{ episode.user_rating }} &#9733;{% else %}Rate{% endif %}</button>
                 {% endif %}
             </div>
             <div class="search-watch-episode-copy">
@@ -80,17 +144,26 @@
                 <button
                     type="button"
                     class="icon-button search-watch-episode-action"
-                    title="Mark episode watched"
-                    data-search-watch-action
+                    title="{% if episode.is_watched %}Remove episode from watched history{% else %}Mark episode watched{% endif %}"
+                    aria-label="{% if episode.is_watched %}Remove {{ panel.title }} S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }} from watched history{% else %}Mark {{ panel.title }} S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }} watched{% endif %}"
+                    {% if episode.is_watched %}data-search-unwatch-action{% else %}data-search-watch-action{% endif %}
                     data-title-type="show"
                     data-trakt-id="{{ panel.trakt_id }}"
                     data-title="{{ panel.title }}"
                     data-scope="episode"
                     data-season="{{ episode.season }}"
                     data-episode="{{ episode.number }}"
-                    {% if episode.is_watched or not episode.is_released %}disabled{% endif %}
+                    data-episode-key="{{ episode.season }}-{{ episode.number }}"
+                    {% if not episode.is_released %}disabled{% endif %}
                 >
+                    {% if episode.is_watched %}
+                    <span class="search-watch-action-glyphs" aria-hidden="true">
+                        <img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt="">
+                        <img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt="">
+                    </span>
+                    {% else %}
                     <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
+                    {% endif %}
                 </button>
             </div>
         </article>
@@ -98,12 +171,12 @@
     </section>
     {% endfor %}
 </div>
+{% elif panel %}
+<div class="title-matrix-empty-state" data-watch-panel-pending="1">
+    <p>Loading episodes...</p>
+</div>
 {% elif error_message %}
 <div class="title-matrix-empty-state">
     <p>{{ error_message }}</p>
-</div>
-{% else %}
-<div class="title-matrix-empty-state">
-    <p>No episodes found for this show.</p>
 </div>
 {% endif %}

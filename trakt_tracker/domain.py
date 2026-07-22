@@ -32,6 +32,24 @@ class TitleSummary:
     poster_refreshed_at: datetime | None = None
     backdrop_refreshed_at: datetime | None = None
     title_episode_avg_rating: float | None = None
+    is_watchlisted: bool = False
+    watchlisted_at: datetime | None = None
+    released_at: datetime | None = None
+    explore_metric_kind: str = ""
+    explore_metric_count: int | None = None
+    catalog_actions_available: bool = True
+    is_release_tracked: bool = False
+    release_acknowledged: bool = False
+    release_distance_text: str = ""
+    is_future_release: bool = False
+    is_in_history: bool = False
+
+
+@dataclass(slots=True)
+class ExploreResultPage:
+    items: list[TitleSummary]
+    page: int
+    page_count: int
 
 
 @dataclass(slots=True)

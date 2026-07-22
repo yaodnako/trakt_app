@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 from dataclasses import asdict
 from datetime import datetime
+from threading import Lock
 from typing import Callable
 
 from trakt_tracker.application.enrich_state import (
@@ -27,15 +30,19 @@ from trakt_tracker.application.metadata_refresh_policy import (
     refresh_requests_from_payload,
 )
 from trakt_tracker.config import AppConfig
-from trakt_tracker.domain import TitleSummary
+from trakt_tracker.domain import ExploreResultPage, TitleSummary, TitleType
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 from trakt_tracker.infrastructure.tmdb import TMDbClient
 from trakt_tracker.infrastructure.url_utils import normalize_external_url
 
 
+_WATCHLIST_SNAPSHOT_STATE_KEY = "watchlist_snapshot_v1"
+_EXPLORE_SNAPSHOT_STATE_KEY = "explore_snapshots_v1"
+
+
 def _serialize_title_summary(title: TitleSummary) -> dict:
     payload = asdict(title)
-    for key in ("poster_refreshed_at", "backdrop_refreshed_at", "ratings_refreshed_at"):
+    for key in ("poster_refreshed_at", "backdrop_refreshed_at", "ratings_refreshed_at", "released_at"):
         value = payload.get(key)
         if isinstance(value, datetime):
             payload[key] = value.isoformat()
@@ -53,6 +60,20 @@ def _parse_optional_datetime(value) -> datetime | None:
         return None
 
 
+def _deserialize_title_summary(payload: object) -> TitleSummary | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        title = TitleSummary(**payload)
+    except (TypeError, ValueError):
+        return None
+    title.poster_refreshed_at = _parse_optional_datetime(title.poster_refreshed_at)
+    title.backdrop_refreshed_at = _parse_optional_datetime(title.backdrop_refreshed_at)
+    title.ratings_refreshed_at = _parse_optional_datetime(title.ratings_refreshed_at)
+    title.released_at = _parse_optional_datetime(title.released_at)
+    return title
+
+
 class CatalogService:
     def __init__(
         self,
@@ -63,6 +84,7 @@ class CatalogService:
         sync_state,
         tmdb_factory: Callable[[AppConfig], TMDbClient],
         imdb_client: IMDbDatasetClient,
+        history_repo=None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -71,6 +93,11 @@ class CatalogService:
         self._sync_state = sync_state
         self._tmdb_factory = tmdb_factory
         self._imdb_client = imdb_client
+        self._history_repo = history_repo
+        self._explore_cache: dict[tuple, dict] = {}
+        self._explore_cache_lock = Lock()
+        self._explore_refresh_locks: dict[tuple, Lock] = {}
+        self._explore_snapshot_lock = Lock()
 
     def _normalize_title_refresh_requests(
         self,
@@ -224,6 +251,564 @@ class CatalogService:
                     )
         return results
 
+    def _search_title_page(
+        self,
+        query: str,
+        title_type: str | None,
+        *,
+        page: int,
+        limit: int,
+    ) -> ExploreResultPage:
+        result_page = self._auth.get_client().get_search_titles_page(
+            query,
+            title_type,
+            page=page,
+            limit=limit,
+        )
+        titles = self._merge_cached_title_metadata(result_page.items)
+        titles = self._normalize_title_urls(titles)
+        titles = self._enrich_search_title_ratings(titles)
+        with self._db.session() as session:
+            for title in titles:
+                self._titles.upsert_title(session, title)
+        return ExploreResultPage(items=titles, page=result_page.page, page_count=result_page.page_count)
+
+    def filtered_search_titles(
+        self,
+        query: str,
+        title_type: str | None,
+        *,
+        page: int,
+        limit: int,
+        imdb_min: float | None,
+        trakt_min: float | None,
+        max_scan_pages: int,
+        excluded_keys: set[tuple[str, int]] | None = None,
+    ) -> ExploreResultPage:
+        self._remember_search_query(query)
+        exclusions = excluded_keys or set()
+        if imdb_min is None and trakt_min is None and not exclusions:
+            return self._search_title_page(
+                query,
+                title_type,
+                page=page,
+                limit=limit,
+            )
+        current_page = max(1, page)
+        page_size = max(1, limit)
+        scan_limit = max(1, max_scan_pages)
+        cache_key = (
+            "search",
+            query.casefold(),
+            title_type or "all",
+            imdb_min,
+            trakt_min,
+            page_size,
+            scan_limit,
+            tuple(sorted(exclusions)),
+        )
+        now = time.monotonic()
+        with self._explore_cache_lock:
+            self._explore_cache = {
+                key: value
+                for key, value in self._explore_cache.items()
+                if now - float(value["created_at"]) <= 120
+            }
+            entry = self._explore_cache.get(cache_key)
+            if entry is None:
+                entry = {"created_at": now, "items": [], "next_source_page": 1, "exhausted": False}
+                self._explore_cache[cache_key] = entry
+            target_count = current_page * page_size + 1
+            while (
+                len(entry["items"]) < target_count
+                and not entry["exhausted"]
+                and int(entry["next_source_page"]) <= scan_limit
+            ):
+                source_page_number = int(entry["next_source_page"])
+                source_page = self._search_title_page(
+                    query,
+                    title_type,
+                    page=source_page_number,
+                    limit=page_size,
+                )
+                entry["items"].extend(
+                    item
+                    for item in source_page.items
+                    if (
+                        (imdb_min is None or (item.imdb_rating is not None and item.imdb_rating >= imdb_min))
+                        and (trakt_min is None or (item.trakt_rating is not None and item.trakt_rating >= trakt_min))
+                        and (item.title_type, int(item.trakt_id)) not in exclusions
+                    )
+                )
+                entry["next_source_page"] = source_page_number + 1
+                entry["exhausted"] = source_page_number >= source_page.page_count
+            start = (current_page - 1) * page_size
+            end = start + page_size
+            items = list(entry["items"][start:end])
+            has_next = len(entry["items"]) > end
+        return ExploreResultPage(items=items, page=current_page, page_count=current_page + 1 if has_next else current_page)
+
+    def watchlist_titles(self) -> list[TitleSummary]:
+        titles = self._fetch_watchlist_titles()
+        titles = self._merge_cached_title_metadata(titles)
+        titles = self._normalize_title_urls(titles)
+        titles = self._enrich_search_title_ratings(titles)
+        with self._db.session() as session:
+            for title in titles:
+                self._titles.upsert_title(session, title)
+        self._save_watchlist_snapshot(
+            {(title.title_type, int(title.trakt_id)) for title in titles},
+            items=titles,
+        )
+        return titles
+
+    def local_watchlist_titles(self) -> list[TitleSummary]:
+        keys, available, items = self._load_watchlist_snapshot_payload()
+        if not available:
+            return []
+        if not items and keys:
+            with self._db.session() as session:
+                stored = self._titles.by_trakt_ids(session, [trakt_id for _title_type, trakt_id in keys])
+                items = [
+                    self._summary_from_title_row(stored[trakt_id], is_watchlisted=True)
+                    for title_type, trakt_id in sorted(keys)
+                    if trakt_id in stored and stored[trakt_id].title_type == title_type
+                ]
+        items = self._merge_cached_title_metadata(items)
+        for item in items:
+            item.is_watchlisted = True
+        return self._normalize_title_urls(items)
+
+    def explore_titles(
+        self,
+        title_type: str,
+        feed: str,
+        *,
+        page: int,
+        limit: int,
+        trakt_min: float | None = None,
+    ) -> ExploreResultPage:
+        result_page = self._auth.get_client().get_explore_titles(
+            title_type,
+            feed,
+            page=page,
+            limit=limit,
+            trakt_min=trakt_min,
+        )
+        titles = self._merge_cached_title_metadata(result_page.items)
+        titles = self._normalize_title_urls(titles)
+        titles = self._enrich_search_title_ratings(titles)
+        with self._db.session() as session:
+            for title in titles:
+                self._titles.upsert_title(session, title)
+        return ExploreResultPage(items=titles, page=result_page.page, page_count=result_page.page_count)
+
+    def filtered_explore_titles(
+        self,
+        title_type: str,
+        feed: str,
+        *,
+        page: int,
+        limit: int,
+        imdb_min: float | None,
+        trakt_min: float | None,
+        max_scan_pages: int,
+        excluded_keys: set[tuple[str, int]] | None = None,
+    ) -> ExploreResultPage:
+        exclusions = excluded_keys or set()
+        if imdb_min is None and not exclusions:
+            return self.explore_titles(
+                title_type,
+                feed,
+                page=page,
+                limit=limit,
+                trakt_min=trakt_min,
+            )
+        current_page = max(1, page)
+        page_size = max(1, limit)
+        scan_limit = max(1, max_scan_pages)
+        cache_key = (title_type, feed, imdb_min, trakt_min, page_size, scan_limit, tuple(sorted(exclusions)))
+        now = time.monotonic()
+        with self._explore_cache_lock:
+            self._explore_cache = {
+                key: value
+                for key, value in self._explore_cache.items()
+                if now - float(value["created_at"]) <= 120
+            }
+            entry = self._explore_cache.get(cache_key)
+            if entry is None:
+                entry = {
+                    "created_at": now,
+                    "items": [],
+                    "next_source_page": 1,
+                    "exhausted": False,
+                }
+                self._explore_cache[cache_key] = entry
+                if len(self._explore_cache) > 8:
+                    oldest_key = min(
+                        self._explore_cache,
+                        key=lambda key: float(self._explore_cache[key]["created_at"]),
+                    )
+                    if oldest_key != cache_key:
+                        self._explore_cache.pop(oldest_key, None)
+            refresh_lock = self._explore_refresh_locks.setdefault(cache_key, Lock())
+        with refresh_lock:
+            target_count = current_page * page_size + 1
+            while (
+                len(entry["items"]) < target_count
+                and not entry["exhausted"]
+                and int(entry["next_source_page"]) <= scan_limit
+            ):
+                source_page_number = int(entry["next_source_page"])
+                source_page = self.explore_titles(
+                    title_type,
+                    feed,
+                    page=source_page_number,
+                    limit=page_size,
+                    trakt_min=trakt_min,
+                )
+                entry["items"].extend(
+                    item
+                    for item in source_page.items
+                    if (
+                        (imdb_min is None or (item.imdb_rating is not None and item.imdb_rating >= imdb_min))
+                        and (item.title_type, int(item.trakt_id)) not in exclusions
+                    )
+                )
+                entry["next_source_page"] = source_page_number + 1
+                entry["exhausted"] = source_page_number >= source_page.page_count
+            start = (current_page - 1) * page_size
+            end = start + page_size
+            items = list(entry["items"][start:end])
+            has_next = len(entry["items"]) > end
+        return ExploreResultPage(
+            items=items,
+            page=current_page,
+            page_count=current_page + 1 if has_next else current_page,
+        )
+
+    def local_explore_titles(
+        self,
+        title_type: str,
+        feed: str,
+        *,
+        page: int,
+        limit: int,
+        imdb_min: float | None,
+        trakt_min: float | None,
+        max_scan_pages: int,
+        excluded_keys: set[tuple[str, int]] | None = None,
+    ) -> ExploreResultPage | None:
+        token = self._explore_snapshot_token(
+            title_type,
+            feed,
+            page=page,
+            limit=limit,
+            imdb_min=imdb_min,
+            trakt_min=trakt_min,
+            max_scan_pages=max_scan_pages,
+            excluded_keys=excluded_keys,
+        )
+        with self._db.session() as session:
+            raw = self._sync_state.get_value(session, _EXPLORE_SNAPSHOT_STATE_KEY, "")
+        try:
+            snapshots = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return None
+        snapshot = snapshots.get(token) if isinstance(snapshots, dict) else None
+        if not isinstance(snapshot, dict):
+            return None
+        items_raw = snapshot.get("items", [])
+        if not isinstance(items_raw, list):
+            return None
+        items = [item for value in items_raw if (item := _deserialize_title_summary(value)) is not None]
+        items = self._normalize_title_urls(self._merge_cached_title_metadata(items))
+        try:
+            snapshot_page = max(1, int(snapshot.get("page", page)))
+            page_count = max(snapshot_page, int(snapshot.get("page_count", snapshot_page)))
+        except (TypeError, ValueError):
+            return None
+        return ExploreResultPage(items=items, page=snapshot_page, page_count=page_count)
+
+    def refresh_explore_titles(
+        self,
+        title_type: str,
+        feed: str,
+        *,
+        page: int,
+        limit: int,
+        imdb_min: float | None,
+        trakt_min: float | None,
+        max_scan_pages: int,
+        excluded_keys: set[tuple[str, int]] | None = None,
+    ) -> ExploreResultPage:
+        result = self.filtered_explore_titles(
+            title_type,
+            feed,
+            page=page,
+            limit=limit,
+            imdb_min=imdb_min,
+            trakt_min=trakt_min,
+            max_scan_pages=max_scan_pages,
+            excluded_keys=excluded_keys,
+        )
+        token = self._explore_snapshot_token(
+            title_type,
+            feed,
+            page=page,
+            limit=limit,
+            imdb_min=imdb_min,
+            trakt_min=trakt_min,
+            max_scan_pages=max_scan_pages,
+            excluded_keys=excluded_keys,
+        )
+        with self._explore_snapshot_lock:
+            with self._db.session() as session:
+                raw = self._sync_state.get_value(session, _EXPLORE_SNAPSHOT_STATE_KEY, "")
+            try:
+                snapshots = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                snapshots = {}
+            if not isinstance(snapshots, dict):
+                snapshots = {}
+            snapshots[token] = {
+                "updated_at": time.time(),
+                "page": result.page,
+                "page_count": result.page_count,
+                "items": [_serialize_title_summary(item) for item in result.items],
+            }
+            if len(snapshots) > 12:
+                oldest = sorted(
+                    snapshots,
+                    key=lambda key: float(snapshots[key].get("updated_at", 0))
+                    if isinstance(snapshots[key], dict)
+                    else 0,
+                )[:-12]
+                for key in oldest:
+                    snapshots.pop(key, None)
+            with self._db.session() as session:
+                self._sync_state.set_value(
+                    session,
+                    _EXPLORE_SNAPSHOT_STATE_KEY,
+                    json.dumps(snapshots, ensure_ascii=False, separators=(",", ":")),
+                )
+        return result
+
+    @staticmethod
+    def _explore_snapshot_token(
+        title_type: str,
+        feed: str,
+        *,
+        page: int,
+        limit: int,
+        imdb_min: float | None,
+        trakt_min: float | None,
+        max_scan_pages: int,
+        excluded_keys: set[tuple[str, int]] | None,
+    ) -> str:
+        identity = json.dumps(
+            [
+                title_type,
+                feed,
+                max(1, int(page)),
+                max(1, int(limit)),
+                imdb_min,
+                trakt_min,
+                max(1, int(max_scan_pages)),
+                sorted(excluded_keys or set()),
+            ],
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    def save_explore_rating_filters(
+        self,
+        imdb_min: str,
+        trakt_min: str,
+        *,
+        hide_watchlisted: bool = False,
+        hide_history: bool = False,
+        hide_releases: bool = False,
+    ) -> None:
+        values = {
+            "imdb_min": imdb_min,
+            "trakt_min": trakt_min,
+            "hide_watchlisted": hide_watchlisted,
+            "hide_history": hide_history,
+            "hide_releases": hide_releases,
+        }
+        payload = json.dumps(values)
+        with self._db.session() as session:
+            self._sync_state.set_value(session, "explore_rating_filters", payload)
+
+    def load_explore_rating_filters(self) -> dict:
+        with self._db.session() as session:
+            raw = self._sync_state.get_value(session, "explore_rating_filters", "")
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            return {"imdb_min": "", "trakt_min": "", "hide_watchlisted": False, "hide_history": False}
+        result = {
+            "imdb_min": str(payload.get("imdb_min", "") or ""),
+            "trakt_min": str(payload.get("trakt_min", "") or ""),
+            "hide_watchlisted": bool(payload.get("hide_watchlisted", False)),
+            "hide_history": bool(payload.get("hide_history", False)),
+            "hide_releases": bool(payload.get("hide_releases", False)),
+        }
+        return result
+
+    def save_search_rating_filters(
+        self,
+        imdb_min: str,
+        trakt_min: str,
+        *,
+        hide_watchlisted: bool = False,
+        hide_history: bool = False,
+    ) -> None:
+        payload = json.dumps(
+            {
+                "imdb_min": imdb_min,
+                "trakt_min": trakt_min,
+                "hide_watchlisted": hide_watchlisted,
+                "hide_history": hide_history,
+            }
+        )
+        with self._db.session() as session:
+            self._sync_state.set_value(session, "search_rating_filters", payload)
+
+    def load_search_rating_filters(self) -> dict:
+        with self._db.session() as session:
+            raw = self._sync_state.get_value(session, "search_rating_filters", "")
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "imdb_min": str(payload.get("imdb_min", "") or ""),
+            "trakt_min": str(payload.get("trakt_min", "") or ""),
+            "hide_watchlisted": bool(payload.get("hide_watchlisted", False)),
+            "hide_history": bool(payload.get("hide_history", False)),
+        }
+
+    def has_watchlist_snapshot(self) -> bool:
+        _keys, available = self._load_watchlist_snapshot()
+        return available
+
+    def refresh_watchlist_snapshot(self) -> None:
+        self.watchlist_titles()
+
+    def watchlist_keys(self, *, title_type: str | None = None) -> set[tuple[str, int]]:
+        keys, _available = self._load_watchlist_snapshot()
+        if title_type in {"movie", "show"}:
+            return {key for key in keys if key[0] == title_type}
+        return keys
+
+    def history_keys(self) -> set[tuple[str, int]]:
+        if self._history_repo is None:
+            return set()
+        with self._db.session() as session:
+            return self._history_repo.watched_title_keys(session)
+
+    def set_watchlisted(self, title_type: str, trakt_id: int, *, watchlisted: bool) -> None:
+        self._auth.get_client().set_watchlist(title_type, trakt_id, watchlisted=watchlisted)
+        keys, available = self._load_watchlist_snapshot()
+        if not available:
+            self.refresh_watchlist_snapshot()
+            return
+        key = (title_type, int(trakt_id))
+        if watchlisted:
+            keys.add(key)
+        else:
+            keys.discard(key)
+        self._save_watchlist_snapshot(keys)
+
+    def _fetch_watchlist_titles(self) -> list[TitleSummary]:
+        return self._auth.get_client().get_watchlist()
+
+    def _load_watchlist_snapshot(self) -> tuple[set[tuple[str, int]], bool]:
+        keys, available, _items = self._load_watchlist_snapshot_payload()
+        return keys, available
+
+    def _load_watchlist_snapshot_payload(self) -> tuple[set[tuple[str, int]], bool, list[TitleSummary]]:
+        with self._db.session() as session:
+            raw = self._sync_state.get_value(session, _WATCHLIST_SNAPSHOT_STATE_KEY, "")
+        if not raw:
+            return set(), False, []
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return set(), False, []
+        values = payload.get("keys") if isinstance(payload, dict) else None
+        if not isinstance(values, list):
+            return set(), False, []
+        keys: set[tuple[str, int]] = set()
+        for value in values:
+            if not isinstance(value, list) or len(value) != 2:
+                continue
+            title_type = str(value[0] or "")
+            try:
+                trakt_id = int(value[1])
+            except (TypeError, ValueError):
+                continue
+            if title_type in {"movie", "show"} and trakt_id > 0:
+                keys.add((title_type, trakt_id))
+        item_values = payload.get("items", []) if isinstance(payload, dict) else []
+        items = [item for value in item_values if (item := _deserialize_title_summary(value)) is not None]
+        items = [item for item in items if (item.title_type, int(item.trakt_id)) in keys]
+        return keys, True, items
+
+    def _save_watchlist_snapshot(
+        self,
+        keys: set[tuple[str, int]],
+        *,
+        items: list[TitleSummary] | None = None,
+    ) -> None:
+        if items is None:
+            _old_keys, _available, existing_items = self._load_watchlist_snapshot_payload()
+            items = [item for item in existing_items if (item.title_type, int(item.trakt_id)) in keys]
+        payload = json.dumps(
+            {
+                "keys": [list(key) for key in sorted(keys)],
+                "items": [_serialize_title_summary(item) for item in items],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        with self._db.session() as session:
+            self._sync_state.set_value(session, _WATCHLIST_SNAPSHOT_STATE_KEY, payload)
+
+    @staticmethod
+    def _summary_from_title_row(row, *, is_watchlisted: bool = False) -> TitleSummary:
+        title_type: TitleType = "movie" if row.title_type == "movie" else "show"
+        return TitleSummary(
+            trakt_id=int(row.trakt_id),
+            title_type=title_type,
+            title=str(row.title or ""),
+            year=row.year,
+            overview=str(row.overview or ""),
+            poster_url=str(row.poster_url or ""),
+            backdrop_url=str(row.backdrop_url or ""),
+            status=str(row.status or ""),
+            slug=str(row.slug or ""),
+            trakt_rating=row.trakt_rating,
+            trakt_votes=row.trakt_votes,
+            tmdb_id=row.tmdb_id,
+            tmdb_rating=row.tmdb_rating,
+            tmdb_votes=row.tmdb_votes,
+            imdb_id=str(row.imdb_id or ""),
+            imdb_rating=row.imdb_rating,
+            imdb_votes=row.imdb_votes,
+            ratings_status=str(row.ratings_status or ENRICH_STATUS_UNKNOWN),
+            ratings_refreshed_at=row.ratings_refreshed_at,
+            poster_refreshed_at=row.poster_refreshed_at,
+            backdrop_refreshed_at=row.backdrop_refreshed_at,
+            is_watchlisted=is_watchlisted,
+        )
+
     @staticmethod
     def _normalize_title_urls(titles: list[TitleSummary]) -> list[TitleSummary]:
         for title in titles:
@@ -330,11 +915,21 @@ class CatalogService:
                 merged.append(title)
         return merged
 
-    def save_last_search_state(self, query: str, title_type: str | None, results: list[TitleSummary]) -> None:
+    def save_last_search_state(
+        self,
+        query: str,
+        title_type: str | None,
+        results: list[TitleSummary],
+        *,
+        imdb_min: str = "",
+        trakt_min: str = "",
+    ) -> None:
         payload = {
             "query": query,
             "title_type": title_type or "all",
             "sort_mode": self.get_search_sort_mode(),
+            "imdb_min": imdb_min,
+            "trakt_min": trakt_min,
             "results": [_serialize_title_summary(item) for item in results],
         }
         with self._db.session() as session:
@@ -365,6 +960,7 @@ class CatalogService:
             title.poster_refreshed_at = _parse_optional_datetime(title.poster_refreshed_at)
             title.backdrop_refreshed_at = _parse_optional_datetime(title.backdrop_refreshed_at)
             title.ratings_refreshed_at = _parse_optional_datetime(title.ratings_refreshed_at)
+            title.released_at = _parse_optional_datetime(title.released_at)
             title.poster_url = normalize_external_url(title.poster_url)
             results.append(title)
         results = self._merge_cached_title_metadata(results)
@@ -372,6 +968,8 @@ class CatalogService:
             "query": str(payload.get("query", "") or ""),
             "title_type": str(payload.get("title_type", "all") or "all"),
             "sort_mode": str(payload.get("sort_mode", "IMDb votes") or "IMDb votes"),
+            "imdb_min": str(payload.get("imdb_min", "") or ""),
+            "trakt_min": str(payload.get("trakt_min", "") or ""),
             "results": results,
         }
 

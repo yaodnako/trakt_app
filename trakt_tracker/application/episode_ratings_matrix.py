@@ -127,6 +127,7 @@ class EpisodeRatingsMatrixService:
         force_refresh: bool = False,
         provider: str = "imdb",
         refresh_missing: bool = False,
+        allow_network_refresh: bool = True,
     ) -> EpisodeRatingsMatrixViewModel:
         normalized_provider = self._normalize_provider(provider)
         title = self._load_title(trakt_id)
@@ -135,7 +136,7 @@ class EpisodeRatingsMatrixService:
             episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
             my_ratings = self._history.latest_show_episode_ratings(session, trakt_id)
         should_hydrate = force_refresh or not episode_rows
-        if should_hydrate:
+        if should_hydrate and allow_network_refresh:
             try:
                 self._hydrate_show_episodes(trakt_id, title_imdb_id=title.get("imdb_id", ""))
             except Exception as exc:
@@ -143,7 +144,7 @@ class EpisodeRatingsMatrixService:
             with self._db.session() as session:
                 episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
                 my_ratings = self._history.latest_show_episode_ratings(session, trakt_id)
-        if normalized_provider == "trakt" and (refresh_missing or force_refresh) and episode_rows:
+        if normalized_provider == "trakt" and (refresh_missing or force_refresh) and episode_rows and allow_network_refresh:
             try:
                 self._refresh_due_trakt_ratings(
                     trakt_id,
@@ -155,7 +156,7 @@ class EpisodeRatingsMatrixService:
             with self._db.session() as session:
                 episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
                 my_ratings = self._history.latest_show_episode_ratings(session, trakt_id)
-        if episode_rows:
+        if episode_rows and allow_network_refresh:
             self._repair_cached_imdb_ratings(
                 trakt_id,
                 title_imdb_id=title.get("imdb_id", ""),
@@ -172,6 +173,31 @@ class EpisodeRatingsMatrixService:
             error_message=error_message,
             provider=normalized_provider,
         )
+
+    def select_trakt_rating_refresh_keys(self, trakt_id: int, *, force_refresh: bool = False) -> list[tuple[int, int]]:
+        """Return local candidates so the HTTP layer can enqueue provider work."""
+        with self._db.session() as session:
+            episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
+        due_keys: list[tuple[int, int]] = []
+        for row in episode_rows:
+            if row.get("season") is None or row.get("number") is None:
+                continue
+            season = int(row["season"])
+            episode = int(row["number"])
+            if force_refresh:
+                due_keys.append((season, episode))
+                continue
+            due = metadata_refresh_due(
+                ASSET_KIND_EPISODE_RATINGS,
+                status=str(row.get("trakt_details_status") or ""),
+                last_checked_at=row.get("trakt_details_refreshed_at"),
+                has_value=(row.get("trakt_rating") is not None and row.get("trakt_votes") is not None),
+                trigger=TRIGGER_VISIBLE_RATINGS_REFRESH,
+                first_aired=row.get("first_aired"),
+            )
+            if due.should_refresh:
+                due_keys.append((season, episode))
+        return due_keys
 
     @staticmethod
     def _normalize_provider(provider: str | None) -> str:

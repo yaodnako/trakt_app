@@ -17,8 +17,16 @@ def _pythonw_candidate(executable: str | None = None) -> Path:
     return path
 
 
-def build_web_tray_autostart_command(executable: str | None = None) -> str:
-    return f'"{_pythonw_candidate(executable)}" -m trakt_tracker.web_tray'
+def build_web_tray_autostart_command(
+    executable: str | None = None,
+    *,
+    packaged: bool | None = None,
+) -> str:
+    is_packaged = bool(getattr(sys, "frozen", False)) if packaged is None else packaged
+    path = Path(executable or sys.executable)
+    if is_packaged:
+        return f'"{path}" --autostart'
+    return f'"{_pythonw_candidate(str(path))}" -m trakt_tracker.web_tray --autostart'
 
 
 def set_web_tray_autostart(enabled: bool, *, command: str | None = None) -> None:

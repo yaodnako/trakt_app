@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel setup-panel" data-setup-root data-authorized="{{ '1' if authorized else '0' }}">
+    <div class="setup-copy">
+        <p class="setup-kicker">First launch</p>
+        <h2>Connect Trakt</h2>
+        <p>Sign in once. The portal will import your history, ratings, and progress into a local profile.</p>
+    </div>
+
+    {% if credentials_source == 'missing' %}
+    <form method="post" action="/setup/credentials" class="settings-form setup-credentials">
+        <label>
+            <span>Trakt Client ID</span>
+            <input type="text" name="client_id" value="{{ config.client_id if config is defined else '' }}" required>
+        </label>
+        <label>
+            <span>Trakt Client Secret</span>
+            <input type="password" name="client_secret" value="" required autocomplete="off">
+        </label>
+        <label>
+            <span>Redirect URI</span>
+            <input type="text" name="redirect_uri" value="{{ request.app.state.services.auth.config.redirect_uri }}" required>
+        </label>
+        <label>
+            <span>TMDb API Key (optional)</span>
+            <input type="password" name="tmdb_api_key" value="" autocomplete="off">
+        </label>
+        <label>
+            <span>TMDb Read Token (optional)</span>
+            <input type="password" name="tmdb_read_access_token" value="" autocomplete="off">
+        </label>
+        <div class="settings-actions"><button type="submit" class="button">Save credentials</button></div>
+    </form>
+    {% elif not authorized %}
+    <form method="post" action="/settings/trakt-authorize" class="setup-action-form">
+        <input type="hidden" name="return_to" value="/setup">
+        <button type="submit" class="button">Sign in with Trakt</button>
+    </form>
+    {% else %}
+    <div class="setup-status" data-setup-status>
+        <div class="setup-status-head">
+            <strong>{{ profile_slug }}</strong>
+            <span class="settings-sync-pill {% if state.state == 'running' %}is-running{% endif %}" data-setup-state>{{ state.state|capitalize }}</span>
+        </div>
+        <p data-setup-message>{{ state.message }}</p>
+        <p class="setup-error" data-setup-error {% if not state.error %}hidden{% endif %}>{{ state.error }}</p>
+        <button type="button" class="button" data-setup-retry {% if state.state == 'running' %}hidden{% endif %}>{{ 'Retry' if state.state == 'failed' else 'Start sync' }}</button>
+    </div>
+    {% endif %}
+
+    <p class="setup-note">Images and optional IMDb metadata continue loading in the normal background queues after the portal opens.</p>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="{{ request.url_for('static', path='setup_page.js') }}?v={{ static_js_version }}"></script>
+{% endblock %}

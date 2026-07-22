@@ -22,6 +22,9 @@ from trakt_tracker.domain import RatingInput
 from trakt_tracker.web.routes_history import register_history_routes
 from trakt_tracker.web.routes_ratings import register_rating_routes
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+STATIC_DIR = PROJECT_ROOT / "trakt_tracker" / "web" / "static"
+
 
 class _FakeHistoryService:
     def __init__(self, rows: list[dict]) -> None:
@@ -230,8 +233,8 @@ class _FakeInteractionsService:
 class HistoryRouteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = FastAPI()
-        templates_dir = Path("D:/CodexProjects/Trakt_app/trakt_tracker/web/templates")
-        static_dir = Path("D:/CodexProjects/Trakt_app/trakt_tracker/web/static")
+        templates_dir = PROJECT_ROOT / "trakt_tracker" / "web" / "templates"
+        static_dir = STATIC_DIR
         self.templates = Jinja2Templates(directory=str(templates_dir))
         self.templates.env.filters["rating_with_votes"] = lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a"
         self.templates.env.filters["episode_label"] = lambda season, episode: f"S{int(season):02d}E{int(episode):02d}" if season is not None and episode is not None else ""
@@ -393,14 +396,25 @@ class HistoryRouteTests(unittest.TestCase):
         response = self.client.get("/history?page=2")
         self.assertEqual(response.status_code, 200)
         html = response.text
+        history_script = (STATIC_DIR / "history_page.js").read_text(encoding="utf-8")
         self.assertIn('data-history-page="2"', html)
-        self.assertIn("/history/refresh", html)
-        self.assertIn('historyTypeSelect.addEventListener("change", submitFilters)', html)
-        self.assertIn('titleFilterInput.addEventListener("input"', html)
+        self.assertIn("history_page.js?v=", html)
+        self.assertIn("/history/refresh", history_script)
+        self.assertIn('historyTypeSelect?.addEventListener("change", applyImmediately)', history_script)
+        self.assertIn('titleFilterInput.addEventListener("input"', history_script)
         self.assertNotIn(">Apply</button>", html)
-        self.assertNotIn("window.location.reload()", html)
-        self.assertNotIn("history_enrich_initial_seq", html)
-        self.assertNotIn("reloadGuardKey", html)
+        self.assertNotIn('action="/history/sync"', html)
+        self.assertNotIn(">Sync</button>", html)
+        self.assertNotIn("window.location.reload()", history_script)
+        self.assertNotIn("history_enrich_initial_seq", history_script)
+        self.assertNotIn('id="history-sync-status"', html)
+        self.assertIn("showSyncToast", history_script)
+        self.assertIn("window.traktDebugMode && running", history_script)
+        self.assertIn('window.addEventListener("wheel", this.onScrollActivity, {passive: true})', history_script)
+        self.assertIn("await this.waitForScrollIdle()", history_script)
+        self.assertIn("await this.yieldToBrowser()", history_script)
+        self.assertIn("if (domChanged)", history_script)
+        self.assertNotIn("reloadGuardKey", history_script)
         self.assertEqual(self.app.state.bg_tasks.started_keys, [])
 
     def test_history_rate_query_accepts_empty_season_episode(self) -> None:
@@ -510,6 +524,52 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertIn('data-title-matrix-url="/titles/show/1/episode-ratings-matrix"', html)
         self.assertIn("Loading", html)
 
+    def test_history_title_links_to_trakt_and_show_poster_opens_watch_panel(self) -> None:
+        response = self.client.get("/history?page=1")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn('<a href="https://trakt.tv/shows/severance" target="_blank" rel="noreferrer">Severance</a>', html)
+        self.assertIn('data-watch-panel-url="/search/show/1/watch-panel"', html)
+        self.assertIn('data-trakt-id="1"', html)
+        self.assertIn('href="https://trakt.tv/movies/dune"', html)
+        self.assertIn('id="history-watch-overlay"', html)
+        self.assertIn("data-show-watch-play", html)
+        history_watch_script = (STATIC_DIR / "history_watch_panel.js").read_text(encoding="utf-8")
+        ui_script = (STATIC_DIR / "ui_core.js").read_text(encoding="utf-8")
+        self.assertIn("configurePlayAction(watchOverlay, trigger)", history_watch_script)
+        self.assertIn("show_watch_panel.js?v=", html)
+        self.assertIn('data-history-watch-date-mode="now"', html)
+        self.assertNotIn("scheduleWatchPanelRefreshIfPending", html)
+        self.assertIn("refreshWatchPanel", history_watch_script)
+        self.assertIn("data-search-unwatch-action", html)
+        self.assertIn('title="Remove movie from watched history"', html)
+        self.assertIn('data-title-type="movie"', html)
+        self.assertIn('class="history-episode-footer"', html)
+        self.assertIn("seen.svg", html)
+        self.assertIn("cancel.svg", html)
+        panel_script = (STATIC_DIR / "show_watch_panel.js").read_text(encoding="utf-8")
+        panel_css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        self.assertIn("patchArtwork", panel_script)
+        self.assertIn("findRatingTrigger", ui_script)
+        self.assertIn("search-watch-overlay:not([hidden])", ui_script)
+        self.assertIn("const managedInertNodes = new Set()", ui_script)
+        self.assertIn("activeBranch.parentElement.children", ui_script)
+        self.assertNotIn('document.querySelector(".shell").inert', ui_script)
+        self.assertNotIn("scrollIntoView", panel_script)
+        self.assertNotIn("window.confirm", panel_script)
+        self.assertIn("window.traktConfirm", panel_script)
+        self.assertIn("const scrollTop = body.scrollTop", panel_script)
+        self.assertIn("body.scrollTop = scrollTop", panel_script)
+        self.assertIn("overflow-anchor: none", panel_css)
+        self.assertIn(".history-episode-footer", panel_css)
+
+        title_mode = self.client.get("/history?view=titles&page=1")
+        self.assertIn('title="Remove movie from watched history"', title_mode.text)
+        self.assertEqual(title_mode.status_code, 200)
+        self.assertIn('data-watch-panel-url="/search/show/1/watch-panel"', title_mode.text)
+        self.assertIn('<a href="https://trakt.tv/shows/severance" target="_blank" rel="noreferrer">Severance</a>', title_mode.text)
+
     def test_history_page_title_mode_renders_compact_title_cards(self) -> None:
         self.history.rows = [
             {
@@ -526,7 +586,7 @@ class HistoryRouteTests(unittest.TestCase):
         response = self.client.get("/history?view=titles&type=all")
         self.assertEqual(response.status_code, 200)
         html = response.text
-        self.assertIn("Watched titles", html)
+        self.assertNotIn("Watched titles", html)
         self.assertIn('data-history-view="titles"', html)
         self.assertIn('data-history-title-key="show:1"', html)
         self.assertIn('data-history-title-key="movie:2"', html)
@@ -535,7 +595,7 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertIn('data-title-matrix-url="/titles/show/1/episode-ratings-matrix"', html)
         self.assertIn("8.5", html)
         self.assertIn("9", html)
-        self.assertIn("&amp;view=titles", html)
+        self.assertIn('href="https://trakt.tv/shows/severance"', html)
 
     def test_history_movie_cards_do_not_render_matrix_trigger(self) -> None:
         self.history.rows = [self._row("movie", 2, "Dune", watched_at=datetime(2026, 4, 3, 11, 0, tzinfo=UTC))]
@@ -578,9 +638,33 @@ class HistoryRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.text
-        self.assertIn("proxyRetryApplied", html)
+        ui_script = (STATIC_DIR / "ui_core.js").read_text(encoding="utf-8")
+        self.assertIn('current.pathname !== "/cached-image"', ui_script)
         self.assertNotIn("data-direct-src", html)
         self.assertNotIn("dataset.directSrc", html)
+
+    def test_history_movie_preview_uses_external_trakt_link(self) -> None:
+        template = (PROJECT_ROOT / "trakt_tracker" / "web" / "templates" / "history_title_card.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('href="{{ trakt_episode_url or trakt_title_url }}"', template)
+        self.assertNotIn("('/titles/' ~ row.type", template)
+
+    def test_history_mobile_filter_and_accessibility_contracts(self) -> None:
+        css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        template = (PROJECT_ROOT / "trakt_tracker" / "web" / "templates" / "history.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("flex: 0 0 auto", css)
+        self.assertIn("@media (max-width: 640px)", css)
+        self.assertIn("min-height: 44px", css)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", css)
+        self.assertIn('aria-label="Filter history by title"', template)
+        self.assertNotIn("history-pager-top", template)
+        self.assertIn("history-pager-bottom", template)
+        self.assertIn("No matches", template)
 
     def test_history_show_episode_without_still_does_not_use_title_poster_fallback(self) -> None:
         self.history.rows = [

@@ -146,6 +146,22 @@ class NotificationLog(Base):
     message: Mapped[str] = mapped_column(String(512), default="")
 
 
+class ReleaseTrackingState(Base):
+    __tablename__ = "release_tracking_state"
+    __table_args__ = (UniqueConstraint("title_type", "trakt_id", name="uq_release_tracking_title"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title_type: Mapped[str] = mapped_column(String(16), index=True)
+    trakt_id: Mapped[int] = mapped_column(Integer, index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    release_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    list_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    notify_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class SyncState(Base):
     __tablename__ = "sync_state"
 

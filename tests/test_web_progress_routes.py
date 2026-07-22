@@ -29,6 +29,8 @@ from trakt_tracker.web.viewmodels import (
     progress_skipped_count,
 )
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 class _FakeProgressService:
     def __init__(self, items: list[ProgressSnapshot]) -> None:
@@ -133,8 +135,8 @@ class _FakeBackgroundTaskManager:
 class ProgressRouteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = FastAPI()
-        templates_dir = Path("D:/CodexProjects/Trakt_app/trakt_tracker/web/templates")
-        static_dir = Path("D:/CodexProjects/Trakt_app/trakt_tracker/web/static")
+        templates_dir = PROJECT_ROOT / "trakt_tracker" / "web" / "templates"
+        static_dir = PROJECT_ROOT / "trakt_tracker" / "web" / "static"
         self.templates = Jinja2Templates(directory=str(templates_dir))
         self.templates.env.filters["dt"] = lambda value: value.isoformat() if value else ""
         self.templates.env.filters["episode_label"] = lambda season, episode: f"S{int(season):02d}E{int(episode):02d}" if season is not None and episode is not None else ""
@@ -229,6 +231,32 @@ class ProgressRouteTests(unittest.TestCase):
         register_progress_routes(self.app, render=render, progress_redirect=progress_redirect)
         self.client = TestClient(self.app)
 
+    def test_progress_poster_opens_episode_panel_and_title_links_to_trakt(self) -> None:
+        response = self.client.get("/progress")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn("<title>Up next | Trakt Tracker Web</title>", html)
+        self.assertIn('href="/progress" class="active" aria-current="page">Up next', html)
+        self.assertIn('<h3><a href="https://trakt.tv/shows/1" target="_blank" rel="noreferrer">Severance</a></h3>', html)
+        self.assertIn('data-watch-panel-url="/search/show/1/watch-panel"', html)
+        self.assertIn('data-watch-panel-url="/search/show/2/watch-panel"', html)
+        self.assertIn('data-trakt-id="1"', html)
+        self.assertIn('data-trakt-id="2"', html)
+        self.assertIn('id="history-watch-overlay"', html)
+        self.assertIn("data-show-watch-play", html)
+        watch_script = (
+            PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "history_watch_panel.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("configurePlayAction(watchOverlay, trigger)", watch_script)
+        self.assertIn("show_watch_panel.js?v=", html)
+        self.assertIn("Episode Watch", html)
+        self.assertIn("data-confirm-message=", html)
+        self.assertIn("Remove from Up next?", html)
+        self.assertNotIn("return confirm(", html)
+        self.assertNotIn("scheduleWatchPanelRefreshIfPending", html)
+        self.assertIn("refreshWatchPanel", watch_script)
+
     def test_progress_refresh_returns_only_requested_cards(self) -> None:
         response = self.client.post(
             "/progress/refresh",
@@ -261,6 +289,8 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertIn("No preview", html)
         self.assertGreaterEqual(html.count("n/a"), 2)
         self.assertNotIn(">New</h3>", html)
+        self.assertNotIn('action="/progress/sync"', html)
+        self.assertNotIn(">Sync</button>", html)
 
     def test_progress_refresh_queues_ratings_only_requests_for_stale_visible_cards(self) -> None:
         self.progress.items = [

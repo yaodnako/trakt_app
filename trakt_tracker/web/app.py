@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import asyncio
+import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -9,22 +10,26 @@ from time import perf_counter
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from trakt_tracker.application.services import ServiceContainer, build_services
+from trakt_tracker.application.services import ServiceContainer
 from trakt_tracker.config import ConfigStore, format_local_datetime, get_app_data_dir
 from trakt_tracker.formatting import format_compact_votes, format_rating_with_votes
+from trakt_tracker.infrastructure.artwork_cache import tmdb_episode_preview_url
 from trakt_tracker.infrastructure.cache import BinaryCache
-from trakt_tracker.persistence.database import Database
+from trakt_tracker.profiles import read_setup_state, recover_interrupted_setup
 from trakt_tracker.startup_profile import StartupProfiler
 from trakt_tracker.web.routes_catalog import register_catalog_routes
 from trakt_tracker.web.routes_history import register_history_routes
 from trakt_tracker.web.routes_progress import register_progress_routes
 from trakt_tracker.web.routes_ratings import register_rating_routes
 from trakt_tracker.web.routes_system import register_system_routes
+from trakt_tracker.web.runtime import PortalRuntime
+from trakt_tracker.web.security import portal_security_middleware
 from trakt_tracker.web.viewmodels import (
+    format_release_distance,
     progress_effective_aired,
     progress_effective_percent,
     progress_query_string,
@@ -33,6 +38,34 @@ from trakt_tracker.web.viewmodels import (
     progress_recent_release,
     progress_skipped_count,
 )
+from trakt_tracker.version import app_version
+
+
+_RUNTIME_LOG_LOCK = Lock()
+_RUNTIME_LOG_MAX_BYTES = 2 * 1024 * 1024
+_RUNTIME_LOG_BACKUPS = 3
+
+
+def _append_rotating_runtime_log(path: Path, line: str) -> None:
+    """Append a bounded local diagnostic log without hiding write failures."""
+    try:
+        encoded_size = len(line.encode("utf-8"))
+        with _RUNTIME_LOG_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size + encoded_size > _RUNTIME_LOG_MAX_BYTES:
+                for index in range(_RUNTIME_LOG_BACKUPS, 0, -1):
+                    source = path.with_name(f"{path.name}.{index}")
+                    target = path.with_name(f"{path.name}.{index + 1}")
+                    if source.exists():
+                        if index == _RUNTIME_LOG_BACKUPS:
+                            source.unlink()
+                        else:
+                            source.replace(target)
+                path.replace(path.with_name(f"{path.name}.1"))
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+    except OSError as exc:
+        logging.getLogger("trakt_tracker.runtime").warning("Could not write runtime log %s: %s", path, exc)
 
 
 class _TemplateFilters:
@@ -60,41 +93,9 @@ class _TemplateFilters:
             return ""
         return f"S{season:02d}E{episode:02d}"
 
-
-class _BackgroundTaskManager:
-    def __init__(self) -> None:
-        self._running: set[str] = set()
-        self._lock = Lock()
-
-    def start(self, key: str, *, source: str, operations, fn) -> bool:
-        with self._lock:
-            if key in self._running:
-                operations.publish(source, f"{source}: already running.")
-                return False
-            self._running.add(key)
-
-        def runner() -> None:
-            operations.publish(source, f"{source}: started.")
-            try:
-                fn()
-            except Exception as exc:
-                operations.publish(source, f"{source}: failed: {exc}")
-            else:
-                operations.publish(source, f"{source}: completed.")
-            finally:
-                with self._lock:
-                    self._running.discard(key)
-
-        Thread(target=runner, daemon=True).start()
-        return True
-
-    def is_running(self, key: str) -> bool:
-        with self._lock:
-            return key in self._running
-
-    def has_running_prefix(self, *prefixes: str) -> bool:
-        with self._lock:
-            return any(any(item.startswith(prefix) for prefix in prefixes) for item in self._running)
+    @staticmethod
+    def release_distance(value) -> str:
+        return format_release_distance(value if isinstance(value, datetime) else None)
 
 
 class _IMDbAutoSyncLoop:
@@ -114,22 +115,28 @@ class _IMDbAutoSyncLoop:
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
+            services: ServiceContainer | None = None
             try:
-                services: ServiceContainer = self._app.state.services
+                services = self._app.state.services
+                if services is None:
+                    raise RuntimeError("Profile services are unavailable")
+                active_services: ServiceContainer = services
                 bg_tasks = self._app.state.bg_tasks
-                interval_minutes = max(1, int(services.auth.config.imdb_auto_sync_interval_minutes or 1))
-                if services.sync.should_auto_sync_imdb_dataset(interval_minutes):
+                interval_minutes = max(1, int(active_services.auth.config.imdb_auto_sync_interval_minutes or 1))
+                if active_services.sync.should_auto_sync_imdb_dataset(interval_minutes):
                     bg_tasks.start(
                         "imdb_auto_sync",
                         source="IMDb sync (auto)",
-                        operations=services.operations,
-                        fn=lambda: services.sync.maybe_sync_imdb_dataset(
+                        operations=active_services.operations,
+                        fn=lambda: active_services.sync.maybe_sync_imdb_dataset(
                             interval_minutes,
-                            status_callback=lambda message: services.operations.publish("IMDb sync", message),
+                            status_callback=lambda message: active_services.operations.publish("IMDb sync", message),
                         ),
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger("trakt_tracker.runtime").exception("IMDb auto-sync loop failed")
+                if services is not None:
+                    services.operations.publish("IMDb sync", f"IMDb auto-sync loop failed: {type(exc).__name__}: {exc}")
             self._stop_event.wait(self._poll_interval_seconds)
 
 
@@ -151,8 +158,11 @@ class _TraktEpisodeRatingsRefreshLoop:
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
+            services: ServiceContainer | None = None
             try:
-                services: ServiceContainer = self._app.state.services
+                services = self._app.state.services
+                if services is None:
+                    raise RuntimeError("Profile services are unavailable")
                 bg_tasks = self._app.state.bg_tasks
                 if not bg_tasks.has_running_prefix(
                     "history_sync",
@@ -160,8 +170,13 @@ class _TraktEpisodeRatingsRefreshLoop:
                     "settings_",
                 ):
                     services.sync.enqueue_due_background_trakt_episode_ratings(limit=self._batch_size)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger("trakt_tracker.runtime").exception("Trakt episode rating refresh loop failed")
+                if services is not None:
+                    services.operations.publish(
+                        "Episode ratings",
+                        f"Episode ratings refresh loop failed: {type(exc).__name__}: {exc}",
+                    )
             self._stop_event.wait(self._poll_interval_seconds)
 
 
@@ -171,6 +186,8 @@ class _ArtworkCacheWarmLoop:
         self._poll_interval_seconds = max(30.0, float(poll_interval_seconds))
         self._batch_size = max(1, int(batch_size))
         self._stop_event = Event()
+        self._status_lock = Lock()
+        self._last_status: dict = {}
         self._thread = Thread(target=self._run, name="web-artwork-cache-warm", daemon=True)
 
     def start(self) -> None:
@@ -183,31 +200,81 @@ class _ArtworkCacheWarmLoop:
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
-            try:
-                services: ServiceContainer = self._app.state.services
-                bg_tasks = self._app.state.bg_tasks
-                if not bg_tasks.has_running_prefix("settings_full_sync", "settings_backfill_sync", "settings_timeout_sync", "settings_repair_sync"):
-                    services.sync.warm_missing_artwork_cache(limit=self._batch_size, timeout=5, max_workers=4)
-            except Exception:
-                pass
+            self._run_once()
             self._stop_event.wait(self._poll_interval_seconds)
 
+    def _run_once(self) -> None:
+        started = perf_counter()
+        services: ServiceContainer | None = None
+        try:
+            services = self._app.state.services
+            if services is None:
+                raise RuntimeError("Profile services are unavailable")
+            bg_tasks = self._app.state.bg_tasks
+            profile_write_running = getattr(bg_tasks, "has_running_profile_write", None)
+            busy = (
+                bool(profile_write_running())
+                if callable(profile_write_running)
+                else bg_tasks.has_running_prefix(
+                    "settings_full_sync",
+                    "settings_backfill_sync",
+                    "settings_timeout_sync",
+                    "settings_repair_sync",
+                )
+            )
+            if busy:
+                self._set_status({"status": "skipped", "at": datetime.now(tz=UTC).isoformat(), "error": ""})
+                self._write_log(f"skipped=profile_workflow duration_ms={(perf_counter() - started) * 1000.0:.1f}")
+                return
+            result = services.sync.warm_missing_artwork_cache(limit=self._batch_size, timeout=5, max_workers=4)
+            failed_urls = list(result.get("failed_urls") or [])
+            self._set_status(
+                {
+                    "status": "ok" if not result.get("failed") else "partial",
+                    "at": datetime.now(tz=UTC).isoformat(),
+                    "scanned": int(result.get("scanned", 0)),
+                    "selected": int(result.get("selected", 0)),
+                    "warmed": int(result.get("warmed", 0)),
+                    "failed": int(result.get("failed", 0)),
+                    "duration_ms": float(result.get("duration_ms", (perf_counter() - started) * 1000.0)),
+                    "error": (f"Failed to cache {failed_urls[-1]}" if failed_urls else ""),
+                }
+            )
+            self._write_log(
+                f"scanned={result.get('scanned', 0)} selected={result.get('selected', 0)} "
+                f"warmed={result.get('warmed', 0)} failed={result.get('failed', 0)} "
+                f"duration_ms={result.get('duration_ms', (perf_counter() - started) * 1000.0):.1f}"
+            )
+        except Exception as exc:
+            message = f"error={type(exc).__name__}: {exc} duration_ms={(perf_counter() - started) * 1000.0:.1f}"
+            self._set_status({"status": "failed", "at": datetime.now(tz=UTC).isoformat(), "error": f"{type(exc).__name__}: {exc}"})
+            self._write_log(message)
+            if services is not None:
+                services.operations.publish("Artwork cache", f"Artwork cache warm failed: {message}")
 
-def _build_services_with_profiling() -> ServiceContainer:
+    def status_snapshot(self) -> dict:
+        with self._status_lock:
+            return dict(self._last_status)
+
+    def _set_status(self, status: dict) -> None:
+        with self._status_lock:
+            self._last_status = dict(status)
+
+    @staticmethod
+    def _write_log(message: str) -> None:
+        path = get_app_data_dir() / "web_artwork_cache_warm.log"
+        _append_rotating_runtime_log(path, f"{datetime.now(tz=UTC).isoformat()} {message}\n")
+
+
+def _build_runtime_with_profiling(config_store: ConfigStore | None = None) -> PortalRuntime:
     profile_path = get_app_data_dir() / "web_startup.log"
     profiler = StartupProfiler(profile_path)
-    config_store = ConfigStore()
+    config_store = config_store or ConfigStore()
     profiler.mark("config store ready")
-    config = config_store.load()
-    profiler.mark("config loaded")
-    db = Database(config.resolved_database_path)
-    profiler.mark("database opened")
-    db.create_schema()
-    profiler.mark("database schema ready")
-    services = build_services(config_store, db)
-    profiler.mark("services built")
+    runtime = PortalRuntime(config_store)
+    profiler.mark("active profile services built")
     profiler.finish("web app ready")
-    return services
+    return runtime
 
 
 def _build_templates() -> Jinja2Templates:
@@ -217,6 +284,7 @@ def _build_templates() -> Jinja2Templates:
     templates.env.filters["rating_with_votes"] = _TemplateFilters.format_rating_with_votes
     templates.env.filters["dt"] = _TemplateFilters.format_dt
     templates.env.filters["episode_label"] = _TemplateFilters.season_episode_label
+    templates.env.filters["release_distance"] = _TemplateFilters.release_distance
     templates.env.filters["progress_effective_aired"] = progress_effective_aired
     templates.env.filters["progress_effective_percent"] = progress_effective_percent
     templates.env.filters["progress_skipped_count"] = progress_skipped_count
@@ -224,6 +292,7 @@ def _build_templates() -> Jinja2Templates:
     templates.env.filters["progress_rating_chip"] = lambda item: progress_rating_chip(item, _TemplateFilters.format_rating_with_votes)
     templates.env.filters["progress_episode_rating_chip"] = lambda item: progress_episode_rating_chip(item, _TemplateFilters.format_rating_with_votes)
     templates.env.filters["cached_image_url"] = lambda value: (f"/cached-image?url={quote(str(value))}&v=3" if value else "")
+    templates.env.filters["episode_preview_url"] = tmdb_episode_preview_url
     return templates
 
 
@@ -242,6 +311,7 @@ def _enrich_search_results(
     *,
     query: str,
     title_type: str | None,
+    save_search_state: bool = True,
 ) -> tuple[list, bool]:
     if not results or not _results_need_enrichment(results):
         return results, False
@@ -251,17 +321,26 @@ def _enrich_search_results(
             enriched_results.append(services.catalog.enrich_title_with_tmdb(item))
         except Exception:
             enriched_results.append(item)
-    if query:
+    if query and save_search_state:
         services.catalog.save_last_search_state(query, title_type, enriched_results)
     return enriched_results, True
 
 
-def _schedule_search_enrichment(app, *, results: list, query: str, title_type: str | None) -> bool:
+def _schedule_search_enrichment(
+    app,
+    *,
+    results: list,
+    query: str,
+    title_type: str | None,
+    task_key: str = "",
+    source: str = "Search enrichment",
+    save_search_state: bool = True,
+) -> bool:
     if not results or not _results_need_enrichment(results):
         return False
     services: ServiceContainer = app.state.services
     bg_tasks = app.state.bg_tasks
-    key = f"search_enrichment:{title_type or 'all'}:{query.strip().casefold()}"
+    key = task_key or f"search_enrichment:{title_type or 'all'}:{query.strip().casefold()}"
 
     def run_enrichment() -> None:
         _enrich_search_results(
@@ -269,23 +348,46 @@ def _schedule_search_enrichment(app, *, results: list, query: str, title_type: s
             list(results),
             query=query,
             title_type=title_type,
+            save_search_state=save_search_state,
         )
 
     return bg_tasks.start(
         key,
-        source="Search enrichment",
+        source=source,
         operations=services.operations,
         fn=run_enrichment,
     )
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="Trakt Tracker Web Prototype")
-    app.state.services = _build_services_with_profiling()
+def create_app(
+    config_store: ConfigStore | None = None,
+    *,
+    runtime: PortalRuntime | None = None,
+) -> FastAPI:
+    owns_runtime = runtime is None
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        application.state.imdb_auto_sync_loop.start()
+        application.state.trakt_episode_ratings_refresh_loop.start()
+        application.state.artwork_cache_warm_loop.start()
+        try:
+            yield
+        finally:
+            application.state.imdb_auto_sync_loop.stop()
+            application.state.trakt_episode_ratings_refresh_loop.stop()
+            application.state.artwork_cache_warm_loop.stop()
+            if application.state.owns_runtime:
+                application.state.runtime.close()
+
+    app = FastAPI(title="Trakt Tracker Web Portal", lifespan=lifespan)
+    app.state.runtime = runtime or _build_runtime_with_profiling(config_store)
+    app.state.owns_runtime = owns_runtime
+    app.state.services = app.state.runtime.services
+    recover_interrupted_setup(app.state.services.database, task_running=False)
     _TemplateFilters.utc_offset = app.state.services.auth.config.utc_offset
     app.state.request_timing_log = get_app_data_dir() / "web_request_timings.log"
     app.state.image_cache = BinaryCache("images")
-    app.state.bg_tasks = _BackgroundTaskManager()
+    app.state.bg_tasks = app.state.runtime.background_tasks
     app.state.imdb_auto_sync_loop = _IMDbAutoSyncLoop(app)
     app.state.trakt_episode_ratings_refresh_loop = _TraktEpisodeRatingsRefreshLoop(app)
     app.state.artwork_cache_warm_loop = _ArtworkCacheWarmLoop(app)
@@ -297,6 +399,13 @@ def create_app() -> FastAPI:
         app.state.style_css_version = int((static_dir / "style.css").stat().st_mtime)
     except OSError:
         app.state.style_css_version = 0
+    try:
+        app.state.static_js_version = max(
+            int(path.stat().st_mtime)
+            for path in static_dir.glob("*.js")
+        )
+    except (OSError, ValueError):
+        app.state.static_js_version = 0
 
     @app.middleware("http")
     async def capture_request_timing(request: Request, call_next):
@@ -313,24 +422,47 @@ def create_app() -> FastAPI:
                 f"{request.method} {request.url.path} status={status_code} elapsed_ms={elapsed_ms:.1f}\n"
             )
             log_path = request.app.state.request_timing_log
-            try:
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                with log_path.open("a", encoding="utf-8") as handle:
-                    handle.write(log_line)
-            except OSError:
-                pass
+            _append_rotating_runtime_log(log_path, log_line)
 
-    @app.on_event("startup")
-    async def start_background_loops() -> None:
-        app.state.imdb_auto_sync_loop.start()
-        app.state.trakt_episode_ratings_refresh_loop.start()
-        app.state.artwork_cache_warm_loop.start()
+    @app.middleware("http")
+    async def require_completed_setup(request: Request, call_next):
+        path = request.url.path
+        allowed = (
+            path == "/healthz"
+            or path == "/setup"
+            or path.startswith("/setup/")
+            or path == "/settings"
+            or path.startswith("/settings/")
+            or path == "/cached-image"
+            or path == "/notification-sound"
+            or path.startswith("/static/")
+        )
+        if allowed:
+            return await call_next(request)
 
-    @app.on_event("shutdown")
-    async def stop_background_loops() -> None:
-        app.state.imdb_auto_sync_loop.stop()
-        app.state.trakt_episode_ratings_refresh_loop.stop()
-        app.state.artwork_cache_warm_loop.stop()
+        services: ServiceContainer = request.app.state.services
+        authorized = services.auth.is_authorized()
+        setup_complete = authorized and read_setup_state(services.database).get("state") == "complete"
+        if setup_complete:
+            return await call_next(request)
+
+        accepts_json = "application/json" in request.headers.get("accept", "").casefold()
+        sends_json = "application/json" in request.headers.get("content-type", "").casefold()
+        if accepts_json or sends_json:
+            status_code = 401 if not authorized else 409
+            return JSONResponse(
+                {"detail": "Trakt authorization required" if not authorized else "Initial setup is incomplete"},
+                status_code=status_code,
+            )
+        return RedirectResponse(url="/setup", status_code=303 if request.method != "GET" else 302)
+
+    @app.middleware("http")
+    async def secure_local_portal(request: Request, call_next):
+        return await portal_security_middleware(request, call_next)
+
+    @app.get("/healthz")
+    async def health() -> JSONResponse:
+        return JSONResponse({"status": "ok", "version": app_version()})
 
     def render(request: Request, template_name: str, context: dict, status_code: int = 200) -> HTMLResponse:
         sound_path = Path(str(request.app.state.services.auth.config.notification_sound_path or "")).expanduser()
@@ -338,6 +470,12 @@ def create_app() -> FastAPI:
         if sound_path.exists() and sound_path.is_file():
             stamp = int(sound_path.stat().st_mtime)
             notification_sound_url = f"/notification-sound?v={stamp}"
+        try:
+            released_title_count = request.app.state.services.release_tracking.released_count()
+            progress_waiting_title_count = request.app.state.services.release_tracking.progress_waiting_count()
+        except Exception:
+            released_title_count = 0
+            progress_waiting_title_count = 0
         base_context = {
             "request": request,
             "current_path": request.url.path,
@@ -349,6 +487,10 @@ def create_app() -> FastAPI:
             "debug_mode": request.app.state.services.auth.config.debug_mode,
             "debug_initial_seq": request.app.state.services.operations.current_seq(),
             "style_css_version": request.app.state.style_css_version,
+            "static_js_version": request.app.state.static_js_version,
+            "csrf_token": request.state.csrf_token,
+            "released_title_count": released_title_count,
+            "progress_waiting_title_count": progress_waiting_title_count,
         }
         base_context.update(context)
         return templates.TemplateResponse(request, template_name, base_context, status_code=status_code)
@@ -399,6 +541,3 @@ def create_app() -> FastAPI:
         schedule_search_enrichment=_schedule_search_enrichment,
     )
     return app
-
-
-app = create_app()

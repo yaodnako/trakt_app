@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from time import monotonic
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -13,12 +14,16 @@ import httpx
 
 from trakt_tracker.domain import TitleSummary
 from trakt_tracker.infrastructure.cache import ProviderCache
+from trakt_tracker.infrastructure.fragmented_https import request_with_fragmented_tls
 
 
 TMDB_API_URL = "https://api.themoviedb.org/3"
 TMDB_POSTER_IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
 TMDB_BACKDROP_IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
 TMDB_STILL_IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
+TMDB_DIRECT_ATTEMPT_SECONDS = 3.0
+TMDB_CURL_ATTEMPT_SECONDS = 4.0
+TMDB_URLLIB_ATTEMPT_SECONDS = 2.0
 
 
 class TMDbClient:
@@ -27,17 +32,22 @@ class TMDbClient:
         api_key: str = "",
         read_access_token: str = "",
         *,
-        timeout: float = 20.0,
+        timeout: float = 15.0,
         cache_ttl_hours: int = 24,
     ) -> None:
         self.api_key = api_key.strip()
         self.read_access_token = read_access_token.strip()
-        self._client = httpx.Client(timeout=timeout)
+        self._request_budget_seconds = max(1.0, float(timeout))
+        self._client = httpx.Client(timeout=self._request_budget_seconds)
         self._cache = ProviderCache("tmdb")
         self._cache_ttl_hours = cache_ttl_hours
 
     def is_configured(self) -> bool:
         return bool(self.api_key or self.read_access_token)
+
+    def close(self) -> None:
+        """Release the persistent HTTP connection pool owned by this client."""
+        self._client.close()
 
     def enrich_title(self, title: TitleSummary) -> TitleSummary:
         if not self.is_configured() or not title.tmdb_id:
@@ -93,6 +103,23 @@ class TMDbClient:
             return f"{TMDB_STILL_IMAGE_BASE}{still_path}"
         return ""
 
+    def get_season_episode_still_urls(self, show_tmdb_id: int, season: int) -> dict[int, str]:
+        """Resolve every episode still in a season with one TMDb request."""
+        if not self.is_configured() or not show_tmdb_id:
+            return {}
+        payload = self._request_optional("GET", f"/tv/{show_tmdb_id}/season/{season}")
+        if not isinstance(payload, dict):
+            return {}
+        result: dict[int, str] = {}
+        for episode in payload.get("episodes", []):
+            if not isinstance(episode, dict):
+                continue
+            number = episode.get("episode_number")
+            still_path = episode.get("still_path")
+            if isinstance(number, int) and isinstance(still_path, str) and still_path:
+                result[number] = f"{TMDB_STILL_IMAGE_BASE}{still_path}"
+        return result
+
     def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> Any:
         headers = {
             "Accept": "application/json",
@@ -106,20 +133,37 @@ class TMDbClient:
         cached = self._cache.get_json(cache_key, self._cache_ttl_hours)
         if cached is not None:
             return cached
+        deadline = monotonic() + self._request_budget_seconds
         try:
-            response = self._client.request(method, f"{TMDB_API_URL}{path}", headers=headers, params=params)
+            response = self._client.request(
+                method,
+                f"{TMDB_API_URL}{path}",
+                headers=headers,
+                params=params,
+                timeout=self._attempt_timeout(deadline, TMDB_DIRECT_ATTEMPT_SECONDS),
+            )
             response.raise_for_status()
             payload = response.json()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise
-            payload = self._request_with_curl(method, path, headers=headers, params=params)
+            payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
         except (httpx.HTTPError, ValueError):
-            payload = self._request_with_curl(method, path, headers=headers, params=params)
+            payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
         self._cache.set_json(cache_key, payload)
         return payload
 
-    def _request_with_curl(self, method: str, path: str, *, headers: dict[str, str], params: dict[str, Any]) -> Any:
+    def _request_with_curl(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, Any],
+        deadline: float | None = None,
+    ) -> Any:
+        deadline = deadline if deadline is not None else monotonic() + self._request_budget_seconds
+        curl_timeout = self._attempt_timeout(deadline, TMDB_CURL_ATTEMPT_SECONDS)
         query = urlencode(params)
         url = f"{TMDB_API_URL}{path}"
         if query:
@@ -134,7 +178,7 @@ class TMDbClient:
             "--doh-url",
             "https://cloudflare-dns.com/dns-query",
             "--max-time",
-            str(int(self._client.timeout.connect or 20.0)),
+            str(max(1, int(curl_timeout))),
             "--request",
             method.upper(),
             "--header",
@@ -157,22 +201,86 @@ class TMDbClient:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
-                timeout=(self._client.timeout.connect or 20.0) + 2.0,
+                timeout=min(curl_timeout + 1.0, self._remaining_timeout(deadline)),
                 startupinfo=startupinfo,
                 creationflags=creationflags,
             )
             return json.loads(completed.stdout)
-        except (OSError, subprocess.SubprocessError, ValueError):
-            return self._request_with_urllib(method, path, headers=headers, params=params)
+        except (OSError, subprocess.SubprocessError, ValueError) as curl_error:
+            try:
+                return self._request_with_fragmented_tls(
+                    method,
+                    path,
+                    headers=headers,
+                    params=params,
+                    deadline=deadline,
+                )
+            except Exception as fragmented_tls_error:
+                if self._remaining_timeout(deadline, raise_if_expired=False) <= 0:
+                    raise fragmented_tls_error from curl_error
+                try:
+                    return self._request_with_urllib(
+                        method,
+                        path,
+                        headers=headers,
+                        params=params,
+                        deadline=deadline,
+                    )
+                except Exception:
+                    raise fragmented_tls_error from curl_error
 
-    def _request_with_urllib(self, method: str, path: str, *, headers: dict[str, str], params: dict[str, Any]) -> Any:
+    def _request_with_fragmented_tls(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, Any],
+        deadline: float | None = None,
+    ) -> Any:
+        query = urlencode(params)
+        target = f"/3{path}" if not query else f"/3{path}?{query}"
+        deadline = deadline if deadline is not None else monotonic() + self._request_budget_seconds
+        timeout = self._remaining_timeout(deadline)
+        status, reason, response_headers, body = request_with_fragmented_tls(
+            "api.themoviedb.org",
+            target,
+            method=method,
+            headers=headers,
+            timeout=timeout,
+        )
+        if status >= 400:
+            raise HTTPError(f"{TMDB_API_URL}{target}", status, reason, response_headers, None)
+        return json.loads(body.decode("utf-8"))
+
+    def _request_with_urllib(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, Any],
+        deadline: float | None = None,
+    ) -> Any:
         query = urlencode(params)
         url = f"{TMDB_API_URL}{path}"
         if query:
             url = f"{url}?{query}"
         request = UrlRequest(url, headers=headers, method=method.upper())
-        with urlopen(request, timeout=self._client.timeout.connect or 20.0) as response:
+        deadline = deadline if deadline is not None else monotonic() + self._request_budget_seconds
+        timeout = self._attempt_timeout(deadline, TMDB_URLLIB_ATTEMPT_SECONDS)
+        with urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    @staticmethod
+    def _remaining_timeout(deadline: float, *, raise_if_expired: bool = True) -> float:
+        remaining = deadline - monotonic()
+        if remaining <= 0 and raise_if_expired:
+            raise TimeoutError("TMDb request budget exhausted")
+        return max(0.0, remaining)
+
+    def _attempt_timeout(self, deadline: float, maximum: float) -> float:
+        return max(0.1, min(float(maximum), self._remaining_timeout(deadline)))
 
     def _request_optional(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> Any | None:
         try:
