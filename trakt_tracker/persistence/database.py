@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .models import Base
 
 
-LATEST_SCHEMA_VERSION = 1
+LATEST_SCHEMA_VERSION = 5
 
 
 class Database:
@@ -50,16 +50,14 @@ class Database:
             Base.metadata.create_all(self._engine)
             self._ensure_schema_migration_table()
             current_version = self._current_schema_version()
-            if current_version < 1:
-                self._apply_migrations()
+            # Additive migrations and derived-state repairs are intentionally idempotent.
+            self._apply_migrations()
+            if current_version < LATEST_SCHEMA_VERSION:
                 with self._engine.begin() as conn:
                     conn.execute(
                         text("INSERT INTO schema_migrations (version, applied_at) VALUES (:version, :applied_at)"),
-                        {"version": 1, "applied_at": datetime.now(tz=UTC).isoformat()},
+                        {"version": LATEST_SCHEMA_VERSION, "applied_at": datetime.now(tz=UTC).isoformat()},
                     )
-            else:
-                # Derived enrich states are intentionally repaired on every startup.
-                self._apply_migrations()
             self._quick_check()
 
     def _ensure_schema_migration_table(self) -> None:
@@ -116,10 +114,13 @@ class Database:
                 "imdb_rating FLOAT", "imdb_votes INTEGER", "trakt_rating FLOAT", "trakt_votes INTEGER",
                 "still_status VARCHAR(32) DEFAULT 'unknown'", "still_refreshed_at DATETIME",
                 "trakt_details_status VARCHAR(32) DEFAULT 'unknown'", "trakt_details_refreshed_at DATETIME",
+                "imdb_match_status VARCHAR(32) DEFAULT 'unknown'", "imdb_match_attempt_key VARCHAR(64) DEFAULT ''",
+                "imdb_season INTEGER", "imdb_episode INTEGER", "imdb_coordinates_revision VARCHAR(64) DEFAULT ''",
             ),
             "history_events": ("watched_at_known BOOLEAN DEFAULT 1",),
             "notifications_log": ("last_sent_at DATETIME", "seen_at DATETIME", "notify_count INTEGER DEFAULT 1"),
             "release_tracking_state": ("list_count INTEGER",),
+            "user_title_state": ("paused BOOLEAN DEFAULT 0",),
         }
         with self._engine.begin() as conn:
             for table, definitions in additions.items():
@@ -178,7 +179,13 @@ class Database:
                         "trakt_details_status = CASE "
                         "WHEN COALESCE(trakt_details_status, '') = '' AND trakt_rating IS NOT NULL AND trakt_votes IS NOT NULL THEN 'ready' "
                         "WHEN COALESCE(trakt_details_status, '') = '' THEN 'unknown' "
-                        "ELSE trakt_details_status END"
+                        "ELSE trakt_details_status END, "
+                        "imdb_match_status = CASE "
+                        "WHEN COALESCE(imdb_id, '') != '' THEN 'resolved' "
+                        "WHEN COALESCE(imdb_match_status, '') NOT IN ('unknown', 'no_match') THEN 'unknown' "
+                        "ELSE COALESCE(NULLIF(imdb_match_status, ''), 'unknown') END, "
+                        "imdb_match_attempt_key = COALESCE(imdb_match_attempt_key, ''), "
+                        "imdb_coordinates_revision = COALESCE(imdb_coordinates_revision, '')"
                     )
             )
 

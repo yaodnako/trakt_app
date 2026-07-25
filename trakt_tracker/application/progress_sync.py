@@ -20,7 +20,7 @@ from trakt_tracker.application.metadata_refresh_policy import (
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.sync_policy import SyncPolicy
 from trakt_tracker.config import AppConfig
-from trakt_tracker.domain import ProgressSnapshot, TitleSummary
+from trakt_tracker.domain import ProgressSnapshot, ProgressSortMode, ProgressView, TitleSummary
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 from trakt_tracker.infrastructure.tmdb import TMDbClient
 
@@ -41,6 +41,7 @@ class ProgressSyncWorkflow:
         episode_metadata: EpisodeMetadataService,
         history_repo=None,
         catalog=None,
+        notification_repo=None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -56,6 +57,7 @@ class ProgressSyncWorkflow:
         self._policy = SyncPolicy
         self._episode_metadata = episode_metadata
         self._catalog = catalog
+        self._notification_repo = notification_repo
 
     def refresh_show_progress(
         self,
@@ -78,6 +80,7 @@ class ProgressSyncWorkflow:
         progress.title = title.title or progress.title
         progress.poster_url = title.poster_url
         progress.status = title.status
+        progress.title_year = title.year
         detailed_episode = None
         if progress.next_episode is not None:
             with self._db.session() as session:
@@ -124,6 +127,13 @@ class ProgressSyncWorkflow:
                 progress,
                 enrich_imdb=enrich_assets,
             )
+            state = self._user_states.progress_state(session, trakt_id)
+            if state is not None:
+                progress.is_dropped = bool(state.archived) or state.tracked is False
+                progress.is_paused = bool(state.paused)
+                progress.last_watched_at = state.last_watched_at
+            if progress.is_paused:
+                self._acknowledge_progress_episode(session, progress)
         if fresh and enrich_assets and self._catalog is not None:
             self._catalog.enrich_title_key(
                 trakt_id,
@@ -141,9 +151,22 @@ class ProgressSyncWorkflow:
                 )
         return progress
 
-    def dashboard_progress(self, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
+    def dashboard_progress(
+        self,
+        *,
+        view: ProgressView | str = ProgressView.ACTIVE,
+        sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
+        descending: bool = True,
+        dropped_only: bool | None = None,
+    ) -> list[ProgressSnapshot]:
         with self._db.session() as session:
-            items = self._progress_repo.list_in_progress(session, dropped_only=dropped_only)
+            items = self._progress_repo.list_in_progress(
+                session,
+                view=view,
+                sort_mode=sort_mode,
+                descending=descending,
+                dropped_only=dropped_only,
+            )
             title_episode_averages = (
                 self._history.watched_episode_average_ratings(
                     session,
@@ -211,17 +234,29 @@ class ProgressSyncWorkflow:
         self,
         trakt_ids: list[int] | None = None,
         *,
-        dropped_only: bool = False,
+        view: ProgressView | str = ProgressView.ACTIVE,
+        sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
+        descending: bool = True,
+        dropped_only: bool | None = None,
         force_full_assets: bool = False,
         defer_assets: bool = False,
     ) -> list[ProgressSnapshot]:
+        normalized_view = self._progress_repo.normalize_view(view, dropped_only=dropped_only)
+        self._sync_hidden_status()
         if trakt_ids is None and self._can_skip_full_progress_sync():
             self._operations.publish("Progress sync", "Policy skipped full progress sync; using local dashboard state.")
-            return self.dashboard_progress(dropped_only=dropped_only)
-        self._sync_dropped_status()
+            return self.dashboard_progress(
+                view=normalized_view,
+                sort_mode=sort_mode,
+                descending=descending,
+            )
         if trakt_ids is None:
             with self._db.session() as session:
-                show_ids = self._progress_repo.list_sync_show_ids(session, dropped_only=dropped_only)
+                show_ids = self._progress_repo.list_sync_show_ids(
+                    session,
+                    view=normalized_view,
+                    include_paused=normalized_view is ProgressView.ACTIVE,
+                )
             self._operations.publish("Progress sync", f"Full progress refresh for {len(show_ids)} show(s).")
         else:
             show_ids = trakt_ids
@@ -235,21 +270,53 @@ class ProgressSyncWorkflow:
             self._remember_progress_activity_signature()
         return snapshots
 
+    def pause_show(self, trakt_id: int, *, progress: ProgressSnapshot | None = None) -> None:
+        client = self._auth.get_client()
+        client.add_paused_show(trakt_id)
+        with self._db.session() as session:
+            self._user_states.set_paused(session, trakt_id, True)
+            if progress is not None:
+                progress.is_paused = True
+                self._acknowledge_progress_episode(session, progress)
+
+    def resume_show(self, trakt_id: int) -> None:
+        client = self._auth.get_client()
+        client.remove_paused_show(trakt_id)
+        with self._db.session() as session:
+            self._user_states.set_paused(session, trakt_id, False)
+
     def drop_show(self, trakt_id: int) -> None:
+        client = self._auth.get_client()
+        client.add_dropped_show(trakt_id)
         with self._db.session() as session:
             self._user_states.set_archived(session, trakt_id, True)
 
     def undrop_show(self, trakt_id: int) -> None:
+        client = self._auth.get_client()
+        client.remove_dropped_show(trakt_id)
         with self._db.session() as session:
             self._user_states.set_archived(session, trakt_id, False)
 
-    def _sync_dropped_status(self) -> None:
+    def _sync_hidden_status(self) -> None:
         client = self._auth.get_client()
-        dropped_ids: set[int] = set()
+        paused_ids = self._fetch_hidden_show_ids(client.get_paused_shows)
+        dropped_ids = self._fetch_hidden_show_ids(client.get_dropped_shows)
+        with self._db.session() as session:
+            self._user_states.sync_progress_hidden_states(
+                session,
+                dropped_ids=dropped_ids,
+                paused_ids=paused_ids,
+            )
+            for progress in self._progress_repo.list_in_progress(session, view=ProgressView.PAUSED):
+                self._acknowledge_progress_episode(session, progress)
+
+    @staticmethod
+    def _fetch_hidden_show_ids(fetch_page) -> set[int]:
+        hidden_ids: set[int] = set()
         page = 1
         page_size = 100
         while True:
-            batch = client.get_dropped_shows(limit=page_size, page=page)
+            batch = fetch_page(limit=page_size, page=page)
             if not isinstance(batch, list) or not batch:
                 break
             for item in batch:
@@ -259,12 +326,11 @@ class ProgressSyncWorkflow:
                 ids = show.get("ids", {}) if isinstance(show, dict) else {}
                 trakt_id = ids.get("trakt")
                 if trakt_id:
-                    dropped_ids.add(int(trakt_id))
+                    hidden_ids.add(int(trakt_id))
             if len(batch) < page_size:
                 break
             page += 1
-        with self._db.session() as session:
-            self._user_states.sync_progress_archived_states(session, dropped_ids)
+        return hidden_ids
 
     def _load_or_fetch_show_summary(
         self,
@@ -317,7 +383,7 @@ class ProgressSyncWorkflow:
 
     def _can_skip_full_progress_sync(self) -> bool:
         with self._db.session() as session:
-            has_incomplete_rows = self._progress_repo.has_incomplete_rows(session)
+            has_incomplete_rows = self._progress_repo.has_incomplete_rows(session, include_paused=True)
             previous_signature = self._sync_state.get_value(session, SyncPolicy.PROGRESS_SIGNATURE_KEY, "")
             last_full_sync_raw = self._sync_state.get_value(session, SyncPolicy.PROGRESS_LAST_FULL_SYNC_KEY, "")
         current_signature = self._current_progress_activity_signature()
@@ -356,3 +422,27 @@ class ProgressSyncWorkflow:
                 )
         for show_trakt_id in unique_show_ids:
             self._episode_metadata.force_refresh_show_stills(show_trakt_id)
+
+    def _acknowledge_progress_episode(self, session, progress: ProgressSnapshot) -> None:
+        if self._notification_repo is None or progress.next_episode is None:
+            return
+        episode = progress.next_episode
+        if episode.first_aired is None:
+            return
+        release_at = episode.first_aired
+        if release_at.tzinfo is None:
+            release_at = release_at.replace(tzinfo=UTC)
+        else:
+            release_at = release_at.astimezone(UTC)
+        if release_at > datetime.now(tz=UTC):
+            return
+        message = f"S{episode.season:02d}E{episode.number:02d} {episode.title}"
+        self._notification_repo.mark_seen(
+            session,
+            show_trakt_id=progress.trakt_id,
+            show_title=progress.title,
+            episode_trakt_id=episode.trakt_id,
+            season=episode.season,
+            episode=episode.number,
+            message=message,
+        )

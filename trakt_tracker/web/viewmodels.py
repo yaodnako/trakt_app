@@ -19,6 +19,13 @@ SEARCH_SORT_MODES = ("IMDb votes", "Trakt votes", "Alphabetical")
 DEFAULT_SEARCH_SORT_MODE = "IMDb votes"
 WATCHLIST_SORT_MODES = ("Recently added", "Release date", "IMDb rating", "Alphabetical")
 DEFAULT_WATCHLIST_SORT_MODE = "Recently added"
+PROGRESS_SORT_OPTIONS = (
+    ("episode_release", "Episode release"),
+    ("last_watched", "Last watched"),
+    ("release_year", "Release year"),
+)
+DEFAULT_PROGRESS_SORT_MODE = "episode_release"
+DEFAULT_PROGRESS_SORT_DIRECTION = "desc"
 HISTORY_PAGE_SIZE = 50
 
 
@@ -75,6 +82,32 @@ def sort_search_results(results: list[TitleSummary], mode: str) -> list[TitleSum
 def normalize_watchlist_sort_mode(value: str | None) -> str:
     normalized = (value or "").strip()
     return normalized if normalized in WATCHLIST_SORT_MODES else DEFAULT_WATCHLIST_SORT_MODE
+
+
+def normalize_progress_sort_mode(value: str | None, fallback: str | None = None) -> str:
+    aliases = {
+        canonical.casefold(): canonical
+        for canonical, _label in PROGRESS_SORT_OPTIONS
+    }
+    aliases.update(
+        {
+            label.casefold(): canonical
+            for canonical, label in PROGRESS_SORT_OPTIONS
+        }
+    )
+    normalized = aliases.get((value or "").strip().casefold())
+    if normalized is not None:
+        return normalized
+    fallback_normalized = aliases.get((fallback or "").strip().casefold())
+    return fallback_normalized or DEFAULT_PROGRESS_SORT_MODE
+
+
+def normalize_progress_sort_direction(value: str | None, fallback: str | None = None) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"asc", "desc"}:
+        return normalized
+    fallback_normalized = (fallback or "").strip().lower()
+    return fallback_normalized if fallback_normalized in {"asc", "desc"} else DEFAULT_PROGRESS_SORT_DIRECTION
 
 
 def sort_watchlist_results(results: list[TitleSummary], mode: str, *, descending: bool = True) -> list[TitleSummary]:
@@ -188,11 +221,12 @@ def filter_progress_items(
     *,
     hide_upcoming: bool,
     show_dropped: bool,
+    show_paused: bool = False,
     min_year: int | None = None,
     use_year_filter: bool = False,
 ) -> list:
     filtered = items
-    if show_dropped:
+    if show_dropped or show_paused:
         filtered = items
     elif hide_upcoming:
         filtered = [item for item in items if int(getattr(item, "completed", 0) or 0) < progress_effective_aired(item)]
@@ -271,6 +305,9 @@ def progress_query_string(
     *,
     hide_upcoming: bool,
     show_dropped: bool,
+    show_paused: bool = False,
+    sort_mode: str = DEFAULT_PROGRESS_SORT_MODE,
+    sort_direction: str = DEFAULT_PROGRESS_SORT_DIRECTION,
     min_year: int | None = None,
     use_year_filter: bool = False,
     flash: str = "",
@@ -281,7 +318,10 @@ def progress_query_string(
 ) -> str:
     params = {
         "hide_upcoming": "1" if hide_upcoming else "0",
+        "show_paused": "1" if show_paused else "0",
         "show_dropped": "1" if show_dropped else "0",
+        "sort": normalize_progress_sort_mode(sort_mode),
+        "direction": normalize_progress_sort_direction(sort_direction),
         "use_year_filter": "1" if use_year_filter else "0",
     }
     if min_year is not None:

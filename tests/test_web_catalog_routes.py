@@ -51,30 +51,38 @@ class _FakeEpisodeRatingsMatrixService:
             }
         )
 
+        season = EpisodeMatrixSeason(season=1, label="S1", avg_display="8.3", avg_rating=8.3, avg_color="rgb(40, 180, 99)")
+        overall = EpisodeMatrixSeason(season=-1, label="ALL", avg_display="8.3", avg_rating=8.3, avg_color="rgb(40, 180, 99)")
+        row = EpisodeMatrixRow(
+            episode=1,
+            label="E1",
+            cells=[
+                EpisodeMatrixCell(
+                    season=1,
+                    episode=1,
+                    exists=True,
+                    display_value="8.3",
+                    imdb_rating=8.3,
+                    color="rgb(40, 180, 99)",
+                    state="rated",
+                    title="Pilot",
+                )
+            ],
+        )
         return EpisodeRatingsMatrixViewModel(
             trakt_id=trakt_id,
             title="The Capture",
             subtitle=("Trakt episode ratings by season" if provider == "trakt" else "IMDb episode ratings by season"),
+            title_trakt_rating=8.2,
+            title_trakt_votes=1200,
+            title_imdb_rating=8.4,
+            title_imdb_votes=3400,
+            title_ratings_status="ready",
             legend=[EpisodeMatrixLegendItem(label="Awesome", threshold_label=">= 9", color="rgb(24, 106, 59)")],
-            seasons=[EpisodeMatrixSeason(season=1, label="S1", avg_display="8.3", avg_rating=8.3, avg_color="rgb(40, 180, 99)")],
-            rows=[
-                EpisodeMatrixRow(
-                    episode=1,
-                    label="E1",
-                    cells=[
-                        EpisodeMatrixCell(
-                            season=1,
-                            episode=1,
-                            exists=True,
-                            display_value="8.3",
-                            imdb_rating=8.3,
-                            color="rgb(40, 180, 99)",
-                            state="rated",
-                            title="Pilot",
-                        )
-                    ],
-                )
-            ],
+            seasons=[season, overall],
+            rows=[row],
+            imdb_seasons=[season, overall],
+            imdb_rows=[row],
             has_episodes=True,
             provider=("trakt" if provider == "trakt" else "imdb"),
         )
@@ -99,6 +107,11 @@ class _FakeSearchWatchService:
             title="The Capture",
             slug="the-capture",
             poster_url="https://poster.example/capture.jpg",
+            title_trakt_rating=8.2,
+            title_trakt_votes=1200,
+            title_imdb_rating=8.4,
+            title_imdb_votes=3400,
+            title_ratings_status="ready",
             seasons=[
                 SearchWatchSeason(
                     season=0,
@@ -120,6 +133,8 @@ class _FakeSearchWatchService:
                         SearchWatchEpisode(
                             season=1,
                             number=1,
+                            imdb_season=2,
+                            imdb_episode=1,
                             title="Pilot",
                             still_url="https://still.example/pilot.jpg",
                             trakt_rating=8.1,
@@ -224,6 +239,8 @@ class CatalogRouteTests(unittest.TestCase):
         self.enrichment_calls: list[dict] = []
         self.enrich_tasks: list[object] = []
         self.image_tasks: list[tuple[str, int]] = []
+        self.progress_refresh_calls: list[tuple[int, bool]] = []
+        self.bg_task_calls: list[tuple[tuple, dict]] = []
         self.explore_saved_filters = {"imdb_min": "", "trakt_min": ""}
         self.search_saved_filters = {"imdb_min": "", "trakt_min": ""}
         watchlist_title = TitleSummary(
@@ -377,6 +394,11 @@ class CatalogRouteTests(unittest.TestCase):
                 submit_many=lambda urls, *, priority: self.image_tasks.extend((url, priority) for url in urls),
             ),
             history=SimpleNamespace(title_rating_badges=lambda trakt_ids: {1: 9.0, 3: 8.5}),
+            progress=SimpleNamespace(
+                refresh_show_progress=lambda trakt_id, *, fresh=False: self.progress_refresh_calls.append(
+                    (trakt_id, fresh)
+                )
+            ),
             play=SimpleNamespace(resolve_kinopoisk_url=lambda title: f"https://kino.example/{quote(title)}" if title else None),
             operations=SimpleNamespace(publish=lambda *_args, **_kwargs: None),
             release_tracking=SimpleNamespace(
@@ -388,7 +410,9 @@ class CatalogRouteTests(unittest.TestCase):
             ),
             auth=SimpleNamespace(config=SimpleNamespace(utc_offset="+03:00", explore_imdb_scan_page_limit=10)),
         )
-        self.app.state.bg_tasks = SimpleNamespace(start=lambda *_args, **_kwargs: True)
+        self.app.state.bg_tasks = SimpleNamespace(
+            start=lambda *args, **kwargs: self.bg_task_calls.append((args, kwargs)) or True
+        )
 
         def render(request: Request, template_name: str, context: dict, status_code: int = 200) -> HTMLResponse:
             base_context = {
@@ -432,6 +456,12 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("imdb_icon.png", html)
         self.assertIn("trakt_logo_bw.svg", html)
         self.assertIn("My ratings", html)
+        self.assertIn('data-imdb-seasons-toggle checked', html)
+        self.assertIn('data-matrix-layout-panel="imdb"', html)
+        self.assertIn('data-matrix-layout-panel="trakt" hidden', html)
+        self.assertIn('data-title-trakt-rating="8.2 (1200)"', html)
+        self.assertIn('data-title-imdb-rating="8.4 (3400)"', html)
+        self.assertNotIn("title-matrix-imdb-coordinate", html)
         self.assertNotIn('data-my-rating-toggle', html)
 
     def test_show_matrix_fragment_route_accepts_trakt_provider_refresh_missing(self) -> None:
@@ -601,6 +631,15 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("bookmark_unfill.svg", html)
         self.assertIn('src="http://testserver/static/bookmark_unfill.svg"', html)
 
+    def test_unwatched_show_mark_button_opens_episode_panel(self) -> None:
+        response = self.client.get("/search?q=test&type=all&sort=IMDb+votes")
+
+        self.assertEqual(response.status_code, 200)
+        button = response.text.split('aria-label="Mark The Capture watched"', 1)[0].rsplit("<button", 1)[1]
+        self.assertIn("data-search-show-watch-trigger", button)
+        self.assertIn('data-watch-panel-url="/search/show/3/watch-panel"', button)
+        self.assertNotIn("data-search-watch-action", button)
+
     def test_search_shell_restores_saved_query_and_type_in_toolbar(self) -> None:
         self.app.state.services.catalog.load_last_search_state = lambda: {
             "query": "The Capture",
@@ -617,6 +656,21 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn('value="The Capture"', response.text)
         self.assertIn('<option value="show" selected>Shows</option>', response.text)
         self.assertIn('data-catalog-loading="1"', response.text)
+
+    def test_restored_search_enrichment_cannot_overwrite_newer_last_search(self) -> None:
+        self.app.state.services.catalog.load_last_search_state = lambda: {
+            "query": "Old query",
+            "title_type": "show",
+            "sort_mode": "IMDb votes",
+            "imdb_min": "",
+            "trakt_min": "",
+            "results": [TitleSummary(trakt_id=3, title_type="show", title="The Capture")],
+        }
+
+        response = self.client.get("/search")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.enrichment_calls[-1]["save_search_state"])
 
     def test_search_recent_queries_render_below_input_with_filters_visible(self) -> None:
         self.app.state.services.catalog.search_history = lambda: ["Dune", "Severance"]
@@ -890,9 +944,12 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.text
         self.assertIn('data-search-watch-season-tab="1"', html)
+        self.assertIn('data-search-watch-trakt-rating="8.2 (1200)"', html)
+        self.assertIn('data-search-watch-imdb-rating="8.4 (3400)"', html)
         self.assertIn('data-search-watch-season-tab="0"', html)
         self.assertIn('data-search-watch-season-panel="1"', html)
         self.assertIn("Pilot", html)
+        self.assertIn("S01E01 (S02E01)", html)
         self.assertIn("No preview", html)
         self.assertIn('data-still-pending="1"', html)
         self.assertIn('title="Mark all released episodes in S0 watched"', html)
@@ -926,6 +983,37 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("8 &#9733;", html)
         self.assertIn('class="history-rate-chip search-watch-user-rating"', html)
         self.assertIn(">Rate</button>", html)
+        page = self.client.get("/search?q=test&type=all")
+        self.assertIn("data-search-watch-title-ratings", page.text)
+        self.assertIn("data-title-matrix-title-ratings", page.text)
+        panel_script = (STATIC_DIR / "show_watch_panel.js").read_text(encoding="utf-8")
+        self.assertIn("configureTitleRatings(overlay, body)", panel_script)
+        self.assertIn("episode-ratings-matrix", panel_script)
+        self.assertIn("syncTitleMatrixTitleRatings", ui_script)
+
+    def test_watch_panel_title_ratings_precede_header_actions_and_matrix_stacks_above_panel(self) -> None:
+        template_paths = (
+            PROJECT_ROOT / "trakt_tracker" / "web" / "templates" / "search_v2.html",
+            PROJECT_ROOT / "trakt_tracker" / "web" / "templates" / "history_show_watch_overlay.html",
+            PROJECT_ROOT / "trakt_tracker" / "web" / "templates" / "release_tracking.html",
+        )
+        for template_path in template_paths:
+            template = template_path.read_text(encoding="utf-8")
+            actions_index = template.index('class="search-watch-header-actions"')
+            ratings_index = template.index("data-search-watch-title-ratings")
+            mark_all_index = template.index("data-search-watch-header-mark")
+            self.assertLess(actions_index, ratings_index, template_path.name)
+            self.assertLess(ratings_index, mark_all_index, template_path.name)
+
+        css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        matrix_rule = css.split(".title-matrix-overlay {", 1)[1].split("}", 1)[0]
+        watch_rule = css.split(".search-watch-overlay,", 1)[1].split("}", 1)[0]
+        matrix_z_index = int(matrix_rule.split("z-index:", 1)[1].split(";", 1)[0].strip())
+        watch_z_index = int(watch_rule.split("z-index:", 1)[1].split(";", 1)[0].strip())
+        self.assertGreater(matrix_z_index, watch_z_index)
+        tooltip_rule = css.split(".title-matrix-tooltip {", 1)[1].split("}", 1)[0]
+        tooltip_z_index = int(tooltip_rule.split("z-index:", 1)[1].split(";", 1)[0].strip())
+        self.assertGreater(tooltip_z_index, matrix_z_index)
 
     def test_search_watch_waits_for_panel_rate_trigger_before_auto_rating(self) -> None:
         template = (STATIC_DIR / "catalog_page.js").read_text(encoding="utf-8")
@@ -1052,6 +1140,14 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertEqual(call["season"], 1)
         self.assertEqual(call["episode"], 1)
         self.assertEqual(call["watched_at"].astimezone(UTC).hour, 17)
+        progress_tasks = [
+            kwargs
+            for args, kwargs in self.bg_task_calls
+            if args and args[0] == "progress_watch_3_episode_1_1"
+        ]
+        self.assertEqual(len(progress_tasks), 1)
+        progress_tasks[0]["fn"]()
+        self.assertEqual(self.progress_refresh_calls, [(3, True)])
 
     def test_watchlist_title_watch_removes_it_from_watchlist(self) -> None:
         response = self.client.post(

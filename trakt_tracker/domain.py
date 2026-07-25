@@ -2,10 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Literal
 
 
 TitleType = Literal["movie", "show"]
+
+
+class ProgressView(str, Enum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    DROPPED = "dropped"
+
+
+class ProgressSortMode(str, Enum):
+    LAST_WATCHED = "last_watched"
+    EPISODE_RELEASE = "episode_release"
+    RELEASE_YEAR = "release_year"
 
 
 @dataclass(slots=True)
@@ -68,6 +81,8 @@ class EpisodeSummary:
     imdb_id: str = ""
     imdb_rating: float | None = None
     imdb_votes: int | None = None
+    imdb_season: int | None = None
+    imdb_episode: int | None = None
     imdb_status: str = "unknown"
     first_aired: datetime | None = None
     runtime: int | None = None
@@ -115,6 +130,9 @@ class ProgressSnapshot:
     title_ratings_refreshed_at: datetime | None = None
     title_episode_avg_rating: float | None = None
     is_dropped: bool = False
+    is_paused: bool = False
+    last_watched_at: datetime | None = None
+    title_year: int | None = None
 
 
 @dataclass(slots=True)

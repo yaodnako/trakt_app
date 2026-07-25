@@ -106,8 +106,8 @@ class TrayNotificationPoller(QObject):
                 items = active_services.notifications.poll_upcoming(send_native=True)
                 if not items:
                     return
-                active_services.progress.sync_progress(dropped_only=False)
                 self.notificationsReceived.emit(items)
+                active_services.progress.sync_progress(dropped_only=False)
 
             coordinator = getattr(self._runtime, "background_tasks", None)
             if coordinator is None:  # Compatibility path for lightweight embedded-runtime tests.
@@ -254,6 +254,7 @@ class WebPortalTrayWindow(QMainWindow):
 
     def _on_notifications_received(self, items: list) -> None:
         self._append_log(f"notifications received: {len(items)}")
+        self._runtime.services.notifications.record_activity(items)
         self._play_notification_sound()
 
     def _play_notification_sound(self) -> None:

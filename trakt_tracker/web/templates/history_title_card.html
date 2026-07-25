@@ -196,7 +196,7 @@
                 >Rate</button>
                 {% endif %}
                 {% if row.type == 'show' and row.season is not none and row.episode is not none %}
-                <div class="history-episode-chip">{{ row.season|episode_label(row.episode) }}</div>
+                <div class="history-episode-chip">{{ row.season|episode_label(row.episode, row.get('episode_imdb_season'), row.get('episode_imdb_episode')) }}</div>
                 {% endif %}
             </div>
             {% if row.type == 'show' and row.season is not none and row.episode is not none %}

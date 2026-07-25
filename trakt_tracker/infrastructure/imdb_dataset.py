@@ -52,6 +52,13 @@ class IMDbDatasetClient:
     def is_ready(self) -> bool:
         return self._db_path.exists() and self._has_required_schema()
 
+    def dataset_revision(self) -> str:
+        """Return a cheap revision token that changes when the local index is replaced."""
+        if not self.is_ready():
+            return ""
+        stat = self._db_path.stat()
+        return f"{stat.st_mtime_ns}:{stat.st_size}"
+
     def is_stale(self) -> bool:
         if not self._db_path.exists() or not self._has_required_schema():
             return True

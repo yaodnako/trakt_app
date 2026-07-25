@@ -4,7 +4,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from trakt_tracker.web.app import _ArtworkCacheWarmLoop
+from trakt_tracker.web.app import _ArtworkCacheWarmLoop, _TemplateFilters
+
+
+class TemplateFilterTests(unittest.TestCase):
+    def test_episode_label_appends_only_different_imdb_coordinates(self) -> None:
+        self.assertEqual(_TemplateFilters.season_episode_label(1, 25, 2, 1), "S01E25 (S02E01)")
+        self.assertEqual(_TemplateFilters.season_episode_label(1, 25, 1, 25), "S01E25")
+        self.assertEqual(_TemplateFilters.season_episode_label(1, 25), "S01E25")
 
 
 class ArtworkCacheWarmLoopTests(unittest.TestCase):

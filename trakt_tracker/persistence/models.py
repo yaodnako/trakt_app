@@ -55,6 +55,7 @@ class UserTitleState(Base):
     tracked: Mapped[bool] = mapped_column(Boolean, default=False)
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    paused: Mapped[bool] = mapped_column(Boolean, default=False)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_watched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -79,6 +80,11 @@ class EpisodeCache(Base):
     imdb_id: Mapped[str] = mapped_column(String(32), default="")
     imdb_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     imdb_votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    imdb_season: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    imdb_episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    imdb_coordinates_revision: Mapped[str] = mapped_column(String(64), default="")
+    imdb_match_status: Mapped[str] = mapped_column(String(32), default="unknown")
+    imdb_match_attempt_key: Mapped[str] = mapped_column(String(64), default="")
     still_status: Mapped[str] = mapped_column(String(32), default=ENRICH_STATUS_UNKNOWN)
     still_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     trakt_details_status: Mapped[str] = mapped_column(String(32), default=ENRICH_STATUS_UNKNOWN)
@@ -127,6 +133,49 @@ class HistoryEvent(Base):
     episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source: Mapped[str] = mapped_column(String(32), default="local")
+
+
+class TitleAlias(Base):
+    __tablename__ = "title_aliases"
+    __table_args__ = (
+        UniqueConstraint(
+            "title_type",
+            "title_trakt_id",
+            "language",
+            "normalized_title",
+            name="uq_title_alias_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title_type: Mapped[str] = mapped_column(String(16), index=True)
+    title_trakt_id: Mapped[int] = mapped_column(Integer, index=True)
+    language: Mapped[str] = mapped_column(String(8), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    normalized_title: Mapped[str] = mapped_column(String(255), index=True)
+    source: Mapped[str] = mapped_column(String(32), default="trakt")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TitleAliasRefresh(Base):
+    __tablename__ = "title_alias_refresh"
+    __table_args__ = (
+        UniqueConstraint(
+            "title_type",
+            "title_trakt_id",
+            "language",
+            name="uq_title_alias_refresh_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title_type: Mapped[str] = mapped_column(String(16), index=True)
+    title_trakt_id: Mapped[int] = mapped_column(Integer, index=True)
+    language: Mapped[str] = mapped_column(String(8), index=True)
+    status: Mapped[str] = mapped_column(String(32), default=ENRICH_STATUS_UNKNOWN)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class NotificationLog(Base):

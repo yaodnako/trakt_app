@@ -1,12 +1,16 @@
+{% set progress_item_is_paused = progress_item.is_paused|default(false) %}
 <article
-    class="progress-card{% if progress_is_new %} is-released{% endif %}"
+    class="progress-card{% if progress_is_new %} is-released{% endif %}{% if progress_item.is_dropped %} is-dropped{% elif progress_item_is_paused %} is-paused{% endif %}"
     data-progress-card-key="progress:{{ progress_item.trakt_id }}"
 >
     {% if progress_is_new %}
     <div class="progress-new-badge">New</div>
     <form method="post" action="/progress/{{ progress_item.trakt_id }}/seen" class="progress-seen-form">
         <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+        <input type="hidden" name="show_paused" value="{{ '1' if show_paused else '0' }}">
         <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+        <input type="hidden" name="sort" value="{{ sort_mode }}">
+        <input type="hidden" name="direction" value="{{ sort_direction }}">
         <input type="hidden" name="min_year" value="{{ min_year or '' }}">
         <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
         <button type="submit" class="progress-seen-button" title="Mark notification seen" aria-label="Mark notification seen">
@@ -57,6 +61,66 @@
                 </div>
                 {% endif %}
             </a>
+            <div class="progress-title-actions" data-progress-title-actions>
+                {% if not progress_item.is_dropped %}
+                <form method="post" action="/progress/{{ progress_item.trakt_id }}/pause-toggle" class="progress-title-action progress-title-action-side">
+                    <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+                    <input type="hidden" name="show_paused" value="{{ '1' if show_paused else '0' }}">
+                    <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+                    <input type="hidden" name="sort" value="{{ sort_mode }}">
+                    <input type="hidden" name="direction" value="{{ sort_direction }}">
+                    <input type="hidden" name="min_year" value="{{ min_year or '' }}">
+                    <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+                    <button
+                        type="submit"
+                        class="progress-title-action-button pause-toggle{% if progress_item_is_paused %} resume{% endif %}"
+                        title="{{ 'Resume' if progress_item_is_paused else 'Pause' }}"
+                        aria-label="{{ 'Resume' if progress_item_is_paused else 'Pause' }} {{ progress_item.title }}"
+                    >
+                        <img src="{{ request.url_for('static', path='resume.svg' if progress_item_is_paused else 'pause.svg') }}" alt="" aria-hidden="true">
+                    </button>
+                </form>
+                {% else %}
+                <span class="progress-title-action-spacer" aria-hidden="true"></span>
+                {% endif %}
+                <button
+                    type="button"
+                    class="progress-title-actions-toggle"
+                    data-progress-actions-toggle
+                    aria-expanded="false"
+                    aria-label="More actions for {{ progress_item.title }}"
+                    title="More actions"
+                >
+                    <img src="{{ request.url_for('static', path='more_options.svg') }}" alt="" aria-hidden="true">
+                </button>
+                <form
+                    method="post"
+                    action="/progress/{{ progress_item.trakt_id }}/drop-toggle"
+                    class="progress-title-action progress-title-action-side"
+                    {% if not progress_item.is_dropped %}
+                    data-confirm-title="Remove from Up next?"
+                    data-confirm-message="Remove {{ progress_item.title }} from Up next?"
+                    data-confirm-label="Drop"
+                    {% endif %}
+                >
+                    <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+                    <input type="hidden" name="show_paused" value="{{ '1' if show_paused else '0' }}">
+                    <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+                    <input type="hidden" name="sort" value="{{ sort_mode }}">
+                    <input type="hidden" name="direction" value="{{ sort_direction }}">
+                    <input type="hidden" name="min_year" value="{{ min_year or '' }}">
+                    <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+                    <input type="hidden" name="is_dropped" value="{{ '1' if progress_item.is_dropped else '0' }}">
+                    <button
+                        type="submit"
+                        class="progress-title-action-button drop-toggle {% if progress_item.is_dropped %}undrop{% else %}drop{% endif %}"
+                        title="{{ 'Undrop' if progress_item.is_dropped else 'Drop' }}"
+                        aria-label="{{ 'Undrop' if progress_item.is_dropped else 'Drop' }} {{ progress_item.title }}"
+                    >
+                        <img src="{{ request.url_for('static', path='drop.svg' if progress_item.is_dropped else 'drop_red.svg') }}" alt="" aria-hidden="true">
+                    </button>
+                </form>
+            </div>
             {% if chip %}
             <button
                 type="button"
@@ -112,7 +176,7 @@
                         <span>Loading</span>
                         {% endif %}
                     </a>
-                    <div class="progress-episode-chip">{{ progress_item.next_episode.season|episode_label(progress_item.next_episode.number) }}</div>
+                    <div class="progress-episode-chip">{{ progress_item.next_episode.season|episode_label(progress_item.next_episode.number, progress_item.next_episode.imdb_season, progress_item.next_episode.imdb_episode) }}</div>
                     {% if episode_chip %}
                     <div class="poster-chip progress-episode-ratings-chip">
                         {% for part in episode_chip.split(' | ') %}
@@ -142,7 +206,7 @@
             {% endif %}
                 <a
                     class="icon-button js-play-link"
-                    href="/progress/{{ progress_item.trakt_id }}/play?hide_upcoming={{ '1' if hide_upcoming else '0' }}&show_dropped={{ '1' if show_dropped else '0' }}&use_year_filter={{ '1' if use_year_filter else '0' }}&min_year={{ min_year or '' }}"
+                    href="/progress/{{ progress_item.trakt_id }}/play?hide_upcoming={{ '1' if hide_upcoming else '0' }}&show_paused={{ '1' if show_paused else '0' }}&show_dropped={{ '1' if show_dropped else '0' }}&sort={{ sort_mode }}&direction={{ sort_direction }}&use_year_filter={{ '1' if use_year_filter else '0' }}&min_year={{ min_year or '' }}"
                     target="_blank"
                     rel="noreferrer"
                     title="Play"
@@ -154,7 +218,10 @@
                     data-play-episode="{{ progress_item.next_episode.number }}"
                     data-play-episode-title="{{ progress_item.next_episode.title }}"
                     data-play-hide-upcoming="{{ '1' if hide_upcoming else '0' }}"
+                    data-play-show-paused="{{ '1' if show_paused else '0' }}"
                     data-play-show-dropped="{{ '1' if show_dropped else '0' }}"
+                    data-play-sort="{{ sort_mode }}"
+                    data-play-direction="{{ sort_direction }}"
                     data-play-use-year-filter="{{ '1' if use_year_filter else '0' }}"
                     data-play-min-year="{{ min_year or '' }}"
                     {% endif %}
@@ -163,33 +230,14 @@
                 </a>
                 <form method="post" action="/progress/{{ progress_item.trakt_id }}/watch" class="js-watch-form" data-play-prompt-key="{% if progress_item.next_episode %}{{ progress_item.trakt_id }}:{{ progress_item.next_episode.season }}:{{ progress_item.next_episode.number }}{% endif %}">
                     <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+                    <input type="hidden" name="show_paused" value="{{ '1' if show_paused else '0' }}">
                     <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+                    <input type="hidden" name="sort" value="{{ sort_mode }}">
+                    <input type="hidden" name="direction" value="{{ sort_direction }}">
                     <input type="hidden" name="min_year" value="{{ min_year or '' }}">
                     <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
                     <button type="submit" class="icon-button" title="Mark watched" {% if not progress_item.next_episode or progress_item.is_dropped %}disabled{% endif %}>
                         <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
-                    </button>
-                </form>
-                <form
-                    method="post"
-                    action="/progress/{{ progress_item.trakt_id }}/drop-toggle"
-                    {% if not progress_item.is_dropped %}
-                    data-confirm-title="Remove from Up next?"
-                    data-confirm-message="Remove {{ progress_item.title }} from Up next?"
-                    data-confirm-label="Drop"
-                    {% endif %}
-                >
-                    <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
-                    <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
-                    <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-                    <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
-                    <input type="hidden" name="is_dropped" value="{{ '1' if progress_item.is_dropped else '0' }}">
-                    <button
-                        type="submit"
-                        class="icon-button drop-toggle {% if progress_item.is_dropped %}undrop{% else %}drop{% endif %}"
-                        title="{% if progress_item.is_dropped %}Undrop{% else %}Drop{% endif %}"
-                    >
-                        <img class="icon-glyph icon-glyph-drop" src="{{ request.url_for('static', path='drop.svg' if progress_item.is_dropped else 'drop_red.svg') }}" alt="" aria-hidden="true">
                     </button>
                 </form>
                 </div>

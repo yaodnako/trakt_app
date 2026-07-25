@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 
 class HistoryReadModelService:
     def __init__(self, db, history_repo, user_states, titles_repo, episode_repo, episode_metadata) -> None:
@@ -163,6 +165,16 @@ class HistoryReadModelService:
                         if row.season is not None and row.episode is not None
                         else None
                     ),
+                    "episode_imdb_season": (
+                        (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_season")
+                        if row.season is not None and row.episode is not None
+                        else None
+                    ),
+                    "episode_imdb_episode": (
+                        (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_episode")
+                        if row.season is not None and row.episode is not None
+                        else None
+                    ),
                     "episode_imdb_status": (
                         "ready"
                         if (
@@ -203,6 +215,8 @@ class HistoryReadModelService:
         offset: int = 0,
         title_filter: str | None = None,
         rated_only: bool = False,
+        sort_by: str = "last_watched",
+        sort_direction: str = "desc",
     ) -> list[dict]:
         with self._db.session() as session:
             all_rows = self._history.list_filtered(
@@ -266,14 +280,22 @@ class HistoryReadModelService:
                 if rated_only and my_rating is None:
                     continue
                 filtered_groups.append(group)
-            if offset:
-                filtered_groups = filtered_groups[offset:]
-            if limit is not None:
-                filtered_groups = filtered_groups[:limit]
             title_models = self._titles.by_trakt_ids(
                 session,
                 [int(group["title_trakt_id"]) for group in filtered_groups],
             )
+            for group in filtered_groups:
+                title_model = title_models.get(int(group["title_trakt_id"]))
+                group["title_year"] = title_model.year if title_model is not None else None
+            filtered_groups = self._sort_title_groups(
+                filtered_groups,
+                sort_by=sort_by,
+                sort_direction=sort_direction,
+            )
+            if offset:
+                filtered_groups = filtered_groups[offset:]
+            if limit is not None:
+                filtered_groups = filtered_groups[:limit]
             return [
                 {
                     "title_key": f"{group['type']}:{group['title_trakt_id']}",
@@ -305,6 +327,7 @@ class HistoryReadModelService:
                     "my_rating": group.get("my_rating"),
                     "title_rating": group.get("title_rating"),
                     "type": group["type"],
+                    "title_year": group.get("title_year"),
                     "last_watched_at": group.get("last_watched_at"),
                     "last_watched_at_known": group.get("last_watched_at_known", True),
                     "watched_count": group.get("watched_count", 0),
@@ -313,6 +336,53 @@ class HistoryReadModelService:
                 }
                 for group in filtered_groups
             ]
+
+    @classmethod
+    def _sort_title_groups(
+        cls,
+        groups: list[dict],
+        *,
+        sort_by: str,
+        sort_direction: str,
+    ) -> list[dict]:
+        normalized_sort = sort_by if sort_by in {"rating", "last_watched", "release_year"} else "last_watched"
+        descending = sort_direction != "asc"
+
+        known: list[tuple[float, dict]] = []
+        unknown: list[dict] = []
+        for group in groups:
+            value = cls._title_group_sort_value(group, normalized_sort)
+            if value is None:
+                unknown.append(group)
+            else:
+                known.append((value, group))
+
+        def tie_key(group: dict) -> tuple[str, int]:
+            return (str(group.get("title", "")).casefold(), int(group.get("title_trakt_id") or 0))
+
+        known.sort(key=lambda item: tie_key(item[1]))
+        known.sort(key=lambda item: item[0], reverse=descending)
+        unknown.sort(key=tie_key)
+        return [group for _value, group in known] + unknown
+
+    @staticmethod
+    def _title_group_sort_value(group: dict, sort_by: str) -> float | None:
+        if sort_by == "rating":
+            value = group.get("my_rating")
+        elif sort_by == "release_year":
+            value = group.get("title_year")
+        else:
+            if not group.get("last_watched_at_known", True):
+                return None
+            watched_at = group.get("last_watched_at")
+            if not isinstance(watched_at, datetime):
+                return None
+            normalized = watched_at if watched_at.tzinfo is not None else watched_at.replace(tzinfo=UTC)
+            return normalized.astimezone(UTC).timestamp()
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _dedupe_history_rows(rows: list) -> list:

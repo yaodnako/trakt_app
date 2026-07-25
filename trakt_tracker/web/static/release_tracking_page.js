@@ -74,6 +74,7 @@
         activePanelUrl = trigger.dataset.watchPanelUrl || "";
         watchRefreshToken += 1;
         if (watchTitle) watchTitle.textContent = trigger.dataset.title || "Episodes";
+        window.traktShowWatchPanel?.configureTitleRatings(watchOverlay, null);
         window.traktShowWatchPanel?.configurePlayAction(watchOverlay, trigger);
         setOverlayOpen(watchOverlay, true);
         loadWatchPanel("", {focusDefault: true});

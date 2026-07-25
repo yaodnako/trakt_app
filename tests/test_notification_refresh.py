@@ -37,6 +37,7 @@ class _FakeNotificationRepository:
     def __init__(self) -> None:
         self.sent: list[dict] = []
         self.tracked: list[dict] = []
+        self.seen: list[dict] = []
         self.deleted: list[tuple[int, int]] = []
         self.logs: dict[tuple[int, int], object] = {}
 
@@ -53,6 +54,12 @@ class _FakeNotificationRepository:
             "FakeLog",
             (),
             {
+                "show_trakt_id": kwargs["show_trakt_id"],
+                "show_title": kwargs["show_title"],
+                "episode_trakt_id": kwargs["episode_trakt_id"],
+                "season": kwargs["season"],
+                "episode": kwargs["episode"],
+                "message": kwargs["message"],
                 "sent_at": datetime.now(tz=UTC),
                 "last_sent_at": datetime.now(tz=UTC),
                 "seen_at": None,
@@ -66,6 +73,12 @@ class _FakeNotificationRepository:
             "FakeLog",
             (),
             {
+                "show_trakt_id": kwargs["show_trakt_id"],
+                "show_title": kwargs["show_title"],
+                "episode_trakt_id": kwargs["episode_trakt_id"],
+                "season": kwargs["season"],
+                "episode": kwargs["episode"],
+                "message": kwargs["message"],
                 "sent_at": kwargs["released_at"],
                 "last_sent_at": kwargs["released_at"],
                 "seen_at": None,
@@ -73,12 +86,44 @@ class _FakeNotificationRepository:
             },
         )()
 
+    def list_unseen(self, session) -> list[object]:
+        return [log for log in self.logs.values() if log.seen_at is None]
+
+    def mark_seen(self, session, **kwargs) -> None:
+        self.seen.append(kwargs)
+        key = (kwargs["show_trakt_id"], kwargs["episode_trakt_id"])
+        log = self.logs.get(key)
+        if log is None:
+            self.logs[key] = type(
+                "FakeLog",
+                (),
+                {
+                    "show_trakt_id": kwargs["show_trakt_id"],
+                    "show_title": kwargs["show_title"],
+                    "episode_trakt_id": kwargs["episode_trakt_id"],
+                    "season": kwargs["season"],
+                    "episode": kwargs["episode"],
+                    "message": kwargs["message"],
+                    "sent_at": datetime.now(tz=UTC),
+                    "last_sent_at": datetime.now(tz=UTC),
+                    "seen_at": datetime.now(tz=UTC),
+                    "notify_count": 0,
+                },
+            )()
+            return
+        log.seen_at = datetime.now(tz=UTC)
+
 
 class _FakeProgressRepository:
-    def __init__(self, next_episode: EpisodeSummary) -> None:
+    def __init__(self, next_episode: EpisodeSummary, *, paused: bool = False) -> None:
         self._next_episode = next_episode
+        self._paused = paused
 
-    def list_in_progress(self, session, dropped_only: bool = False) -> list[ProgressSnapshot]:
+    def list_in_progress(self, session, *, view="active", **kwargs) -> list[ProgressSnapshot]:
+        normalized_view = getattr(view, "value", view)
+        expected_view = "paused" if self._paused else "active"
+        if normalized_view != expected_view:
+            return []
         return [
             ProgressSnapshot(
                 trakt_id=1,
@@ -87,6 +132,7 @@ class _FakeProgressRepository:
                 aired=1,
                 percent_completed=0.0,
                 next_episode=self._next_episode,
+                is_paused=self._paused,
             )
         ]
 
@@ -117,6 +163,7 @@ class NotificationRefreshWorkflowTests(unittest.TestCase):
         entry: CalendarEntry,
         progress_episode: EpisodeSummary,
         release_delay_minutes: int = 120,
+        paused: bool = False,
     ) -> tuple[list[dict], _FakeSender, _FakeNotificationRepository]:
         config = AppConfig(notification_release_delay_minutes=release_delay_minutes)
         notification_repo = _FakeNotificationRepository()
@@ -127,7 +174,7 @@ class NotificationRefreshWorkflowTests(unittest.TestCase):
             config_store=_FakeConfigStore(config),
             notification_repo=notification_repo,
             episode_repo=object(),
-            progress_repo=_FakeProgressRepository(progress_episode),
+            progress_repo=_FakeProgressRepository(progress_episode, paused=paused),
             sender=sender,
         )
         return workflow.poll_upcoming(send_native=True), sender, notification_repo
@@ -143,7 +190,10 @@ class NotificationRefreshWorkflowTests(unittest.TestCase):
     def test_poll_upcoming_sends_after_configured_release_delay(self) -> None:
         sent, sender, notification_repo = self._poll(first_aired=datetime.now(tz=UTC) - timedelta(minutes=121))
 
-        self.assertEqual(sent, [{"show_title": "Tracked Show", "message": "S01E02 Translated Later"}])
+        self.assertEqual(
+            sent,
+            [{"show_title": "Tracked Show", "message": "S01E02 Translated Later", "source": "progress"}],
+        )
         self.assertEqual(sender.messages, [("Tracked Show", "S01E02 Translated Later")])
         self.assertEqual(len(notification_repo.sent), 1)
 
@@ -166,9 +216,185 @@ class NotificationRefreshWorkflowTests(unittest.TestCase):
 
         sent, sender, notification_repo = self._poll_entry(entry=entry, progress_episode=progress_episode)
 
-        self.assertEqual(sent, [{"show_title": "Tracked Show", "message": "S01E02 Translated Later"}])
+        self.assertEqual(
+            sent,
+            [{"show_title": "Tracked Show", "message": "S01E02 Translated Later", "source": "progress"}],
+        )
         self.assertEqual(sender.messages, [("Tracked Show", "S01E02 Translated Later")])
         self.assertEqual(len(notification_repo.sent), 1)
+
+    def test_poll_upcoming_marks_paused_release_seen_without_notification(self) -> None:
+        episode = EpisodeSummary(
+            trakt_id=70,
+            season=1,
+            number=2,
+            title="Paused Episode",
+            first_aired=datetime.now(tz=UTC) - timedelta(minutes=121),
+        )
+        entry = CalendarEntry(show_trakt_id=1, show_title="Tracked Show", episode=episode)
+
+        sent, sender, notification_repo = self._poll_entry(
+            entry=entry,
+            progress_episode=episode,
+            paused=True,
+        )
+
+        self.assertEqual(sent, [])
+        self.assertEqual(sender.messages, [])
+        self.assertEqual(len(notification_repo.seen), 1)
+        self.assertIsNotNone(notification_repo.logs[(1, 70)].seen_at)
+
+    def test_poll_upcoming_repeats_unseen_current_episode_after_calendar_window(self) -> None:
+        released_at = datetime.now(tz=UTC) - timedelta(days=30)
+        episode = EpisodeSummary(
+            trakt_id=70,
+            season=1,
+            number=2,
+            title="Still New",
+            first_aired=released_at,
+        )
+        config = AppConfig(
+            notification_release_delay_minutes=120,
+            notification_repeat_minutes=60,
+        )
+        notification_repo = _FakeNotificationRepository()
+        notification_repo.track_released(
+            None,
+            show_trakt_id=1,
+            show_title="Tracked Show",
+            episode_trakt_id=70,
+            season=1,
+            episode=2,
+            message="S01E02 Still New",
+            released_at=released_at,
+        )
+        sender = _FakeSender()
+        workflow = NotificationRefreshWorkflow(
+            db=type("FakeDB", (), {"session": lambda self: nullcontext(object())})(),
+            auth_service=_FakeAuth(_FakeClient([])),
+            config_store=_FakeConfigStore(config),
+            notification_repo=notification_repo,
+            episode_repo=object(),
+            progress_repo=_FakeProgressRepository(episode),
+            sender=sender,
+        )
+
+        sent = workflow.poll_upcoming(send_native=True)
+
+        self.assertEqual(
+            sent,
+            [{"show_title": "Tracked Show", "message": "S01E02 Still New", "source": "progress"}],
+        )
+        self.assertEqual(sender.messages, [("Tracked Show", "S01E02 Still New")])
+
+    def test_poll_upcoming_drops_unseen_episode_that_is_no_longer_up_next(self) -> None:
+        released_at = datetime.now(tz=UTC) - timedelta(days=30)
+        stale_episode = EpisodeSummary(
+            trakt_id=70,
+            season=1,
+            number=2,
+            title="Old Next",
+            first_aired=released_at,
+        )
+        current_episode = EpisodeSummary(
+            trakt_id=71,
+            season=1,
+            number=3,
+            title="Current Next",
+            first_aired=released_at,
+        )
+        notification_repo = _FakeNotificationRepository()
+        notification_repo.track_released(
+            None,
+            show_trakt_id=1,
+            show_title="Tracked Show",
+            episode_trakt_id=stale_episode.trakt_id,
+            season=stale_episode.season,
+            episode=stale_episode.number,
+            message="S01E02 Old Next",
+            released_at=released_at,
+        )
+        sender = _FakeSender()
+        workflow = NotificationRefreshWorkflow(
+            db=type("FakeDB", (), {"session": lambda self: nullcontext(object())})(),
+            auth_service=_FakeAuth(_FakeClient([])),
+            config_store=_FakeConfigStore(AppConfig()),
+            notification_repo=notification_repo,
+            episode_repo=object(),
+            progress_repo=_FakeProgressRepository(current_episode),
+            sender=sender,
+        )
+
+        sent = workflow.poll_upcoming(send_native=True)
+
+        self.assertEqual(sent, [])
+        self.assertEqual(sender.messages, [])
+        self.assertEqual(notification_repo.deleted, [(1, 70)])
+
+    def test_pending_progress_source_requires_new_episode_and_elapsed_delay(self) -> None:
+        recent_episode = EpisodeSummary(
+            trakt_id=70,
+            season=1,
+            number=2,
+            title="Recent",
+            first_aired=datetime.now(tz=UTC) - timedelta(minutes=30),
+        )
+        notification_repo = _FakeNotificationRepository()
+        notification_repo.track_released(
+            None,
+            show_trakt_id=1,
+            show_title="Tracked Show",
+            episode_trakt_id=70,
+            season=1,
+            episode=2,
+            message="S01E02 Recent",
+            released_at=recent_episode.first_aired,
+        )
+        workflow = NotificationRefreshWorkflow(
+            db=type("FakeDB", (), {"session": lambda self: nullcontext(object())})(),
+            auth_service=_FakeAuth(_FakeClient([])),
+            config_store=_FakeConfigStore(AppConfig(notification_release_delay_minutes=120)),
+            notification_repo=notification_repo,
+            episode_repo=object(),
+            progress_repo=_FakeProgressRepository(recent_episode),
+            sender=_FakeSender(),
+        )
+
+        self.assertFalse(workflow.has_due_unseen_current_episode())
+        notification_repo.logs[(1, 70)].sent_at = datetime.now(tz=UTC) - timedelta(minutes=121)
+        recent_episode.first_aired = datetime.now(tz=UTC) - timedelta(minutes=121)
+        self.assertTrue(workflow.has_due_unseen_current_episode())
+
+    def test_pending_progress_source_ignores_paused_episode(self) -> None:
+        episode = EpisodeSummary(
+            trakt_id=70,
+            season=1,
+            number=2,
+            title="Paused",
+            first_aired=datetime.now(tz=UTC) - timedelta(minutes=121),
+        )
+        notification_repo = _FakeNotificationRepository()
+        notification_repo.track_released(
+            None,
+            show_trakt_id=1,
+            show_title="Tracked Show",
+            episode_trakt_id=70,
+            season=1,
+            episode=2,
+            message="S01E02 Paused",
+            released_at=episode.first_aired,
+        )
+        workflow = NotificationRefreshWorkflow(
+            db=type("FakeDB", (), {"session": lambda self: nullcontext(object())})(),
+            auth_service=_FakeAuth(_FakeClient([])),
+            config_store=_FakeConfigStore(AppConfig(notification_release_delay_minutes=120)),
+            notification_repo=notification_repo,
+            episode_repo=object(),
+            progress_repo=_FakeProgressRepository(episode, paused=True),
+            sender=_FakeSender(),
+        )
+
+        self.assertFalse(workflow.has_due_unseen_current_episode())
 
 
 if __name__ == "__main__":

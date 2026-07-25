@@ -272,11 +272,11 @@
                     type="button"
                     class="icon-button search-card-action search-watch-title-button"
                     title="Mark watched"
-                    data-search-watch-action
+                    data-search-show-watch-trigger
+                    data-watch-panel-url="/search/show/{{ item.trakt_id }}/watch-panel"
                     data-title-type="show"
                     data-trakt-id="{{ item.trakt_id }}"
                     data-title="{{ item.title }}"
-                    data-scope="title"
                     data-remove-from-watchlist="{{ 'true' if page_kind == 'watchlist' else 'false' }}"
                     aria-label="Mark {{ item.title }} watched"
                 >
@@ -507,6 +507,10 @@
                 <p class="title-matrix-subtitle">Manage watched episodes</p>
             </div>
             <div class="search-watch-header-actions">
+                <button type="button" class="poster-chip title-matrix-trigger search-watch-title-ratings" data-search-watch-title-ratings data-title-matrix-trigger hidden>
+                    <span class="poster-chip-part"><img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt"><span data-search-watch-trakt-rating></span></span>
+                    <span class="poster-chip-part"><img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="IMDb"><span data-search-watch-imdb-rating></span></span>
+                </button>
                 <button type="button" class="search-watch-scope-button search-watch-header-scope" data-search-watch-action data-search-watch-header-mark data-title-type="show" data-scope="title" hidden>
                     <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"><span>All</span>
                 </button>

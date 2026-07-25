@@ -1,19 +1,53 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import unicodedata
 from typing import cast
 
-from sqlalchemy import and_, delete, desc, func, or_, select, tuple_
+from sqlalchemy import and_, delete, desc, exists, func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_CHECKED_NO_DATA,
     ENRICH_STATUS_READY,
+    ENRICH_STATUS_RETRYABLE_FAILURE,
     ENRICH_STATUS_UNKNOWN,
 )
-from trakt_tracker.domain import CalendarEntry, EpisodeSummary, ProgressSnapshot, TitleSummary
+from trakt_tracker.domain import (
+    CalendarEntry,
+    EpisodeSummary,
+    ProgressSnapshot,
+    ProgressSortMode,
+    ProgressView,
+    TitleSummary,
+)
 
-from .models import EpisodeCache, HistoryEvent, NotificationLog, ReleaseTrackingState, SyncState, Title, UserTitleState, WatchProgress
+from .models import (
+    EpisodeCache,
+    HistoryEvent,
+    NotificationLog,
+    ReleaseTrackingState,
+    SyncState,
+    Title,
+    TitleAlias,
+    TitleAliasRefresh,
+    UserTitleState,
+    WatchProgress,
+)
+
+
+def normalize_title_search(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+@dataclass(frozen=True, slots=True)
+class TitleAliasTarget:
+    title_type: str
+    trakt_id: int
+    title: str
+    status: str
+    last_checked_at: datetime | None
 
 
 def _is_show_title_fallback(title: str, trakt_id: int) -> bool:
@@ -245,7 +279,7 @@ class UserStateRepository:
         return {trakt_id: rating for trakt_id, rating in session.execute(stmt) if rating is not None}
 
     def set_archived(self, session: Session, trakt_id: int, archived: bool) -> None:
-        title = session.scalar(select(Title).where(Title.trakt_id == trakt_id))
+        title = self._progress_title(session, trakt_id)
         if title is None:
             return
         state = self.ensure_state(session, title.id)
@@ -256,18 +290,190 @@ class UserStateRepository:
             state.tracked = True
         session.flush()
 
-    def sync_progress_archived_states(self, session: Session, dropped_ids: set[int]) -> None:
-        stmt = (
-            select(Title)
-            .join(WatchProgress, WatchProgress.show_trakt_id == Title.trakt_id)
-            .where(Title.title_type == "show")
+    def set_paused(self, session: Session, trakt_id: int, paused: bool) -> None:
+        title = self._progress_title(session, trakt_id)
+        if title is None:
+            return
+        state = self.ensure_state(session, title.id)
+        state.paused = paused
+        if paused:
+            state.tracked = True
+        session.flush()
+
+    def progress_state(self, session: Session, trakt_id: int) -> UserTitleState | None:
+        return session.scalar(
+            select(UserTitleState)
+            .join(Title, Title.id == UserTitleState.title_id)
+            .where(Title.trakt_id == trakt_id)
         )
-        for title in session.scalars(stmt):
+
+    @staticmethod
+    def _progress_title(session: Session, trakt_id: int) -> Title | None:
+        title = session.scalar(select(Title).where(Title.trakt_id == trakt_id))
+        if title is not None:
+            return title
+        progress = session.scalar(select(WatchProgress).where(WatchProgress.show_trakt_id == trakt_id))
+        if progress is None:
+            return None
+        title = Title(
+            trakt_id=trakt_id,
+            title_type="show",
+            title=str(progress.show_title or ""),
+        )
+        session.add(title)
+        session.flush()
+        return title
+
+    def sync_progress_archived_states(self, session: Session, dropped_ids: set[int]) -> None:
+        paused_ids = {
+            int(trakt_id)
+            for trakt_id in session.scalars(
+                select(Title.trakt_id)
+                .join(UserTitleState, UserTitleState.title_id == Title.id)
+                .where(UserTitleState.paused.is_(True))
+            )
+        }
+        self.sync_progress_hidden_states(session, dropped_ids=dropped_ids, paused_ids=paused_ids)
+
+    def sync_progress_hidden_states(
+        self,
+        session: Session,
+        *,
+        dropped_ids: set[int],
+        paused_ids: set[int],
+    ) -> None:
+        show_ids = list(session.scalars(select(WatchProgress.show_trakt_id).distinct()))
+        for show_trakt_id in show_ids:
+            title = self._progress_title(session, int(show_trakt_id))
+            if title is None:
+                continue
             state = self.ensure_state(session, title.id)
             is_dropped = title.trakt_id in dropped_ids
             state.archived = is_dropped
+            state.paused = title.trakt_id in paused_ids
             state.tracked = not is_dropped
         session.flush()
+
+
+class TitleAliasRepository:
+    def list_history_targets(self, session: Session, *, language: str) -> list[TitleAliasTarget]:
+        normalized_language = language.strip().casefold()
+        history_titles = (
+            select(
+                HistoryEvent.title_type.label("title_type"),
+                HistoryEvent.title_trakt_id.label("title_trakt_id"),
+                func.max(HistoryEvent.title).label("title"),
+                func.max(HistoryEvent.watched_at).label("last_event_at"),
+            )
+            .group_by(HistoryEvent.title_type, HistoryEvent.title_trakt_id)
+            .subquery()
+        )
+        rows = session.execute(
+            select(
+                history_titles.c.title_type,
+                history_titles.c.title_trakt_id,
+                history_titles.c.title,
+                TitleAliasRefresh.status,
+                TitleAliasRefresh.last_checked_at,
+            )
+            .select_from(
+                history_titles.outerjoin(
+                    TitleAliasRefresh,
+                    and_(
+                        TitleAliasRefresh.title_type == history_titles.c.title_type,
+                        TitleAliasRefresh.title_trakt_id == history_titles.c.title_trakt_id,
+                        TitleAliasRefresh.language == normalized_language,
+                    ),
+                )
+            )
+            .order_by(desc(history_titles.c.last_event_at))
+        )
+        return [
+            TitleAliasTarget(
+                title_type=str(title_type),
+                trakt_id=int(trakt_id),
+                title=str(title or ""),
+                status=str(status or ENRICH_STATUS_UNKNOWN),
+                last_checked_at=last_checked_at,
+            )
+            for title_type, trakt_id, title, status, last_checked_at in rows
+        ]
+
+    def replace_trakt_aliases(
+        self,
+        session: Session,
+        *,
+        title_type: str,
+        trakt_id: int,
+        language: str,
+        aliases: list[str],
+        checked_at: datetime,
+    ) -> None:
+        normalized_language = language.strip().casefold()
+        session.execute(
+            delete(TitleAlias)
+            .where(TitleAlias.title_type == title_type)
+            .where(TitleAlias.title_trakt_id == trakt_id)
+            .where(TitleAlias.language == normalized_language)
+            .where(TitleAlias.source == "trakt")
+        )
+        unique_aliases: dict[str, str] = {}
+        for alias in aliases:
+            normalized = normalize_title_search(alias)
+            if normalized:
+                unique_aliases.setdefault(normalized, alias.strip())
+        for normalized, alias in unique_aliases.items():
+            session.add(
+                TitleAlias(
+                    title_type=title_type,
+                    title_trakt_id=trakt_id,
+                    language=normalized_language,
+                    title=alias,
+                    normalized_title=normalized,
+                    source="trakt",
+                )
+            )
+        refresh = self._ensure_refresh(session, title_type, trakt_id, normalized_language)
+        refresh.status = ENRICH_STATUS_READY if unique_aliases else ENRICH_STATUS_CHECKED_NO_DATA
+        refresh.last_checked_at = checked_at
+        refresh.error_count = 0
+
+    def mark_retryable_failure(
+        self,
+        session: Session,
+        *,
+        title_type: str,
+        trakt_id: int,
+        language: str,
+        checked_at: datetime,
+    ) -> None:
+        normalized_language = language.strip().casefold()
+        refresh = self._ensure_refresh(session, title_type, trakt_id, normalized_language)
+        refresh.status = ENRICH_STATUS_RETRYABLE_FAILURE
+        refresh.last_checked_at = checked_at
+        refresh.error_count = int(refresh.error_count or 0) + 1
+
+    @staticmethod
+    def _ensure_refresh(
+        session: Session,
+        title_type: str,
+        trakt_id: int,
+        language: str,
+    ) -> TitleAliasRefresh:
+        refresh = session.scalar(
+            select(TitleAliasRefresh)
+            .where(TitleAliasRefresh.title_type == title_type)
+            .where(TitleAliasRefresh.title_trakt_id == trakt_id)
+            .where(TitleAliasRefresh.language == language)
+        )
+        if refresh is None:
+            refresh = TitleAliasRefresh(
+                title_type=title_type,
+                title_trakt_id=trakt_id,
+                language=language,
+            )
+            session.add(refresh)
+        return refresh
 
 
 class HistoryRepository:
@@ -563,7 +769,14 @@ class HistoryRepository:
         if title_type:
             stmt = stmt.where(HistoryEvent.title_type == title_type)
         if title_filter:
-            stmt = stmt.where(HistoryEvent.title.ilike(f"%{title_filter}%"))
+            normalized_filter = normalize_title_search(title_filter)
+            alias_match = exists(
+                select(TitleAlias.id)
+                .where(TitleAlias.title_type == HistoryEvent.title_type)
+                .where(TitleAlias.title_trakt_id == HistoryEvent.title_trakt_id)
+                .where(TitleAlias.normalized_title.like(f"%{normalized_filter}%"))
+            )
+            stmt = stmt.where(or_(HistoryEvent.title.ilike(f"%{title_filter}%"), alias_match))
         stmt = stmt.order_by(desc(HistoryEvent.watched_at_known), desc(HistoryEvent.watched_at))
         if offset:
             stmt = stmt.offset(offset)
@@ -761,6 +974,50 @@ class HistoryRepository:
 
 
 class ProgressRepository:
+    @staticmethod
+    def normalize_view(
+        view: ProgressView | str = ProgressView.ACTIVE,
+        *,
+        dropped_only: bool | None = None,
+    ) -> ProgressView:
+        if dropped_only is not None:
+            return ProgressView.DROPPED if dropped_only else ProgressView.ACTIVE
+        if isinstance(view, ProgressView):
+            return view
+        try:
+            return ProgressView(str(view or "").strip().casefold())
+        except ValueError:
+            return ProgressView.ACTIVE
+
+    @staticmethod
+    def normalize_sort_mode(
+        sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
+    ) -> ProgressSortMode:
+        if isinstance(sort_mode, ProgressSortMode):
+            return sort_mode
+        normalized = str(sort_mode or "").strip().casefold().replace(" ", "_")
+        aliases = {
+            "last_watched": ProgressSortMode.LAST_WATCHED,
+            "episode_release": ProgressSortMode.EPISODE_RELEASE,
+            "release_year": ProgressSortMode.RELEASE_YEAR,
+        }
+        return aliases.get(normalized, ProgressSortMode.EPISODE_RELEASE)
+
+    @staticmethod
+    def _apply_view_filter(stmt, view: ProgressView, *, include_paused: bool = False):
+        not_dropped = and_(
+            or_(UserTitleState.archived.is_(None), UserTitleState.archived.is_(False)),
+            or_(UserTitleState.tracked.is_(None), UserTitleState.tracked.is_(True)),
+        )
+        if view is ProgressView.DROPPED:
+            return stmt.where(or_(UserTitleState.archived.is_(True), UserTitleState.tracked.is_(False)))
+        if view is ProgressView.PAUSED:
+            return stmt.where(not_dropped).where(UserTitleState.paused.is_(True))
+        stmt = stmt.where(not_dropped)
+        if include_paused:
+            return stmt
+        return stmt.where(or_(UserTitleState.paused.is_(None), UserTitleState.paused.is_(False)))
+
     def delete_progress(self, session: Session, trakt_id: int) -> None:
         session.execute(delete(WatchProgress).where(WatchProgress.show_trakt_id == trakt_id))
         session.flush()
@@ -808,7 +1065,17 @@ class ProgressRepository:
         session.flush()
         return model
 
-    def list_in_progress(self, session: Session, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
+    def list_in_progress(
+        self,
+        session: Session,
+        *,
+        view: ProgressView | str = ProgressView.ACTIVE,
+        sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
+        descending: bool = True,
+        dropped_only: bool | None = None,
+    ) -> list[ProgressSnapshot]:
+        normalized_view = self.normalize_view(view, dropped_only=dropped_only)
+        normalized_sort = self.normalize_sort_mode(sort_mode)
         stmt = (
             select(WatchProgress, Title, EpisodeCache, UserTitleState)
             .outerjoin(Title, Title.trakt_id == WatchProgress.show_trakt_id)
@@ -821,18 +1088,22 @@ class ProgressRepository:
             )
             .where(WatchProgress.completed > 0)
             .where(WatchProgress.next_episode_trakt_id.is_not(None))
-            .order_by(
-                WatchProgress.next_episode_first_aired.is_(None),
-                desc(WatchProgress.next_episode_first_aired),
-                WatchProgress.show_title,
-            )
-            .limit(50)
         )
-        if dropped_only:
-            stmt = stmt.where(or_(UserTitleState.archived.is_(True), UserTitleState.tracked.is_(False)))
+        stmt = self._apply_view_filter(stmt, normalized_view)
+        if normalized_sort is ProgressSortMode.LAST_WATCHED:
+            sort_column = UserTitleState.last_watched_at
+        elif normalized_sort is ProgressSortMode.RELEASE_YEAR:
+            sort_column = Title.year
         else:
-            stmt = stmt.where(or_(UserTitleState.archived.is_(None), UserTitleState.archived.is_(False)))
-            stmt = stmt.where(or_(UserTitleState.tracked.is_(None), UserTitleState.tracked.is_(True)))
+            sort_column = WatchProgress.next_episode_first_aired
+        primary_order = desc(sort_column) if descending else sort_column.asc()
+        stable_title = func.lower(func.coalesce(Title.title, WatchProgress.show_title))
+        stmt = stmt.order_by(
+            sort_column.is_(None),
+            primary_order,
+            stable_title.asc(),
+            WatchProgress.show_trakt_id.asc(),
+        ).limit(50)
         rows = list(session.execute(stmt))
         result: list[ProgressSnapshot] = []
         for row, title, next_episode_row, state in rows:
@@ -861,6 +1132,8 @@ class ProgressRepository:
                     imdb_id=next_episode_row.imdb_id if next_episode_row is not None else "",
                     imdb_rating=next_episode_row.imdb_rating if next_episode_row is not None else None,
                     imdb_votes=next_episode_row.imdb_votes if next_episode_row is not None else None,
+                    imdb_season=next_episode_row.imdb_season if next_episode_row is not None else None,
+                    imdb_episode=next_episode_row.imdb_episode if next_episode_row is not None else None,
                     imdb_status=(
                         ENRICH_STATUS_READY
                         if next_episode_row is not None and next_episode_row.imdb_rating is not None and next_episode_row.imdb_votes is not None
@@ -901,23 +1174,34 @@ class ProgressRepository:
                     title_imdb_votes=(title.imdb_votes if title is not None else None),
                     title_ratings_status=(title.ratings_status if title is not None else ENRICH_STATUS_UNKNOWN),
                     title_ratings_refreshed_at=(title.ratings_refreshed_at if title is not None else None),
-                    is_dropped=((bool(state.archived) or state.tracked is False) if state is not None else dropped_only),
+                    is_dropped=(
+                        (bool(state.archived) or state.tracked is False)
+                        if state is not None
+                        else normalized_view is ProgressView.DROPPED
+                    ),
+                    is_paused=(bool(state.paused) if state is not None else False),
+                    last_watched_at=(state.last_watched_at if state is not None else None),
+                    title_year=(title.year if title is not None else None),
                 )
             )
         return result
 
-    def list_sync_show_ids(self, session: Session, *, dropped_only: bool = False) -> list[int]:
+    def list_sync_show_ids(
+        self,
+        session: Session,
+        *,
+        view: ProgressView | str = ProgressView.ACTIVE,
+        include_paused: bool = False,
+        dropped_only: bool | None = None,
+    ) -> list[int]:
+        normalized_view = self.normalize_view(view, dropped_only=dropped_only)
         stmt = (
             select(WatchProgress.show_trakt_id, UserTitleState)
             .outerjoin(Title, Title.trakt_id == WatchProgress.show_trakt_id)
             .outerjoin(UserTitleState, UserTitleState.title_id == Title.id)
             .order_by(WatchProgress.updated_at.desc(), WatchProgress.show_title)
         )
-        if dropped_only:
-            stmt = stmt.where(or_(UserTitleState.archived.is_(True), UserTitleState.tracked.is_(False)))
-        else:
-            stmt = stmt.where(or_(UserTitleState.archived.is_(None), UserTitleState.archived.is_(False)))
-            stmt = stmt.where(or_(UserTitleState.tracked.is_(None), UserTitleState.tracked.is_(True)))
+        stmt = self._apply_view_filter(stmt, normalized_view, include_paused=include_paused)
         seen: set[int] = set()
         result: list[int] = []
         for show_trakt_id, _state in session.execute(stmt):
@@ -928,7 +1212,15 @@ class ProgressRepository:
             result.append(trakt_id)
         return result
 
-    def has_incomplete_rows(self, session: Session, *, dropped_only: bool = False) -> bool:
+    def has_incomplete_rows(
+        self,
+        session: Session,
+        *,
+        view: ProgressView | str = ProgressView.ACTIVE,
+        include_paused: bool = False,
+        dropped_only: bool | None = None,
+    ) -> bool:
+        normalized_view = self.normalize_view(view, dropped_only=dropped_only)
         stmt = (
             select(WatchProgress.id)
             .outerjoin(Title, Title.trakt_id == WatchProgress.show_trakt_id)
@@ -938,11 +1230,7 @@ class ProgressRepository:
             .where(WatchProgress.next_episode_trakt_id.is_(None))
             .limit(1)
         )
-        if dropped_only:
-            stmt = stmt.where(or_(UserTitleState.archived.is_(True), UserTitleState.tracked.is_(False)))
-        else:
-            stmt = stmt.where(or_(UserTitleState.archived.is_(None), UserTitleState.archived.is_(False)))
-            stmt = stmt.where(or_(UserTitleState.tracked.is_(None), UserTitleState.tracked.is_(True)))
+        stmt = self._apply_view_filter(stmt, normalized_view, include_paused=include_paused)
         return session.scalar(stmt) is not None
 
 
@@ -982,6 +1270,39 @@ class EpisodeRepository:
                     imdb_votes=(
                         episode.imdb_votes if episode.imdb_votes is not None
                         else (existing.imdb_votes if existing is not None else None)
+                    ),
+                    imdb_season=(
+                        existing.imdb_season
+                        if existing is not None and (not episode.imdb_id or episode.imdb_id == existing.imdb_id)
+                        else None
+                    ),
+                    imdb_episode=(
+                        existing.imdb_episode
+                        if existing is not None and (not episode.imdb_id or episode.imdb_id == existing.imdb_id)
+                        else None
+                    ),
+                    imdb_coordinates_revision=(
+                        existing.imdb_coordinates_revision
+                        if existing is not None and (not episode.imdb_id or episode.imdb_id == existing.imdb_id)
+                        else ""
+                    ),
+                    imdb_match_status=(
+                        "resolved"
+                        if episode.imdb_id or (existing is not None and existing.imdb_id)
+                        else (
+                            existing.imdb_match_status
+                            if existing is not None and existing.title == episode.title
+                            else "unknown"
+                        )
+                    ),
+                    imdb_match_attempt_key=(
+                        ""
+                        if episode.imdb_id or (existing is not None and existing.imdb_id)
+                        else (
+                            existing.imdb_match_attempt_key
+                            if existing is not None and existing.title == episode.title
+                            else ""
+                        )
                     ),
                     still_status=(
                         ENRICH_STATUS_READY if episode.still_url
@@ -1042,6 +1363,9 @@ class EpisodeRepository:
                 EpisodeCache.number == episode.number,
             )
         )
+        is_new = row is None
+        previous_title = row.title if row is not None else ""
+        previous_imdb_id = row.imdb_id if row is not None else ""
         if row is None:
             row = EpisodeCache(
                 show_trakt_id=show_trakt_id,
@@ -1078,7 +1402,19 @@ class EpisodeRepository:
         elif not row.trakt_details_status:
             row.trakt_details_status = ENRICH_STATUS_UNKNOWN
         if episode.imdb_id:
+            if episode.imdb_id != previous_imdb_id:
+                row.imdb_season = None
+                row.imdb_episode = None
+                row.imdb_coordinates_revision = ""
             row.imdb_id = episode.imdb_id
+            row.imdb_match_status = "resolved"
+            row.imdb_match_attempt_key = ""
+        elif is_new:
+            row.imdb_match_status = "unknown"
+            row.imdb_match_attempt_key = ""
+        elif not row.imdb_id and previous_title != row.title:
+            row.imdb_match_status = "unknown"
+            row.imdb_match_attempt_key = ""
         if episode.imdb_rating is not None:
             row.imdb_rating = episode.imdb_rating
         if episode.imdb_votes is not None:
@@ -1103,6 +1439,15 @@ class EpisodeRepository:
 
     def list_all_episodes(self, session: Session) -> list[EpisodeCache]:
         return list(session.scalars(select(EpisodeCache).order_by(EpisodeCache.show_trakt_id, EpisodeCache.season, EpisodeCache.number)))
+
+    def list_show_episodes(self, session: Session, show_trakt_id: int) -> list[EpisodeCache]:
+        return list(
+            session.scalars(
+                select(EpisodeCache)
+                .where(EpisodeCache.show_trakt_id == show_trakt_id)
+                .order_by(EpisodeCache.season, EpisodeCache.number)
+            )
+        )
 
     def list_artwork_batch(self, session: Session, *, after_id: int, limit: int) -> list[EpisodeCache]:
         stmt = (
@@ -1150,6 +1495,11 @@ class EpisodeRepository:
                 "imdb_id": row.imdb_id,
                 "imdb_rating": row.imdb_rating,
                 "imdb_votes": row.imdb_votes,
+                "imdb_season": row.imdb_season,
+                "imdb_episode": row.imdb_episode,
+                "imdb_coordinates_revision": row.imdb_coordinates_revision or "",
+                "imdb_match_status": row.imdb_match_status or "unknown",
+                "imdb_match_attempt_key": row.imdb_match_attempt_key or "",
             }
         return result
 
@@ -1176,6 +1526,11 @@ class EpisodeRepository:
                 "imdb_id": row.imdb_id,
                 "imdb_rating": row.imdb_rating,
                 "imdb_votes": row.imdb_votes,
+                "imdb_season": row.imdb_season,
+                "imdb_episode": row.imdb_episode,
+                "imdb_coordinates_revision": row.imdb_coordinates_revision or "",
+                "imdb_match_status": row.imdb_match_status or "unknown",
+                "imdb_match_attempt_key": row.imdb_match_attempt_key or "",
                 "first_aired": row.first_aired,
             }
             for row in rows
@@ -1471,6 +1826,14 @@ class NotificationRepository:
     def unseen_episode_ids(self, session: Session) -> set[int]:
         stmt = select(NotificationLog.episode_trakt_id).where(NotificationLog.seen_at.is_(None))
         return {int(value) for value in session.scalars(stmt)}
+
+    def list_unseen(self, session: Session) -> list[NotificationLog]:
+        stmt = (
+            select(NotificationLog)
+            .where(NotificationLog.seen_at.is_(None))
+            .order_by(NotificationLog.last_sent_at.asc(), NotificationLog.id.asc())
+        )
+        return list(session.scalars(stmt))
 
     def delete_sent(self, session: Session, show_trakt_id: int, episode_trakt_id: int) -> None:
         row = self.get_log(session, show_trakt_id, episode_trakt_id)

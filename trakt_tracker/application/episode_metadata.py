@@ -11,6 +11,10 @@ from trakt_tracker.application.enrich_state import (
 )
 from trakt_tracker.application.enrich_queue import TASK_RESULT_SKIPPED_ALREADY_RESOLVED
 from trakt_tracker.application.episode_imdb_resolver import EpisodeIMDbResolver
+from trakt_tracker.application.episode_imdb_reconciliation import (
+    IMDB_MATCH_STATUS_RESOLVED,
+    EpisodeIMDbReconciliationService,
+)
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_EPISODE_RATINGS,
     ASSET_KIND_STILL,
@@ -42,6 +46,7 @@ class EpisodeMetadataService:
         titles_repo=None,
         auth_service=None,
         tmdb_factory: Callable[[AppConfig], TMDbClient] | None = None,
+        imdb_reconciliation=None,
     ) -> None:
         self._db = db
         self._episode_repo = episode_repo
@@ -50,6 +55,7 @@ class EpisodeMetadataService:
         self._auth = auth_service
         self._tmdb_factory = tmdb_factory
         self._imdb_resolver = EpisodeIMDbResolver(imdb_client)
+        self._imdb_reconciliation = imdb_reconciliation or EpisodeIMDbReconciliationService(db, episode_repo, imdb_client)
 
     def _normalize_episode_refresh_requests(
         self,
@@ -228,36 +234,29 @@ class EpisodeMetadataService:
                 row.imdb_id = resolution.imdb_id
                 row.imdb_rating = resolution.imdb_rating
                 row.imdb_votes = resolution.imdb_votes
+                row.imdb_season = resolution.imdb_season
+                row.imdb_episode = resolution.imdb_episode
+                if resolution.imdb_id:
+                    row.imdb_match_status = IMDB_MATCH_STATUS_RESOLVED
+                    row.imdb_match_attempt_key = ""
 
     def repair_episode_imdb_ratings(self, show_trakt_id: int | None = None) -> int:
         if not self._imdb_client.is_ready() or self._titles is None:
             return 0
-        changed = 0
         with self._db.session() as session:
-            rows = self._episode_repo.list_all_episodes(session)
-            for row in rows:
-                if show_trakt_id is not None and int(row.show_trakt_id) != int(show_trakt_id):
-                    continue
-                show_imdb_id = self._show_imdb_id(session, int(row.show_trakt_id))
-                if not show_imdb_id:
-                    continue
-                resolution = self._imdb_resolver.resolve(
-                    show_imdb_id=show_imdb_id,
-                    season=int(row.season),
-                    episode=int(row.number),
-                    title=row.title,
-                    trakt_imdb_id=row.imdb_id,
-                )
-                if (
-                    row.imdb_id == resolution.imdb_id
-                    and row.imdb_rating == resolution.imdb_rating
-                    and row.imdb_votes == resolution.imdb_votes
-                ):
-                    continue
-                row.imdb_id = resolution.imdb_id
-                row.imdb_rating = resolution.imdb_rating
-                row.imdb_votes = resolution.imdb_votes
-                changed += 1
+            show_ids = [int(show_trakt_id)] if show_trakt_id is not None else self._episode_repo.list_cached_show_ids(session)
+        changed = 0
+        for current_show_id in show_ids:
+            with self._db.session() as session:
+                show_imdb_id = self._show_imdb_id(session, current_show_id)
+                episode_rows = self._episode_repo.list_show_episode_metadata(session, current_show_id)
+            if not self._imdb_reconciliation.needs_reconciliation(
+                show_imdb_id=show_imdb_id,
+                episode_rows=episode_rows,
+            ):
+                continue
+            result = self._imdb_reconciliation.reconcile_show(current_show_id, show_imdb_id=show_imdb_id)
+            changed += result.changed
         return changed
 
     def backfill_episode_imdb_ids_from_payloads(self, payloads: list[dict]) -> None:
@@ -293,6 +292,10 @@ class EpisodeMetadataService:
                     row.imdb_id = resolution.imdb_id
                     row.imdb_rating = resolution.imdb_rating
                     row.imdb_votes = resolution.imdb_votes
+                    row.imdb_season = resolution.imdb_season
+                    row.imdb_episode = resolution.imdb_episode
+                    row.imdb_match_status = IMDB_MATCH_STATUS_RESOLVED
+                    row.imdb_match_attempt_key = ""
 
     def attach_progress_episode_metadata(self, session, progress, *, enrich_imdb: bool = False) -> None:
         if progress.next_episode is None:
@@ -319,6 +322,8 @@ class EpisodeMetadataService:
             row.imdb_id = resolution.imdb_id
             row.imdb_rating = resolution.imdb_rating
             row.imdb_votes = resolution.imdb_votes
+            row.imdb_season = resolution.imdb_season
+            row.imdb_episode = resolution.imdb_episode
         progress.next_episode.still_url = row.still_url or ""
         progress.next_episode.still_status = row.still_status or ENRICH_STATUS_UNKNOWN
         progress.next_episode.still_refreshed_at = row.still_refreshed_at
@@ -326,6 +331,8 @@ class EpisodeMetadataService:
         progress.next_episode.trakt_details_refreshed_at = row.trakt_details_refreshed_at
         progress.next_episode.imdb_rating = row.imdb_rating
         progress.next_episode.imdb_votes = row.imdb_votes
+        progress.next_episode.imdb_season = row.imdb_season
+        progress.next_episode.imdb_episode = row.imdb_episode
         progress.next_episode.imdb_status = (
             ENRICH_STATUS_READY
             if row.imdb_rating is not None and row.imdb_votes is not None

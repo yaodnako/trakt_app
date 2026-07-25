@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 
 from trakt_tracker.domain import TitleSummary
 from trakt_tracker.web.viewmodels import (
+    normalize_progress_sort_direction,
+    normalize_progress_sort_mode,
     normalize_search_sort_mode,
     normalize_title_type,
     saved_search_matches,
@@ -22,6 +24,13 @@ class WebViewModelTests(unittest.TestCase):
     def test_normalize_search_sort_mode_uses_fallback(self) -> None:
         self.assertEqual(normalize_search_sort_mode("", "Alphabetical"), "Alphabetical")
         self.assertEqual(normalize_search_sort_mode("unknown", "bad"), "IMDb votes")
+
+    def test_normalize_progress_sort_state_accepts_labels_and_safe_fallbacks(self) -> None:
+        self.assertEqual(normalize_progress_sort_mode("Last watched"), "last_watched")
+        self.assertEqual(normalize_progress_sort_mode("release_year"), "release_year")
+        self.assertEqual(normalize_progress_sort_mode("unknown", "Episode release"), "episode_release")
+        self.assertEqual(normalize_progress_sort_direction("ASC"), "asc")
+        self.assertEqual(normalize_progress_sort_direction("unknown", "desc"), "desc")
 
     def test_saved_search_matches_respects_title_type(self) -> None:
         state = {"query": "Dune", "title_type": "all", "results": [object()]}

@@ -207,7 +207,13 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                     if normalize_title_type(getattr(item, "title_type", None)) == effective_title_type
                 ]
             source_label = "Last saved search"
-            if schedule_search_enrichment(request.app, results=results, query=query, title_type=effective_title_type):
+            if schedule_search_enrichment(
+                request.app,
+                results=results,
+                query=query,
+                title_type=effective_title_type,
+                save_search_state=False,
+            ):
                 source_label += " with background metadata refresh"
 
         results = sort_search_results(results, sort_mode)
@@ -827,6 +833,19 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                 removed_from_watchlist = True
         except Exception as exc:
             return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+        bg_tasks = getattr(request.app.state, "bg_tasks", None)
+        progress = getattr(services, "progress", None)
+        if bg_tasks is not None and progress is not None and title_type == "show":
+            progress_task_key = (
+                f"progress_watch_{trakt_id}_{scope}_"
+                f"{season if season is not None else 'all'}_{episode if episode is not None else 'all'}"
+            )
+            bg_tasks.start(
+                progress_task_key,
+                source="Progress refresh",
+                operations=services.operations,
+                fn=lambda: progress.refresh_show_progress(trakt_id, fresh=True),
+            )
         services.operations.publish("Search action", f"Marked watched from search: {title or title_type} ({count})")
         return JSONResponse(
             {

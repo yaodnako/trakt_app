@@ -26,7 +26,7 @@ from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
 from trakt_tracker.application.search_watch import SearchWatchService
 import trakt_tracker.application.services as services_module
-from trakt_tracker.application.services import SyncService, build_services
+from trakt_tracker.application.services import NotificationService, SyncService, build_services
 from trakt_tracker.config import AppConfig, ConfigStore
 from trakt_tracker.domain import EpisodeSummary, ExploreResultPage, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
 from trakt_tracker.infrastructure.trakt.client import TraktClient
@@ -37,6 +37,42 @@ from trakt_tracker.persistence.repositories import EpisodeRepository, HistoryRep
 class _FakeConfig:
     tmdb_api_key = ""
     tmdb_read_access_token = ""
+
+
+class NotificationActivityTests(unittest.TestCase):
+    def test_notification_activity_records_only_known_sources_once_per_delivery(self) -> None:
+        service = NotificationService(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+        )
+
+        seq = service.record_activity(
+            [
+                {"source": "progress"},
+                {"source": "progress"},
+                {"source": "release"},
+                {"source": "unknown"},
+            ]
+        )
+
+        self.assertEqual(seq, 1)
+        self.assertEqual(
+            service.activity_after(0),
+            [{"seq": 1, "sources": ["progress", "release"]}],
+        )
+        self.assertEqual(service.activity_after(1), [])
+        self.assertEqual(service.record_activity([{"source": "unknown"}]), 1)
+        self.assertEqual(service.current_activity_seq(), 1)
+
+        service._workflow = SimpleNamespace(has_due_unseen_current_episode=lambda: True)
+        service._release_tracking = SimpleNamespace(has_due_unacknowledged_release=lambda: False)
+        self.assertEqual(service.refresh_pending_sources(), ["progress"])
+        self.assertEqual(service.pending_sources(), ["progress"])
 
 
 class _FakeAuthService:
@@ -158,9 +194,12 @@ class _FakeTmdbClient:
 class _FakeImdbClient:
     def __init__(self, *, ready: bool = False) -> None:
         self.ready = ready
+        self.revision = "imdb-revision-1"
+        self.revision_calls = 0
         self.episode_ids: dict[tuple[str, int, int], str] = {}
         self.episode_title_ids: dict[tuple[str, str], str] = {}
         self.episode_metadata: dict[str, dict] = {}
+        self.episode_lookup_calls: list[tuple[str, int, int]] = []
 
     def enrich_title(self, title: TitleSummary) -> TitleSummary:
         return replace(title, imdb_rating=8.5, imdb_votes=12345)
@@ -168,10 +207,15 @@ class _FakeImdbClient:
     def is_ready(self) -> bool:
         return self.ready
 
+    def dataset_revision(self) -> str:
+        self.revision_calls += 1
+        return self.revision if self.ready else ""
+
     def enrich_episode(self, episode: EpisodeSummary) -> EpisodeSummary:
         return episode
 
     def lookup_episode_imdb_id(self, show_imdb_id: str, season_number: int, episode_number: int) -> str:
+        self.episode_lookup_calls.append((show_imdb_id, season_number, episode_number))
         return self.episode_ids.get((show_imdb_id, season_number, episode_number), "")
 
     def lookup_overflow_episode_imdb_id(self, show_imdb_id: str, season_number: int, episode_number: int) -> str:
@@ -1177,7 +1221,6 @@ class ApplicationServiceTests(unittest.TestCase):
                     ),
                 ],
             )
-
         count = service.mark_watch(
             title_type="show",
             trakt_id=5,
@@ -1217,7 +1260,19 @@ class ApplicationServiceTests(unittest.TestCase):
             episode_metadata=_BlockingEpisodeMetadata(),
         )
         with self.db.session() as session:
-            self.titles.upsert_title(session, TitleSummary(trakt_id=5, title_type="show", title="Example"))
+            self.titles.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=5,
+                    title_type="show",
+                    title="Example",
+                    trakt_rating=8.2,
+                    trakt_votes=1200,
+                    imdb_rating=8.4,
+                    imdb_votes=3400,
+                    ratings_status="ready",
+                ),
+            )
             self.episode_repo.replace_show_episodes(
                 session,
                 5,
@@ -1231,12 +1286,21 @@ class ApplicationServiceTests(unittest.TestCase):
                     ),
                 ],
             )
+            episode_row = self.episode_repo.find_episode(session, 5, 1, 1)
+            episode_row.imdb_season = 2
+            episode_row.imdb_episode = 1
 
         panel = service.load_show_panel(5)
 
         self.assertEqual(panel.title, "Example")
+        self.assertEqual(panel.title_trakt_rating, 8.2)
+        self.assertEqual(panel.title_trakt_votes, 1200)
+        self.assertEqual(panel.title_imdb_rating, 8.4)
+        self.assertEqual(panel.title_imdb_votes, 3400)
         self.assertEqual(panel.seasons[0].episodes[0].title, "Pilot")
         self.assertEqual(panel.seasons[0].episodes[0].still_url, "")
+        self.assertEqual(panel.seasons[0].episodes[0].imdb_season, 2)
+        self.assertEqual(panel.seasons[0].episodes[0].imdb_episode, 1)
 
     def test_search_watch_panel_opens_first_released_unwatched_regular_episode(self) -> None:
         history_service = HistoryService(
@@ -1541,6 +1605,47 @@ class ApplicationServiceTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in items], [20])
 
+    def test_history_sync_keeps_latest_title_watch_when_items_arrive_newest_first(self) -> None:
+        workflow = HistorySyncWorkflow(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            ProgressRepository(),
+            self.episode_repo,
+            self.sync_state,
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+        )
+        newer = "2026-07-03T12:00:00.000Z"
+        older = "2026-07-01T12:00:00.000Z"
+
+        for history_id, watched_at, episode in ((2, newer, 2), (1, older, 1)):
+            with self.db.session() as session:
+                workflow._import_history_item(
+                    session,
+                    {
+                        "id": history_id,
+                        "type": "episode",
+                        "watched_at": watched_at,
+                        "show": {"title": "Example", "ids": {"trakt": 5}},
+                        "episode": {
+                            "title": f"Episode {episode}",
+                            "season": 1,
+                            "number": episode,
+                            "ids": {"trakt": 500 + episode},
+                        },
+                    },
+                )
+
+        with self.db.session() as session:
+            state = self.user_states.progress_state(session, 5)
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state.last_watched_at, datetime(2026, 7, 3, 12))
+
     def test_history_sync_reconciliation_removes_absent_remote_watch_and_resets_state(self) -> None:
         workflow = HistorySyncWorkflow(
             self.db,
@@ -1694,6 +1799,50 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(rows[0]["latest_episode"], 2)
         self.assertEqual(rows[1]["my_rating"], 9)
 
+    def test_history_title_summaries_sort_before_pagination_with_nulls_last(self) -> None:
+        items = [
+            (10, "Twin", 2020, datetime(2026, 4, 1, tzinfo=UTC), 8, True),
+            (20, "Twin", 2024, datetime(2026, 4, 3, tzinfo=UTC), 8, True),
+            (30, "Unknown", None, datetime(1970, 1, 1, tzinfo=UTC), None, False),
+        ]
+        with self.db.session() as session:
+            for trakt_id, title, year, watched_at, rating, watched_at_known in items:
+                self.titles.upsert_title(
+                    session,
+                    TitleSummary(trakt_id=trakt_id, title_type="movie", title=title, year=year),
+                )
+                self.history_repo.add_event(
+                    session,
+                    trakt_history_id=1000 + trakt_id,
+                    title_trakt_id=trakt_id,
+                    title=title,
+                    title_type="movie",
+                    action="watched",
+                    watched_at=watched_at,
+                    watched_at_known=watched_at_known,
+                    rating=rating,
+                )
+
+        rating_rows = self.history_read_model.history_title_summaries(
+            sort_by="rating",
+            sort_direction="desc",
+        )
+        release_page = self.history_read_model.history_title_summaries(
+            sort_by="release_year",
+            sort_direction="desc",
+            limit=1,
+            offset=1,
+        )
+        watched_rows = self.history_read_model.history_title_summaries(
+            sort_by="last_watched",
+            sort_direction="asc",
+        )
+
+        self.assertEqual([row["title_trakt_id"] for row in rating_rows], [10, 20, 30])
+        self.assertEqual([row["title_trakt_id"] for row in release_page], [10])
+        self.assertEqual([row["title_trakt_id"] for row in watched_rows], [10, 20, 30])
+        self.assertEqual([row["title_year"] for row in rating_rows], [2020, 2024, None])
+
     def test_interaction_service_marks_progress_episode_watched(self) -> None:
         history = _FakeHistoryService()
         notifications = _FakeNotificationService()
@@ -1756,6 +1905,20 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertFalse(services.sync.should_auto_sync_imdb_dataset(3))
         self.assertFalse(services.sync.maybe_sync_imdb_dataset(3))
         self.assertEqual(sync_calls, [True])
+
+    def test_sync_service_skips_known_episode_reenrichment_when_imdb_dataset_is_unchanged(self) -> None:
+        config_store = ConfigStore(Path(self.tmpdir.name) / "config.json")
+        services = build_services(config_store, self.db)
+        repair_calls: list[bool] = []
+        services.sync._imdb_client.sync = lambda force=False, status_callback=None: False
+        services.sync._episode_metadata.backfill_episode_imdb_ids_from_payloads = lambda payloads: None
+        services.sync._episode_metadata.enrich_episode_imdb_ratings = lambda: (_ for _ in ()).throw(
+            AssertionError("idle IMDb resolver pass")
+        )
+        services.sync._episode_metadata.repair_episode_imdb_ratings = lambda: repair_calls.append(True) or 0
+
+        self.assertFalse(services.sync.sync_imdb_dataset())
+        self.assertEqual(repair_calls, [True])
 
     def test_history_service_enriches_visible_episode_details_only_when_missing(self) -> None:
         service = HistoryService(
@@ -2165,7 +2328,7 @@ class ApplicationServiceTests(unittest.TestCase):
                     status="returning",
                 ),
             )
-            self.episode_repo.upsert_episode(
+            episode_row = self.episode_repo.upsert_episode(
                 session,
                 138748,
                 EpisodeSummary(
@@ -2181,6 +2344,8 @@ class ApplicationServiceTests(unittest.TestCase):
                     imdb_votes=106,
                 ),
             )
+            episode_row.imdb_season = 4
+            episode_row.imdb_episode = 1
             ProgressRepository().upsert_progress(
                 session,
                 ProgressSnapshot(
@@ -2196,6 +2361,8 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].poster_url, "https://poster.example/capture.jpg")
         self.assertEqual(items[0].next_episode.still_url, "https://still.example/capture.jpg")
+        self.assertEqual(items[0].next_episode.imdb_season, 4)
+        self.assertEqual(items[0].next_episode.imdb_episode, 1)
         self.assertEqual(self.trakt_client.title_details_calls, [])
         self.assertEqual(self.trakt_client.episode_details_calls, [])
 
@@ -2271,10 +2438,16 @@ class ApplicationServiceTests(unittest.TestCase):
                     title_type="show",
                     title="The Capture",
                     imdb_id="tt8201186",
+                    trakt_rating=8.2,
+                    trakt_votes=1200,
+                    imdb_rating=8.4,
+                    imdb_votes=3400,
                 ),
             )
         matrix = service.load_show_matrix(138748)
         self.assertTrue(matrix.has_episodes)
+        self.assertEqual((matrix.title_trakt_rating, matrix.title_trakt_votes), (8.2, 1200))
+        self.assertEqual((matrix.title_imdb_rating, matrix.title_imdb_votes), (8.4, 3400))
         self.assertEqual([season.label for season in matrix.seasons], ["S1", "S2", "ALL"])
         self.assertEqual([row.label for row in matrix.rows], ["E1", "E2"])
         self.assertEqual(matrix.rows[0].cells[0].display_value, "9.2")
@@ -2285,6 +2458,66 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(matrix.rows[1].cells[1].state, "empty")
         self.assertEqual(matrix.rows[0].cells[0].tooltip, "E1\nS01 E01\n1 134 votes")
         self.assertEqual([season.avg_display for season in matrix.seasons], ["9.2", "7.4", "8.3"])
+        self.assertEqual([season.label for season in matrix.imdb_seasons], ["S1", "S2", "ALL"])
+
+    def test_episode_ratings_matrix_builds_separate_imdb_season_layout(self) -> None:
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=198225, title_type="show", title="Frieren"))
+            season_one = self.episode_repo.upsert_episode(
+                session,
+                198225,
+                EpisodeSummary(
+                    trakt_id=2801,
+                    season=1,
+                    number=1,
+                    title="Episode 1",
+                    imdb_rating=8.1,
+                    imdb_votes=100,
+                    imdb_season=1,
+                    imdb_episode=1,
+                ),
+            )
+            season_one.imdb_season = 1
+            season_one.imdb_episode = 1
+            season_two = self.episode_repo.upsert_episode(
+                session,
+                198225,
+                EpisodeSummary(
+                    trakt_id=2901,
+                    season=1,
+                    number=29,
+                    title="Episode 29",
+                    imdb_rating=8.6,
+                    imdb_votes=900,
+                    imdb_season=2,
+                    imdb_episode=1,
+                ),
+            )
+            season_two.imdb_season = 2
+            season_two.imdb_episode = 1
+            season_three = self.episode_repo.upsert_episode(
+                session,
+                198225,
+                EpisodeSummary(
+                    trakt_id=3901,
+                    season=1,
+                    number=39,
+                    title="Episode 39",
+                    imdb_season=3,
+                    imdb_episode=1,
+                ),
+            )
+            season_three.imdb_season = 3
+            season_three.imdb_episode = 1
+
+        matrix = service.load_show_matrix(198225, allow_network_refresh=False)
+
+        self.assertEqual([season.label for season in matrix.seasons], ["S1", "ALL"])
+        self.assertEqual([season.label for season in matrix.imdb_seasons], ["S1", "S2", "S3", "ALL"])
+        self.assertEqual([row.label for row in matrix.imdb_rows], ["E1"])
+        self.assertEqual([cell.display_value for cell in matrix.imdb_rows[0].cells], ["8.1", "8.6", "?"])
+        self.assertEqual(matrix.imdb_rows[0].cells[1].tooltip, "Episode 29\nS02 E01\n900 votes")
 
     def test_episode_ratings_matrix_resolves_imdb_id_conflict_without_moving_rating_to_wrong_episode(self) -> None:
         self.imdb.ready = True
@@ -2339,6 +2572,122 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertEqual(row.imdb_id, "tt33023431")
             self.assertEqual(row.imdb_rating, 7.8)
             self.assertEqual(row.imdb_votes, 15500)
+
+    def test_episode_ratings_matrix_reconciles_unmapped_episode_once_without_network_refresh(self) -> None:
+        self.imdb.ready = True
+        self.imdb.episode_ids[("tt22248376", 1, 28)] = "tt33300000"
+        self.imdb.episode_ids[("tt22248376", 2, 1)] = "tt33300001"
+        self.imdb.episode_metadata["tt33300001"] = self._imdb_episode_metadata(
+            parent="tt22248376",
+            season=2,
+            episode=1,
+            title="Episode 29",
+            rating=8.6,
+            votes=900,
+        )
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=198225, title_type="show", title="Frieren", imdb_id="tt22248376"),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                198225,
+                EpisodeSummary(trakt_id=2901, season=1, number=29, title="Episode 29"),
+            )
+
+        first = service.load_show_matrix(198225, allow_network_refresh=False)
+        first_lookup_count = len(self.imdb.episode_lookup_calls)
+        second = service.load_show_matrix(198225, allow_network_refresh=False)
+
+        self.assertEqual(first.rows[28].cells[0].display_value, "8.6")
+        self.assertEqual(first.rows[28].label, "E29")
+        self.assertEqual([season.label for season in first.imdb_seasons], ["S2", "ALL"])
+        self.assertEqual(first.imdb_rows[0].cells[0].display_value, "8.6")
+        self.assertEqual(second.rows[28].cells[0].display_value, "8.6")
+        self.assertGreater(first_lookup_count, 0)
+        self.assertEqual(len(self.imdb.episode_lookup_calls), first_lookup_count)
+        with self.db.session() as session:
+            row = self.episode_repo.find_episode(session, 198225, 1, 29)
+            self.assertEqual(row.imdb_id, "tt33300001")
+            self.assertEqual(row.imdb_match_status, "resolved")
+
+    def test_episode_ratings_matrix_retries_no_match_only_after_imdb_revision_changes(self) -> None:
+        self.imdb.ready = True
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=198225, title_type="show", title="Frieren", imdb_id="tt22248376"),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                198225,
+                EpisodeSummary(trakt_id=3901, season=1, number=39, title="Episode 39"),
+            )
+
+        service.load_show_matrix(198225, allow_network_refresh=False)
+        first_lookup_count = len(self.imdb.episode_lookup_calls)
+        service.load_show_matrix(198225, allow_network_refresh=False)
+        self.assertGreater(first_lookup_count, 0)
+        self.assertEqual(len(self.imdb.episode_lookup_calls), first_lookup_count)
+
+        self.imdb.revision = "imdb-revision-2"
+        self.imdb.episode_ids[("tt22248376", 1, 39)] = "tt41157278"
+        self.imdb.episode_metadata["tt41157278"] = self._imdb_episode_metadata(
+            parent="tt22248376",
+            season=1,
+            episode=39,
+            title="Episode 39",
+            rating=None,
+            votes=None,
+        )
+        matrix = service.load_show_matrix(198225, allow_network_refresh=False)
+
+        self.assertGreater(len(self.imdb.episode_lookup_calls), first_lookup_count)
+        self.assertEqual(matrix.rows[38].cells[0].display_value, "?")
+        self.assertEqual(matrix.rows[38].cells[0].imdb_url, "https://www.imdb.com/title/tt41157278")
+        with self.db.session() as session:
+            row = self.episode_repo.find_episode(session, 198225, 1, 39)
+            self.assertEqual(row.imdb_match_status, "resolved")
+
+    def test_episode_ratings_matrix_does_not_remap_known_imdb_id_without_rating(self) -> None:
+        self.imdb.ready = True
+        self.imdb.episode_metadata["tt41157278"] = self._imdb_episode_metadata(
+            parent="tt22248376",
+            season=3,
+            episode=1,
+            title="Episode 39",
+            rating=None,
+            votes=None,
+        )
+        service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=198225, title_type="show", title="Frieren", imdb_id="tt22248376"),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                198225,
+                EpisodeSummary(trakt_id=3901, season=1, number=39, title="Episode 39", imdb_id="tt41157278"),
+            )
+
+        matrix = service.load_show_matrix(198225, allow_network_refresh=False)
+        first_revision_calls = self.imdb.revision_calls
+        service.load_show_matrix(198225, allow_network_refresh=False)
+
+        self.assertEqual(self.imdb.episode_lookup_calls, [])
+        self.assertGreater(first_revision_calls, 0)
+        self.assertEqual(self.imdb.revision_calls, first_revision_calls)
+        self.assertEqual(matrix.rows[38].cells[0].imdb_url, "https://www.imdb.com/title/tt41157278")
+        self.assertEqual([season.label for season in matrix.imdb_seasons], ["S3", "ALL"])
+        self.assertEqual(matrix.imdb_rows[0].cells[0].imdb_url, "https://www.imdb.com/title/tt41157278")
+        with self.db.session() as session:
+            row = self.episode_repo.find_episode(session, 198225, 1, 39)
+            self.assertEqual(row.imdb_match_status, "resolved")
+            self.assertEqual((row.imdb_season, row.imdb_episode), (3, 1))
 
     def test_episode_ratings_matrix_builds_trakt_values_and_averages(self) -> None:
         service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)

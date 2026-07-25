@@ -5,7 +5,10 @@
     class="panel panel-hero"
     id="progress-page-root"
     data-hide-upcoming="{{ '1' if hide_upcoming else '0' }}"
+    data-show-paused="{{ '1' if show_paused else '0' }}"
     data-show-dropped="{{ '1' if show_dropped else '0' }}"
+    data-sort="{{ sort_mode }}"
+    data-direction="{{ sort_direction }}"
     data-min-year="{{ min_year or '' }}"
     data-use-year-filter="{{ '1' if use_year_filter else '0' }}"
     data-progress-sync-running="{{ '1' if progress_sync_running else '0' }}"
@@ -16,14 +19,44 @@
             <span>Hide Upcoming</span>
         </label>
         <label class="toggle-chip">
+            <input type="checkbox" {% if show_paused %}checked{% endif %} data-progress-toggle="show_paused">
+            <span>Show Paused</span>
+        </label>
+        <label class="toggle-chip">
             <input type="checkbox" {% if show_dropped %}checked{% endif %} data-progress-toggle="show_dropped">
             <span>Show Dropped</span>
         </label>
+        <form method="get" action="/progress" class="progress-sort-form" data-progress-sort-form>
+            <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+            <input type="hidden" name="show_paused" value="{{ '1' if show_paused else '0' }}">
+            <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
+            <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+            <input type="hidden" name="min_year" value="{{ min_year or '' }}">
+            <input type="hidden" name="direction" value="{{ sort_direction }}">
+            <label class="progress-sort-field">
+                <span class="visually-hidden">Sort Up next</span>
+                <select name="sort" aria-label="Sort Up next" data-progress-sort-select>
+                    {% for value, label in progress_sort_options %}
+                    <option value="{{ value }}" {% if sort_mode == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <button
+                type="button"
+                class="icon-button progress-sort-direction"
+                data-progress-sort-direction
+                aria-label="Sort {{ 'descending' if sort_direction == 'desc' else 'ascending' }}"
+                title="Sort {{ 'descending' if sort_direction == 'desc' else 'ascending' }}"
+            >{{ '↓' if sort_direction == 'desc' else '↑' }}</button>
+        </form>
         <div class="year-filter-box">
             <form method="get" action="/progress" id="progress-year-filter-form" class="year-filter-form">
                 <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
+                <input type="hidden" name="show_paused" value="{{ '1' if show_paused else '0' }}">
                 <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
                 <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
+                <input type="hidden" name="sort" value="{{ sort_mode }}">
+                <input type="hidden" name="direction" value="{{ sort_direction }}">
                 <label class="toggle-chip">
                     <input
                         type="checkbox"

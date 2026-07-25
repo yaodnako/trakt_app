@@ -88,10 +88,22 @@ class _TemplateFilters:
         return str(value)
 
     @staticmethod
-    def season_episode_label(season: int | None, episode: int | None) -> str:
+    def season_episode_label(
+        season: int | None,
+        episode: int | None,
+        imdb_season: int | None = None,
+        imdb_episode: int | None = None,
+    ) -> str:
         if season is None or episode is None:
             return ""
-        return f"S{season:02d}E{episode:02d}"
+        label = f"S{season:02d}E{episode:02d}"
+        if (
+            imdb_season is not None
+            and imdb_episode is not None
+            and (int(imdb_season), int(imdb_episode)) != (int(season), int(episode))
+        ):
+            label += f" (S{int(imdb_season):02d}E{int(imdb_episode):02d})"
+        return label
 
     @staticmethod
     def release_distance(value) -> str:
@@ -482,8 +494,13 @@ def create_app(
             "authorized": request.app.state.services.auth.is_authorized(),
             "configured": request.app.state.services.auth.is_configured(),
             "settings_utc_offset": request.app.state.services.auth.config.utc_offset,
+            "active_profile_slug": request.app.state.services.auth.config.active_slug,
             "notification_sound_url": notification_sound_url,
             "notifications_browser_poll_enabled": os.environ.get("TRAKT_TRACKER_TRAY_RUNTIME") != "1",
+            "notification_activity_initial_seq": request.app.state.services.notifications.current_activity_seq(),
+            "notification_pending_sources": ",".join(
+                request.app.state.services.notifications.refresh_pending_sources()
+            ),
             "debug_mode": request.app.state.services.auth.config.debug_mode,
             "debug_initial_seq": request.app.state.services.operations.current_seq(),
             "style_css_version": request.app.state.style_css_version,
@@ -508,7 +525,10 @@ def create_app(
     def progress_redirect(
         *,
         hide_upcoming: bool,
+        show_paused: bool = False,
         show_dropped: bool,
+        sort_mode: str = "episode_release",
+        sort_direction: str = "desc",
         min_year: int | None = None,
         use_year_filter: bool = False,
         flash: str = "",
@@ -519,7 +539,10 @@ def create_app(
     ) -> RedirectResponse:
         query = progress_query_string(
             hide_upcoming=hide_upcoming,
+            show_paused=show_paused,
             show_dropped=show_dropped,
+            sort_mode=sort_mode,
+            sort_direction=sort_direction,
             min_year=min_year,
             use_year_filter=use_year_filter,
             flash=flash,

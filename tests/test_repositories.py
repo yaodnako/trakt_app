@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from trakt_tracker.application.enrich_state import ENRICH_STATUS_CHECKED_NO_DATA, ENRICH_STATUS_READY
 from trakt_tracker.domain import EpisodeSummary, ProgressSnapshot, TitleSummary
-from trakt_tracker.persistence.database import Database
+from trakt_tracker.persistence.database import LATEST_SCHEMA_VERSION, Database
 from trakt_tracker.persistence.repositories import EpisodeRepository, HistoryRepository, NotificationRepository, ProgressRepository, TitleRepository
 
 
@@ -259,6 +259,7 @@ class RepositoryTests(unittest.TestCase):
                 episode=1,
                 message="S02E01",
             )
+            unseen_logs_before = repo.list_unseen(session)
             repo.mark_seen(
                 session,
                 show_trakt_id=7,
@@ -270,10 +271,13 @@ class RepositoryTests(unittest.TestCase):
             )
             log = repo.get_log(session, 7, 70)
             unseen_ids = repo.unseen_episode_ids(session)
+            unseen_logs_after = repo.list_unseen(session)
         self.assertIsNotNone(first_log)
         self.assertIsNotNone(log)
         self.assertEqual(log.notify_count, 2)
         self.assertIsNotNone(log.seen_at)
+        self.assertEqual([row.episode_trakt_id for row in unseen_logs_before], [70])
+        self.assertEqual(unseen_logs_after, [])
         self.assertNotIn(70, unseen_ids)
 
     def test_database_uses_wal_mode_for_concurrent_reads(self) -> None:
@@ -304,6 +308,9 @@ class RepositoryTests(unittest.TestCase):
             row.still_url = "https://image.example/still.jpg"
             row.still_status = ENRICH_STATUS_READY
             row.trakt_details_status = ENRICH_STATUS_READY
+            row.imdb_season = 2
+            row.imdb_episode = 1
+            row.imdb_coordinates_revision = "revision-1"
         with self.db.session() as session:
             repo.replace_show_episodes(
                 session,
@@ -316,7 +323,40 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(row.trakt_rating, 8.1)
         self.assertEqual(row.trakt_votes, 700)
         self.assertEqual(row.imdb_id, "tt123")
+        self.assertEqual((row.imdb_season, row.imdb_episode), (2, 1))
+        self.assertEqual(row.imdb_coordinates_revision, "revision-1")
+        self.assertEqual(row.imdb_match_status, "resolved")
         self.assertEqual(row.trakt_details_status, ENRICH_STATUS_READY)
+
+    def test_replace_show_episodes_preserves_no_match_key_until_title_changes(self) -> None:
+        repo = EpisodeRepository()
+        with self.db.session() as session:
+            row = repo.upsert_episode(
+                session,
+                101,
+                EpisodeSummary(trakt_id=501, season=1, number=2, title="Episode 2"),
+            )
+            row.imdb_match_status = "no_match"
+            row.imdb_match_attempt_key = "attempt-key"
+        with self.db.session() as session:
+            repo.replace_show_episodes(
+                session,
+                101,
+                [EpisodeSummary(trakt_id=501, season=1, number=2, title="Episode 2")],
+            )
+            unchanged = repo.find_episode(session, 101, 1, 2)
+        self.assertEqual(unchanged.imdb_match_status, "no_match")
+        self.assertEqual(unchanged.imdb_match_attempt_key, "attempt-key")
+
+        with self.db.session() as session:
+            repo.replace_show_episodes(
+                session,
+                101,
+                [EpisodeSummary(trakt_id=501, season=1, number=2, title="A Real Title")],
+            )
+            changed = repo.find_episode(session, 101, 1, 2)
+        self.assertEqual(changed.imdb_match_status, "unknown")
+        self.assertEqual(changed.imdb_match_attempt_key, "")
 
     def test_upsert_title_preserves_existing_poster_and_ratings(self) -> None:
         repo = TitleRepository()
@@ -432,6 +472,7 @@ class RepositoryTests(unittest.TestCase):
             )
             session.execute(text("UPDATE titles SET poster_status = '', ratings_status = '' WHERE trakt_id = 1"))
             session.execute(text("UPDATE episodes_cache SET still_status = '', still_missing = 1 WHERE show_trakt_id = 1"))
+            session.execute(text("UPDATE episodes_cache SET imdb_id = 'tt123', imdb_match_status = '' WHERE show_trakt_id = 1"))
         self.db.close()
         self.db = Database(Path(self.tmpdir.name) / "test.sqlite3")
         self.db.create_schema()
@@ -441,11 +482,13 @@ class RepositoryTests(unittest.TestCase):
             poster_refreshed_at = session.execute(text("SELECT poster_refreshed_at FROM titles WHERE trakt_id = 1")).scalar()
             still_status = session.execute(text("SELECT still_status FROM episodes_cache WHERE show_trakt_id = 1")).scalar()
             still_refreshed_at = session.execute(text("SELECT still_refreshed_at FROM episodes_cache WHERE show_trakt_id = 1")).scalar()
+            imdb_match_status = session.execute(text("SELECT imdb_match_status FROM episodes_cache WHERE show_trakt_id = 1")).scalar()
         self.assertEqual(poster_status, ENRICH_STATUS_READY)
         self.assertEqual(ratings_status, ENRICH_STATUS_READY)
         self.assertIsNotNone(poster_refreshed_at)
         self.assertEqual(still_status, ENRICH_STATUS_CHECKED_NO_DATA)
         self.assertIsNotNone(still_refreshed_at)
+        self.assertEqual(imdb_match_status, "resolved")
 
     def test_existing_database_migration_is_backed_up_and_versioned_once(self) -> None:
         path = Path(self.tmpdir.name) / "test.sqlite3"
@@ -464,7 +507,7 @@ class RepositoryTests(unittest.TestCase):
         first_backup_mtime = backup.stat().st_mtime_ns
         with self.db.session() as session:
             version = session.execute(text("SELECT MAX(version) FROM schema_migrations")).scalar()
-        self.assertEqual(version, 1)
+        self.assertEqual(version, LATEST_SCHEMA_VERSION)
 
         self.db.close()
         self.db = Database(path)

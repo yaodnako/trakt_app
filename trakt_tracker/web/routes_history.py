@@ -34,6 +34,9 @@ from trakt_tracker.web.viewmodels import (
     ratings_refresh_due,
 )
 
+_HISTORY_TITLE_SORTS = {"rating", "last_watched", "release_year"}
+_HISTORY_SORT_DIRECTIONS = {"asc", "desc"}
+
 
 def register_history_routes(app, *, render, render_fragment) -> None:
     @app.get("/history", response_class=HTMLResponse)
@@ -50,10 +53,14 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         rate_episode: str = "",
         rate_title: str = "",
         view: str = "episodes",
+        sort: str = "last_watched",
+        sort_dir: str = "desc",
     ) -> HTMLResponse:
         services: ServiceContainer = request.app.state.services
         title_type = normalize_title_type(type)
         history_view = normalize_history_view(view)
+        history_sort = _normalize_history_title_sort(sort)
+        history_sort_direction = _normalize_history_sort_direction(sort_dir)
         current_page = max(1, page)
         title_filter = title.strip() or None
         only_rated_episodes = parse_bool_flag(rated_only)
@@ -67,6 +74,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                 title_filter=title_filter,
                 current_page=current_page,
                 rated_only=only_rated_episodes,
+                sort_by=history_sort,
+                sort_direction=history_sort_direction,
             )
         else:
             rows, has_next, grouped_days = _load_history_page_data(
@@ -77,7 +86,7 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                 rated_only=only_rated_episodes,
             )
         title_options = services.history.history_titles(title_type=title_type)
-        return render(
+        response = render(
             request,
             "history.html",
             {
@@ -87,6 +96,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                 "history_title_cards": title_cards,
                 "history_type": title_type or "all",
                 "history_view": history_view,
+                "history_sort": history_sort,
+                "history_sort_direction": history_sort_direction,
                 "history_title_filter": title.strip(),
                 "history_rated_only": only_rated_episodes,
                 "history_title_options": title_options,
@@ -101,6 +112,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                 "flash": flash,
             },
         )
+        _schedule_title_alias_refresh(request, services)
+        return response
 
     @app.get("/history/auto-sync")
     async def history_auto_sync(request: Request) -> JSONResponse:
@@ -112,6 +125,7 @@ def register_history_routes(app, *, render, render_fragment) -> None:
             operations=services.operations,
             fn=services.sync.maybe_refresh_history,
         )
+        _schedule_title_alias_refresh(request, services)
         return JSONResponse(
             {
                 "changed": False,
@@ -132,6 +146,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         title_filter = title_filter_raw.strip() or None
         rated_only = parse_bool_flag(str(payload.get("rated_only", "0") or "0"))
         history_view = normalize_history_view(str(payload.get("view", "episodes") or "episodes"))
+        history_sort = _normalize_history_title_sort(str(payload.get("sort", "last_watched") or "last_watched"))
+        history_sort_direction = _normalize_history_sort_direction(str(payload.get("sort_dir", "desc") or "desc"))
         try:
             current_page = max(1, int(payload.get("page", 1) or 1))
         except (TypeError, ValueError):
@@ -154,6 +170,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                 title_filter=title_filter,
                 current_page=current_page,
                 rated_only=rated_only,
+                sort_by=history_sort,
+                sort_direction=history_sort_direction,
             )
             current_title_groups = _title_card_map(rows)
             rows_by_title_key = {str(row["title_key"]): [row] for row in rows if row.get("title_key")}
@@ -237,6 +255,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                             "title_card": title_group,
                             "history_type": title_type or "all",
                             "history_view": history_view,
+                            "history_sort": history_sort,
+                            "history_sort_direction": history_sort_direction,
                             "history_title_filter": title_filter_raw,
                             "history_rated_only": rated_only,
                             "page": current_page,
@@ -244,6 +264,7 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                     ),
                 }
             )
+        _schedule_title_alias_refresh(request, services)
         return JSONResponse(
             {
                 "title_groups": rendered_groups,
@@ -264,6 +285,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         title_filter = str(form.get("title_filter", "") or "")
         rated_only = parse_bool_flag(str(form.get("rated_only", "0") or "0"))
         history_view = normalize_history_view(str(form.get("view", "episodes") or "episodes"))
+        history_sort = _normalize_history_title_sort(str(form.get("sort", "last_watched") or "last_watched"))
+        history_sort_direction = _normalize_history_sort_direction(str(form.get("sort_dir", "desc") or "desc"))
         try:
             page = max(1, int(str(form.get("page", "1") or "1")))
         except ValueError:
@@ -277,7 +300,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         flash = "History sync started." if started else "History sync is already running."
         redirect_url = (
             f"/history?type={history_type}&title={quote(title_filter)}&page={page}"
-            f"&rated_only={'1' if rated_only else '0'}&view={history_view}&flash={quote(flash)}"
+            f"&rated_only={'1' if rated_only else '0'}&view={history_view}"
+            f"&sort={history_sort}&sort_dir={history_sort_direction}&flash={quote(flash)}"
         )
         return RedirectResponse(url=redirect_url, status_code=303)
 
@@ -318,6 +342,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
         title_filter = str(form.get("title_filter", "") or "")
         rated_only = parse_bool_flag(str(form.get("rated_only", "0") or "0"))
         history_view = normalize_history_view(str(form.get("view", "episodes") or "episodes"))
+        history_sort = _normalize_history_title_sort(str(form.get("sort", "last_watched") or "last_watched"))
+        history_sort_direction = _normalize_history_sort_direction(str(form.get("sort_dir", "desc") or "desc"))
         try:
             page = max(1, int(str(form.get("page", "1") or "1")))
         except ValueError:
@@ -347,7 +373,8 @@ def register_history_routes(app, *, render, render_fragment) -> None:
             flash = f"Rating failed: {exc}"
         redirect_url = (
             f"/history?type={history_type}&title={quote(title_filter)}&page={page}"
-            f"&rated_only={'1' if rated_only else '0'}&view={history_view}&flash={quote(flash)}"
+            f"&rated_only={'1' if rated_only else '0'}&view={history_view}"
+            f"&sort={history_sort}&sort_dir={history_sort_direction}&flash={quote(flash)}"
         )
         return RedirectResponse(url=redirect_url, status_code=303)
 
@@ -380,16 +407,30 @@ def _load_history_title_page_data(
     title_filter: str | None,
     current_page: int,
     rated_only: bool,
+    sort_by: str,
+    sort_direction: str,
 ) -> tuple[list[dict], bool]:
     rows = services.history.history_title_summaries(
         title_type=title_type,
         title_filter=title_filter,
         rated_only=rated_only,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
         limit=HISTORY_PAGE_SIZE + 1,
         offset=(current_page - 1) * HISTORY_PAGE_SIZE,
     )
     has_next = len(rows) > HISTORY_PAGE_SIZE
     return rows[:HISTORY_PAGE_SIZE], has_next
+
+
+def _normalize_history_title_sort(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in _HISTORY_TITLE_SORTS else "last_watched"
+
+
+def _normalize_history_sort_direction(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in _HISTORY_SORT_DIRECTIONS else "desc"
 
 
 def _normalize_title_keys(raw_keys) -> list[str]:
@@ -581,3 +622,19 @@ def _select_stale_history_rating_title_keys(rows_by_title_key: dict[str, list[di
         if episode_due:
             result.append(title_key)
     return list(dict.fromkeys(result))
+
+
+def _schedule_title_alias_refresh(request: Request, services: ServiceContainer) -> None:
+    alias_service = getattr(services, "title_aliases", None)
+    if alias_service is None:
+        return
+    bg_tasks = request.app.state.bg_tasks
+    task_key = "title_aliases_ru"
+    if bg_tasks.is_running(task_key) or not alias_service.has_due_history_titles(language="ru"):
+        return
+    bg_tasks.start(
+        task_key,
+        source="Russian title aliases",
+        operations=services.operations,
+        fn=lambda: alias_service.refresh_due_history_titles(language="ru"),
+    )

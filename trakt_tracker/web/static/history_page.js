@@ -69,9 +69,18 @@
         const historyTypeSelect = form.querySelector('select[name="type"]');
         const titleFilterInput = form.querySelector('input[name="title"]');
         const ratedOnlyToggle = form.querySelector('input[name="rated_only"]');
+        const sortSelect = form.querySelector('select[name="sort"]');
+        const sortDirectionInput = form.querySelector('input[name="sort_dir"]');
+        const sortDirectionButton = form.querySelector("[data-history-sort-direction]");
         const applyImmediately = () => navigateHistory(filterUrl(form));
         historyTypeSelect?.addEventListener("change", applyImmediately);
         ratedOnlyToggle?.addEventListener("change", applyImmediately);
+        sortSelect?.addEventListener("change", applyImmediately);
+        sortDirectionButton?.addEventListener("click", () => {
+            if (!(sortDirectionInput instanceof HTMLInputElement)) return;
+            sortDirectionInput.value = sortDirectionInput.value === "asc" ? "desc" : "asc";
+            applyImmediately();
+        });
         if (titleFilterInput instanceof HTMLInputElement) {
             let lastSubmittedTitle = titleFilterInput.value;
             const applyTitle = () => {
@@ -104,6 +113,8 @@
             this.titleFilter = root.dataset.historyTitleFilter || "";
             this.ratedOnly = root.dataset.historyRatedOnly || "0";
             this.historyView = root.dataset.historyView || "episodes";
+            this.historySort = root.dataset.historySort || "last_watched";
+            this.historySortDirection = root.dataset.historySortDirection || "desc";
             this.shouldAutoSync = this.page === 1;
             this.idleRefreshIntervalMs = 300000;
             this.viewportRefreshDebounceMs = 180;
@@ -413,6 +424,8 @@
                         view: this.historyView,
                         title_filter: this.titleFilter,
                         rated_only: this.ratedOnly,
+                        sort: this.historySort,
+                        sort_dir: this.historySortDirection,
                         page: this.page,
                         viewport_title_keys: this.viewportKeys(),
                         nearby_title_keys: this.nearbyKeys(),

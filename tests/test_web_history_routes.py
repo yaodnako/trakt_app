@@ -54,7 +54,17 @@ class _FakeHistoryService:
             rows = rows[:limit]
         return rows
 
-    def history_title_summaries(self, *, title_type=None, title_filter=None, rated_only=False, limit=None, offset=0):
+    def history_title_summaries(
+        self,
+        *,
+        title_type=None,
+        title_filter=None,
+        rated_only=False,
+        sort_by="last_watched",
+        sort_direction="desc",
+        limit=None,
+        offset=0,
+    ):
         rows = self.history(title_type=title_type, title_filter=title_filter, rated_only=False, limit=None, offset=0)
         groups = {}
         for row in rows:
@@ -79,7 +89,9 @@ class _FakeHistoryService:
                     "my_rating": row.get("title_episode_avg_rating") if row.get("type") == "show" else row.get("display_rating"),
                     "title_rating": row.get("title_rating"),
                     "type": row.get("type", ""),
+                    "title_year": row.get("title_year"),
                     "last_watched_at": row.get("watched_at"),
+                    "last_watched_at_known": row.get("watched_at_known", True),
                     "watched_count": 0,
                     "latest_season": row.get("season"),
                     "latest_episode": row.get("episode"),
@@ -87,6 +99,27 @@ class _FakeHistoryService:
                 groups[key] = group
             group["watched_count"] += 1
         result = [group for group in groups.values() if not rated_only or group.get("my_rating") is not None]
+        normalized_sort = sort_by if sort_by in {"rating", "last_watched", "release_year"} else "last_watched"
+
+        def sort_value(group):
+            if normalized_sort == "rating":
+                return group.get("my_rating")
+            if normalized_sort == "release_year":
+                return group.get("title_year")
+            if not group.get("last_watched_at_known", True):
+                return None
+            watched_at = group.get("last_watched_at")
+            return watched_at.timestamp() if isinstance(watched_at, datetime) else None
+
+        def tie_key(group):
+            return (str(group.get("title", "")).casefold(), int(group.get("title_trakt_id") or 0))
+
+        known = [(sort_value(group), group) for group in result if sort_value(group) is not None]
+        unknown = [group for group in result if sort_value(group) is None]
+        known.sort(key=lambda item: tie_key(item[1]))
+        known.sort(key=lambda item: item[0], reverse=sort_direction != "asc")
+        unknown.sort(key=tie_key)
+        result = [group for _value, group in known] + unknown
         if offset:
             result = result[offset:]
         if limit is not None:
@@ -157,6 +190,9 @@ class _FakeSyncService:
         return self.changed
 
     def refresh_history(self):
+        return None
+
+    def sync_assets_full(self):
         return None
 
 
@@ -237,7 +273,18 @@ class HistoryRouteTests(unittest.TestCase):
         static_dir = STATIC_DIR
         self.templates = Jinja2Templates(directory=str(templates_dir))
         self.templates.env.filters["rating_with_votes"] = lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a"
-        self.templates.env.filters["episode_label"] = lambda season, episode: f"S{int(season):02d}E{int(episode):02d}" if season is not None and episode is not None else ""
+        self.templates.env.filters["episode_label"] = lambda season, episode, imdb_season=None, imdb_episode=None: (
+            f"S{int(season):02d}E{int(episode):02d}"
+            + (
+                f" (S{int(imdb_season):02d}E{int(imdb_episode):02d})"
+                if imdb_season is not None
+                and imdb_episode is not None
+                and (int(imdb_season), int(imdb_episode)) != (int(season), int(episode))
+                else ""
+            )
+            if season is not None and episode is not None
+            else ""
+        )
         self.templates.env.filters["cached_image_url"] = lambda value: value or ""
         self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
         self.history = _FakeHistoryService(
@@ -414,6 +461,8 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertIn("await this.waitForScrollIdle()", history_script)
         self.assertIn("await this.yieldToBrowser()", history_script)
         self.assertIn("if (domChanged)", history_script)
+        self.assertIn("sort: this.historySort", history_script)
+        self.assertIn("sort_dir: this.historySortDirection", history_script)
         self.assertNotIn("reloadGuardKey", history_script)
         self.assertEqual(self.app.state.bg_tasks.started_keys, [])
 
@@ -597,6 +646,119 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertIn("9", html)
         self.assertIn('href="https://trakt.tv/shows/severance"', html)
 
+    def test_history_title_mode_sorts_in_both_directions_with_nulls_last(self) -> None:
+        self.history.rows = [
+            {
+                **self._row("movie", 1, "Alpha", watched_at=datetime(2026, 4, 1, tzinfo=UTC)),
+                "display_rating": 8,
+                "title_year": 2020,
+            },
+            {
+                **self._row("movie", 2, "Beta", watched_at=datetime(1970, 1, 1, tzinfo=UTC)),
+                "watched_at_known": False,
+            },
+            {
+                **self._row("movie", 3, "Gamma", watched_at=datetime(2026, 4, 2, tzinfo=UTC)),
+                "display_rating": 6,
+                "title_year": 2024,
+            },
+        ]
+        scenarios = [
+            ("rating", "asc", [3, 1, 2]),
+            ("rating", "desc", [1, 3, 2]),
+            ("last_watched", "asc", [1, 3, 2]),
+            ("last_watched", "desc", [3, 1, 2]),
+            ("release_year", "asc", [1, 3, 2]),
+            ("release_year", "desc", [3, 1, 2]),
+        ]
+
+        for sort_by, sort_direction, expected_ids in scenarios:
+            with self.subTest(sort_by=sort_by, sort_direction=sort_direction):
+                response = self.client.get(
+                    f"/history?view=titles&sort={sort_by}&sort_dir={sort_direction}"
+                )
+                self.assertEqual(response.status_code, 200)
+                html = response.text
+                positions = [html.index(f'data-history-title-key="movie:{trakt_id}"') for trakt_id in expected_ids]
+                self.assertEqual(positions, sorted(positions))
+
+    def test_history_title_sort_state_is_normalized_and_preserved(self) -> None:
+        response = self.client.get("/history?view=titles&sort=invalid&sort_dir=sideways")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn('data-history-sort="last_watched"', html)
+        self.assertIn('data-history-sort-direction="desc"', html)
+        self.assertIn('<option value="last_watched" selected>Last watched</option>', html)
+        self.assertIn('aria-label="Sort descending; activate to reverse"', html)
+        self.assertIn("&sort=last_watched&sort_dir=desc", html)
+
+        episode_response = self.client.get("/history?view=episodes&sort=rating&sort_dir=asc")
+        self.assertEqual(episode_response.status_code, 200)
+        episode_html = episode_response.text
+        self.assertNotIn('aria-label="Sort watched titles"', episode_html)
+        self.assertIn('name="sort" value="rating"', episode_html)
+        self.assertIn("&sort=rating&sort_dir=asc", episode_html)
+
+    def test_history_title_sort_state_is_preserved_by_pager(self) -> None:
+        self.history.rows = [
+            {
+                **self._row(
+                    "movie",
+                    trakt_id,
+                    f"Movie {trakt_id}",
+                    watched_at=datetime(2026, 4, 1, tzinfo=UTC),
+                ),
+                "display_rating": 8,
+            }
+            for trakt_id in range(1, 52)
+        ]
+
+        response = self.client.get("/history?view=titles&sort=rating&sort_dir=asc")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            "page=2&view=titles&sort=rating&sort_dir=asc",
+            response.text,
+        )
+
+    def test_history_title_sort_state_is_preserved_by_action_redirects(self) -> None:
+        sync_response = self.client.post(
+            "/history/sync",
+            data={
+                "type": "all",
+                "title_filter": "",
+                "rated_only": "0",
+                "view": "titles",
+                "sort": "release_year",
+                "sort_dir": "asc",
+                "page": "2",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(sync_response.status_code, 303)
+        self.assertIn("sort=release_year&sort_dir=asc", sync_response.headers["location"])
+
+        rate_response = self.client.post(
+            "/history/rate",
+            data={
+                "type": "all",
+                "title_filter": "",
+                "rated_only": "0",
+                "view": "titles",
+                "sort": "rating",
+                "sort_dir": "desc",
+                "page": "1",
+                "trakt_id": "2",
+                "rating_type": "movie",
+                "title_value": "Dune",
+                "rating": "9",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(rate_response.status_code, 303)
+        self.assertIn("sort=rating&sort_dir=desc", rate_response.headers["location"])
+
     def test_history_movie_cards_do_not_render_matrix_trigger(self) -> None:
         self.history.rows = [self._row("movie", 2, "Dune", watched_at=datetime(2026, 4, 3, 11, 0, tzinfo=UTC))]
         response = self.client.get("/history?page=1")
@@ -642,6 +804,15 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertIn('current.pathname !== "/cached-image"', ui_script)
         self.assertNotIn("data-direct-src", html)
         self.assertNotIn("dataset.directSrc", html)
+
+    def test_history_episode_label_appends_different_imdb_coordinates(self) -> None:
+        self.history.rows[0]["episode_imdb_season"] = 2
+        self.history.rows[0]["episode_imdb_episode"] = 1
+
+        response = self.client.get("/history?page=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("S01E01 (S02E01)", response.text)
 
     def test_history_movie_preview_uses_external_trakt_link(self) -> None:
         template = (PROJECT_ROOT / "trakt_tracker" / "web" / "templates" / "history_title_card.html").read_text(

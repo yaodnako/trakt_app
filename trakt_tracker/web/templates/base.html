@@ -4,9 +4,12 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="trakt-csrf-token" content="{{ csrf_token }}">
+    <meta name="trakt-active-profile-slug" content="{{ active_profile_slug|default('') }}">
     <meta name="trakt-debug-mode" content="{{ 'true' if debug_mode else 'false' }}">
     <meta name="trakt-notifications-browser-poll-enabled" content="{{ 'true' if notifications_browser_poll_enabled|default(true) else 'false' }}">
     <meta name="trakt-notification-sound-url" content="{{ notification_sound_url }}">
+    <meta name="trakt-notification-activity-initial-seq" content="{{ notification_activity_initial_seq|default(0) }}">
+    <meta name="trakt-notification-pending-sources" content="{{ notification_pending_sources|default('') }}">
     <meta name="trakt-debug-initial-seq" content="{{ debug_initial_seq }}">
     <meta name="trakt-icon-seen" content="{{ request.url_for('static', path='seen.svg') }}">
     <meta name="trakt-icon-cancel" content="{{ request.url_for('static', path='cancel.svg') }}">
@@ -23,12 +26,12 @@
                 <h1>Trakt Tracker</h1>
             </div>
             {% if not setup_mode|default(false) %}<nav class="nav">
-                <a href="/progress" class="{% if current_path == '/progress' %}active{% endif %}"{% if current_path == '/progress' %} aria-current="page"{% endif %}>Up next{% if progress_waiting_title_count %}<span class="nav-badge">{{ progress_waiting_title_count }}</span>{% endif %}</a>
+                <a href="/progress" class="{% if current_path == '/progress' %}active{% endif %}"{% if current_path == '/progress' %} aria-current="page"{% endif %} data-notification-source="progress" data-notification-label="Up next">Up next{% if progress_waiting_title_count %}<span class="nav-badge">{{ progress_waiting_title_count }}</span>{% endif %}</a>
                 <a href="/history" class="{% if current_path == '/history' %}active{% endif %}"{% if current_path == '/history' %} aria-current="page"{% endif %}>History</a>
                 <a href="/search?catalog_shell=1" class="{% if current_path == '/search' %}active{% endif %}"{% if current_path == '/search' %} aria-current="page"{% endif %}>Search</a>
                 <a href="/explore?catalog_shell=1" class="{% if current_path == '/explore' %}active{% endif %}"{% if current_path == '/explore' %} aria-current="page"{% endif %}>Explore</a>
                 <a href="/watchlist?catalog_shell=1" class="{% if current_path == '/watchlist' %}active{% endif %}"{% if current_path == '/watchlist' %} aria-current="page"{% endif %}>Watchlist</a>
-                <a href="/release-tracking" class="{% if current_path == '/release-tracking' %}active{% endif %}"{% if current_path == '/release-tracking' %} aria-current="page"{% endif %}>Releases{% if released_title_count %}<span class="nav-badge">{{ released_title_count }}</span>{% endif %}</a>
+                <a href="/release-tracking" class="{% if current_path == '/release-tracking' %}active{% endif %}"{% if current_path == '/release-tracking' %} aria-current="page"{% endif %} data-notification-source="release" data-notification-label="Releases">Releases{% if released_title_count %}<span class="nav-badge">{{ released_title_count }}</span>{% endif %}</a>
                 <a href="/settings" class="{% if current_path == '/settings' %}active{% endif %}"{% if current_path == '/settings' %} aria-current="page"{% endif %}>Settings</a>
             </nav>{% endif %}
         </header>
@@ -62,6 +65,16 @@
                     <p class="title-matrix-eyebrow">Episode Ratings Matrix</p>
                     <h2 id="title-matrix-title">Loading…</h2>
                     <p class="title-matrix-subtitle">IMDb episode ratings by season</p>
+                </div>
+                <div class="poster-chip title-matrix-title-ratings" data-title-matrix-title-ratings aria-label="Title ratings" hidden>
+                    <span class="poster-chip-part">
+                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt">
+                        <span data-title-matrix-trakt-rating></span>
+                    </span>
+                    <span class="poster-chip-part">
+                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="IMDb">
+                        <span data-title-matrix-imdb-rating></span>
+                    </span>
                 </div>
                 <button type="button" class="title-matrix-close" data-title-matrix-close aria-label="Close episode ratings matrix"><span class="title-matrix-close-glyph">×</span></button>
             </div>

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from trakt_tracker.application.enrich_state import (
@@ -8,13 +8,12 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
     ENRICH_STATUS_RETRYABLE_FAILURE,
 )
-from trakt_tracker.application.episode_imdb_resolver import EpisodeIMDbResolver
+from trakt_tracker.application.episode_imdb_reconciliation import EpisodeIMDbReconciliationService
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_EPISODE_RATINGS,
     TRIGGER_VISIBLE_RATINGS_REFRESH,
     metadata_refresh_due,
 )
-from trakt_tracker.domain import EpisodeSummary
 
 
 LEGEND_BUCKETS = (
@@ -40,6 +39,8 @@ class EpisodeMatrixCell:
     episode: int
     exists: bool
     display_value: str
+    imdb_season: int | None = None
+    imdb_episode: int | None = None
     imdb_rating: float | None = None
     imdb_votes: int | None = None
     imdb_url: str = ""
@@ -93,8 +94,15 @@ class EpisodeRatingsMatrixViewModel:
     trakt_id: int
     title: str
     subtitle: str
+    title_trakt_rating: float | None = None
+    title_trakt_votes: int | None = None
+    title_imdb_rating: float | None = None
+    title_imdb_votes: int | None = None
+    title_ratings_status: str = ""
     seasons: list[EpisodeMatrixSeason] = field(default_factory=list)
     rows: list[EpisodeMatrixRow] = field(default_factory=list)
+    imdb_seasons: list[EpisodeMatrixSeason] = field(default_factory=list)
+    imdb_rows: list[EpisodeMatrixRow] = field(default_factory=list)
     legend: list[EpisodeMatrixLegendItem] = field(default_factory=list)
     has_episodes: bool = False
     error_message: str = ""
@@ -111,14 +119,14 @@ def rating_bucket_color(rating: float | None) -> str:
 
 
 class EpisodeRatingsMatrixService:
-    def __init__(self, db, auth_service, titles_repo, history_repo, episode_repo, imdb_client) -> None:
+    def __init__(self, db, auth_service, titles_repo, history_repo, episode_repo, imdb_client, imdb_reconciliation=None) -> None:
         self._db = db
         self._auth = auth_service
         self._titles = titles_repo
         self._history = history_repo
         self._episode_repo = episode_repo
         self._imdb_client = imdb_client
-        self._imdb_resolver = EpisodeIMDbResolver(imdb_client)
+        self._imdb_reconciliation = imdb_reconciliation or EpisodeIMDbReconciliationService(db, episode_repo, imdb_client)
 
     def load_show_matrix(
         self,
@@ -138,7 +146,7 @@ class EpisodeRatingsMatrixService:
         should_hydrate = force_refresh or not episode_rows
         if should_hydrate and allow_network_refresh:
             try:
-                self._hydrate_show_episodes(trakt_id, title_imdb_id=title.get("imdb_id", ""))
+                self._hydrate_show_episodes(trakt_id)
             except Exception as exc:
                 error_message = str(exc)
             with self._db.session() as session:
@@ -156,18 +164,30 @@ class EpisodeRatingsMatrixService:
             with self._db.session() as session:
                 episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
                 my_ratings = self._history.latest_show_episode_ratings(session, trakt_id)
-        if episode_rows and allow_network_refresh:
-            self._repair_cached_imdb_ratings(
+        if self._imdb_reconciliation.needs_reconciliation(
+            show_imdb_id=title.get("imdb_id", ""),
+            episode_rows=episode_rows,
+            force=force_refresh,
+        ):
+            result = self._imdb_reconciliation.reconcile_show(
                 trakt_id,
-                title_imdb_id=title.get("imdb_id", ""),
-                episode_rows=episode_rows,
+                show_imdb_id=title.get("imdb_id", ""),
+                force=force_refresh,
             )
+        else:
+            result = None
+        if result is not None and result.changed:
             with self._db.session() as session:
                 episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
                 my_ratings = self._history.latest_show_episode_ratings(session, trakt_id)
         return self._build_matrix(
             trakt_id,
             title=title.get("title", f"Show {trakt_id}"),
+            title_trakt_rating=title.get("trakt_rating"),
+            title_trakt_votes=title.get("trakt_votes"),
+            title_imdb_rating=title.get("imdb_rating"),
+            title_imdb_votes=title.get("imdb_votes"),
+            title_ratings_status=title.get("ratings_status", ""),
             episode_rows=episode_rows,
             my_ratings=my_ratings,
             error_message=error_message,
@@ -210,57 +230,18 @@ class EpisodeRatingsMatrixService:
             return {
                 "title": title_row.title if title_row is not None and title_row.title else f"Show {trakt_id}",
                 "imdb_id": title_row.imdb_id if title_row is not None else "",
+                "trakt_rating": title_row.trakt_rating if title_row is not None else None,
+                "trakt_votes": title_row.trakt_votes if title_row is not None else None,
+                "imdb_rating": title_row.imdb_rating if title_row is not None else None,
+                "imdb_votes": title_row.imdb_votes if title_row is not None else None,
+                "ratings_status": title_row.ratings_status if title_row is not None else "",
             }
 
-    def _hydrate_show_episodes(self, trakt_id: int, *, title_imdb_id: str) -> None:
+    def _hydrate_show_episodes(self, trakt_id: int) -> None:
         client = self._auth.get_client()
         episodes = client.get_show_episodes(trakt_id)
-        if self._imdb_client.is_ready():
-            for episode in episodes:
-                self._hydrate_episode_imdb(episode, title_imdb_id=title_imdb_id)
         with self._db.session() as session:
             self._episode_repo.replace_show_episodes(session, trakt_id, episodes)
-
-    def _hydrate_episode_imdb(self, episode: EpisodeSummary, *, title_imdb_id: str) -> None:
-        resolution = self._imdb_resolver.resolve(
-            show_imdb_id=title_imdb_id,
-            season=episode.season,
-            episode=episode.number,
-            title=episode.title,
-            trakt_imdb_id=episode.imdb_id,
-        )
-        episode.imdb_id = resolution.imdb_id
-        episode.imdb_rating = resolution.imdb_rating
-        episode.imdb_votes = resolution.imdb_votes
-
-    def _repair_cached_imdb_ratings(self, trakt_id: int, *, title_imdb_id: str, episode_rows: list[dict]) -> None:
-        if not title_imdb_id or not episode_rows or not self._imdb_client.is_ready():
-            return
-        with self._db.session() as session:
-            for row in episode_rows:
-                if row.get("season") is None or row.get("number") is None:
-                    continue
-                season = int(row["season"])
-                episode_number = int(row["number"])
-                resolution = self._imdb_resolver.resolve(
-                    show_imdb_id=title_imdb_id,
-                    season=season,
-                    episode=episode_number,
-                    title=str(row.get("title", "") or ""),
-                    trakt_imdb_id=str(row.get("imdb_id", "") or ""),
-                )
-                cached = self._episode_repo.find_episode(session, trakt_id, season, episode_number)
-                if cached is None:
-                    continue
-                if (
-                    cached.imdb_id == resolution.imdb_id
-                    and cached.imdb_rating == resolution.imdb_rating
-                    and cached.imdb_votes == resolution.imdb_votes
-                ):
-                    continue
-                cached.imdb_id = resolution.imdb_id
-                cached.imdb_rating = resolution.imdb_rating
-                cached.imdb_votes = resolution.imdb_votes
 
     def _refresh_due_trakt_ratings(
         self,
@@ -315,8 +296,6 @@ class EpisodeRatingsMatrixService:
                         status=ENRICH_STATUS_CHECKED_NO_DATA,
                     )
                     continue
-                title_imdb_id = self._load_title(show_trakt_id).get("imdb_id", "")
-                self._hydrate_episode_imdb(details, title_imdb_id=title_imdb_id)
                 status = ENRICH_STATUS_READY if details.trakt_rating is not None and details.trakt_votes is not None else ENRICH_STATUS_CHECKED_NO_DATA
                 self._episode_repo.update_trakt_details_enrich_state(
                     session,
@@ -334,6 +313,11 @@ class EpisodeRatingsMatrixService:
         trakt_id: int,
         *,
         title: str,
+        title_trakt_rating: float | None,
+        title_trakt_votes: int | None,
+        title_imdb_rating: float | None,
+        title_imdb_votes: int | None,
+        title_ratings_status: str,
         episode_rows: list[dict],
         my_ratings: dict[tuple[int, int], int],
         error_message: str,
@@ -345,6 +329,11 @@ class EpisodeRatingsMatrixService:
                 trakt_id=trakt_id,
                 title=title,
                 subtitle=self._provider_subtitle(provider),
+                title_trakt_rating=title_trakt_rating,
+                title_trakt_votes=title_trakt_votes,
+                title_imdb_rating=title_imdb_rating,
+                title_imdb_votes=title_imdb_votes,
+                title_ratings_status=title_ratings_status,
                 legend=self._legend_items(),
                 has_episodes=False,
                 error_message=error_message,
@@ -449,6 +438,8 @@ class EpisodeRatingsMatrixService:
                         episode=episode_number,
                         exists=True,
                         display_value=display_value,
+                        imdb_season=(int(row["imdb_season"]) if row.get("imdb_season") is not None else None),
+                        imdb_episode=(int(row["imdb_episode"]) if row.get("imdb_episode") is not None else None),
                         imdb_rating=imdb_rating_value,
                         imdb_votes=imdb_votes,
                         imdb_url=(f"https://www.imdb.com/title/{imdb_id}" if imdb_id else ""),
@@ -482,7 +473,14 @@ class EpisodeRatingsMatrixService:
                         tooltip=tooltip,
                     )
                 )
-            matrix_rows.append(EpisodeMatrixRow(episode=episode_number, label=f"E{episode_number}", cells=cells))
+            label = f"E{episode_number}"
+            matrix_rows.append(
+                EpisodeMatrixRow(
+                    episode=episode_number,
+                    label=label,
+                    cells=cells,
+                )
+            )
         seasons = [
             EpisodeMatrixSeason(
                 season=season,
@@ -528,17 +526,163 @@ class EpisodeRatingsMatrixService:
                 my_avg_color=rating_bucket_color(overall_my_average),
             )
         )
+        imdb_seasons, imdb_rows = self._build_imdb_season_layout(
+            episode_rows=episode_rows,
+            trakt_rows=matrix_rows,
+            provider=provider,
+        )
         return EpisodeRatingsMatrixViewModel(
             trakt_id=trakt_id,
             title=title,
             subtitle=self._provider_subtitle(provider),
+            title_trakt_rating=title_trakt_rating,
+            title_trakt_votes=title_trakt_votes,
+            title_imdb_rating=title_imdb_rating,
+            title_imdb_votes=title_imdb_votes,
+            title_ratings_status=title_ratings_status,
             seasons=seasons,
             rows=matrix_rows,
+            imdb_seasons=imdb_seasons,
+            imdb_rows=imdb_rows,
             legend=self._legend_items(),
             has_episodes=True,
             error_message=error_message,
             provider=provider,
         )
+
+    def _build_imdb_season_layout(
+        self,
+        *,
+        episode_rows: list[dict],
+        trakt_rows: list[EpisodeMatrixRow],
+        provider: str,
+    ) -> tuple[list[EpisodeMatrixSeason], list[EpisodeMatrixRow]]:
+        cells_by_trakt_key = {
+            (cell.season, cell.episode): cell
+            for matrix_row in trakt_rows
+            for cell in matrix_row.cells
+            if cell.exists
+        }
+        cells_by_imdb_key: dict[tuple[int, int], EpisodeMatrixCell] = {}
+        explicit_coordinates: dict[tuple[int, int], bool] = {}
+        for row in episode_rows:
+            if row.get("season") is None or row.get("number") is None:
+                continue
+            trakt_key = (int(row["season"]), int(row["number"]))
+            cell = cells_by_trakt_key.get(trakt_key)
+            if cell is None:
+                continue
+            has_imdb_coordinates = row.get("imdb_season") is not None and row.get("imdb_episode") is not None
+            imdb_key = (
+                (int(row["imdb_season"]), int(row["imdb_episode"]))
+                if has_imdb_coordinates
+                else trakt_key
+            )
+            if imdb_key in cells_by_imdb_key and not (has_imdb_coordinates and not explicit_coordinates[imdb_key]):
+                continue
+            imdb_season, imdb_episode = imdb_key
+            cells_by_imdb_key[imdb_key] = replace(
+                cell,
+                season=imdb_season,
+                episode=imdb_episode,
+                tooltip=self._build_cell_tooltip(
+                    title=cell.title,
+                    season=imdb_season,
+                    episode=imdb_episode,
+                    votes=(cell.trakt_votes if provider == "trakt" else cell.imdb_votes),
+                ),
+                imdb_tooltip=self._build_cell_tooltip(
+                    title=cell.title,
+                    season=imdb_season,
+                    episode=imdb_episode,
+                    votes=cell.imdb_votes,
+                ),
+                trakt_tooltip=self._build_cell_tooltip(
+                    title=cell.title,
+                    season=imdb_season,
+                    episode=imdb_episode,
+                    votes=cell.trakt_votes,
+                ),
+            )
+            explicit_coordinates[imdb_key] = has_imdb_coordinates
+
+        if not cells_by_imdb_key:
+            return [], []
+        season_numbers = sorted({season for season, _episode in cells_by_imdb_key})
+        max_episode_number = max(episode for _season, episode in cells_by_imdb_key)
+        matrix_rows = [
+            EpisodeMatrixRow(
+                episode=episode_number,
+                label=f"E{episode_number}",
+                cells=[
+                    cells_by_imdb_key.get(
+                        (season, episode_number),
+                        EpisodeMatrixCell(
+                            season=season,
+                            episode=episode_number,
+                            exists=False,
+                            display_value="",
+                            state="empty",
+                        ),
+                    )
+                    for season in season_numbers
+                ],
+            )
+            for episode_number in range(1, max_episode_number + 1)
+        ]
+        seasons = [
+            self._build_layout_season(
+                season=season,
+                label=f"S{season}",
+                cells=[cell for (cell_season, _episode), cell in cells_by_imdb_key.items() if cell_season == season],
+                provider=provider,
+            )
+            for season in season_numbers
+        ]
+        seasons.append(
+            self._build_layout_season(
+                season=-1,
+                label="ALL",
+                cells=[cell for (season, _episode), cell in cells_by_imdb_key.items() if season != 0],
+                provider=provider,
+            )
+        )
+        return seasons, matrix_rows
+
+    @classmethod
+    def _build_layout_season(
+        cls,
+        *,
+        season: int,
+        label: str,
+        cells: list[EpisodeMatrixCell],
+        provider: str,
+    ) -> EpisodeMatrixSeason:
+        imdb_average = cls._average(cell.imdb_rating for cell in cells)
+        trakt_average = cls._average(cell.trakt_rating for cell in cells)
+        my_average = cls._average(cell.my_rating for cell in cells)
+        selected_average = trakt_average if provider == "trakt" else imdb_average
+        return EpisodeMatrixSeason(
+            season=season,
+            label=label,
+            avg_display=f"{selected_average:.1f}" if selected_average is not None else "?",
+            avg_rating=selected_average,
+            avg_color=rating_bucket_color(selected_average),
+            imdb_avg_display=f"{imdb_average:.1f}" if imdb_average is not None else "?",
+            imdb_avg_rating=imdb_average,
+            imdb_avg_color=rating_bucket_color(imdb_average),
+            trakt_avg_display=f"{trakt_average:.1f}" if trakt_average is not None else "?",
+            trakt_avg_rating=trakt_average,
+            trakt_avg_color=rating_bucket_color(trakt_average),
+            my_avg_display=f"{my_average:.1f}" if my_average is not None else "?",
+            my_avg_rating=my_average,
+            my_avg_color=rating_bucket_color(my_average),
+        )
+
+    @staticmethod
+    def _average(values) -> float | None:
+        present_values = [float(value) for value in values if value is not None]
+        return (sum(present_values) / len(present_values)) if present_values else None
 
     @staticmethod
     def _provider_subtitle(provider: str) -> str:

@@ -35,11 +35,32 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 class _FakeProgressService:
     def __init__(self, items: list[ProgressSnapshot]) -> None:
         self.items = items
+        self.dashboard_calls: list[dict] = []
+        self.sync_calls: list[dict] = []
 
-    def dashboard_progress(self, dropped_only: bool = False):
-        if dropped_only:
+    def dashboard_progress(
+        self,
+        *,
+        view="active",
+        sort_mode="episode_release",
+        descending=True,
+        dropped_only=None,
+    ):
+        view_value = getattr(view, "value", view)
+        if dropped_only is not None:
+            view_value = "dropped" if dropped_only else "active"
+        self.dashboard_calls.append(
+            {
+                "view": view_value,
+                "sort_mode": getattr(sort_mode, "value", sort_mode),
+                "descending": descending,
+            }
+        )
+        if view_value == "dropped":
             return [item for item in self.items if item.is_dropped]
-        return [item for item in self.items if not item.is_dropped]
+        if view_value == "paused":
+            return [item for item in self.items if item.is_paused and not item.is_dropped]
+        return [item for item in self.items if not item.is_paused and not item.is_dropped]
 
     def select_title_enrich_keys(self, items, *, trigger="viewport", requested_parts=(), refresh_requests=None):
         result = []
@@ -76,8 +97,38 @@ class _FakeProgressService:
                 result.append((int(item.trakt_id), int(item.next_episode.season), int(item.next_episode.number)))
         return result
 
-    def sync_progress(self, trakt_ids=None, dropped_only=False):
+    def sync_progress(
+        self,
+        trakt_ids=None,
+        *,
+        view="active",
+        sort_mode="episode_release",
+        descending=True,
+        dropped_only=None,
+        force_full_assets=False,
+    ):
+        self.sync_calls.append(
+            {
+                "trakt_ids": list(trakt_ids or []),
+                "view": getattr(view, "value", view),
+                "sort_mode": getattr(sort_mode, "value", sort_mode),
+                "descending": descending,
+                "force_full_assets": force_full_assets,
+            }
+        )
         return []
+
+
+class _FakeInteractionService:
+    def __init__(self) -> None:
+        self.pause_calls: list[dict] = []
+        self.drop_calls: list[dict] = []
+
+    def set_progress_paused(self, trakt_id: int, *, paused: bool, progress=None) -> None:
+        self.pause_calls.append({"trakt_id": trakt_id, "paused": paused, "progress": progress})
+
+    def set_progress_dropped(self, trakt_id: int, *, dropped: bool) -> None:
+        self.drop_calls.append({"trakt_id": trakt_id, "dropped": dropped})
 
 
 class _FakeEnrichQueueService:
@@ -139,7 +190,18 @@ class ProgressRouteTests(unittest.TestCase):
         static_dir = PROJECT_ROOT / "trakt_tracker" / "web" / "static"
         self.templates = Jinja2Templates(directory=str(templates_dir))
         self.templates.env.filters["dt"] = lambda value: value.isoformat() if value else ""
-        self.templates.env.filters["episode_label"] = lambda season, episode: f"S{int(season):02d}E{int(episode):02d}" if season is not None and episode is not None else ""
+        self.templates.env.filters["episode_label"] = lambda season, episode, imdb_season=None, imdb_episode=None: (
+            f"S{int(season):02d}E{int(episode):02d}"
+            + (
+                f" (S{int(imdb_season):02d}E{int(imdb_episode):02d})"
+                if imdb_season is not None
+                and imdb_episode is not None
+                and (int(imdb_season), int(imdb_episode)) != (int(season), int(episode))
+                else ""
+            )
+            if season is not None and episode is not None
+            else ""
+        )
         self.templates.env.filters["cached_image_url"] = lambda value: value or ""
         self.templates.env.filters["progress_effective_aired"] = progress_effective_aired
         self.templates.env.filters["progress_effective_percent"] = progress_effective_percent
@@ -164,6 +226,8 @@ class ProgressRouteTests(unittest.TestCase):
                     still_status="unknown",
                     trakt_details_status="unknown",
                     imdb_status="unknown",
+                    imdb_season=3,
+                    imdb_episode=1,
                 ),
                 poster_status="unknown",
                 title_ratings_status="unknown",
@@ -188,6 +252,7 @@ class ProgressRouteTests(unittest.TestCase):
             ),
         ]
         self.progress = _FakeProgressService(items)
+        self.interactions = _FakeInteractionService()
         self.queue = _FakeEnrichQueueService()
         self.unseen_episode_ids: set[int] = set()
         self.app.state.services = SimpleNamespace(
@@ -197,12 +262,15 @@ class ProgressRouteTests(unittest.TestCase):
             auth=SimpleNamespace(
                 config=SimpleNamespace(
                     hide_upcoming_in_progress=False,
+                    show_paused_in_progress=False,
                     show_dropped_in_progress=False,
+                    web_progress_sort_mode="episode_release",
+                    web_progress_sort_direction="desc",
                     web_progress_min_year=None,
                     web_progress_year_filter_enabled=False,
                 ),
             ),
-            interactions=SimpleNamespace(),
+            interactions=self.interactions,
             play=SimpleNamespace(),
             operations=SimpleNamespace(),
         )
@@ -237,7 +305,7 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.text
         self.assertIn("<title>Up next | Trakt Tracker Web</title>", html)
-        self.assertIn('href="/progress" class="active" aria-current="page">Up next', html)
+        self.assertIn('href="/progress" class="active" aria-current="page" data-notification-source="progress"', html)
         self.assertIn('<h3><a href="https://trakt.tv/shows/1" target="_blank" rel="noreferrer">Severance</a></h3>', html)
         self.assertIn('data-watch-panel-url="/search/show/1/watch-panel"', html)
         self.assertIn('data-watch-panel-url="/search/show/2/watch-panel"', html)
@@ -253,9 +321,140 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertIn("Episode Watch", html)
         self.assertIn("data-confirm-message=", html)
         self.assertIn("Remove from Up next?", html)
+        self.assertIn('action="/progress/1/pause-toggle"', html)
+        self.assertIn("more_options.svg", html)
+        self.assertIn("pause.svg", html)
+        self.assertLess(html.index("/progress/1/pause-toggle"), html.index("more_options.svg"))
+        self.assertLess(html.index("more_options.svg"), html.index("/progress/1/drop-toggle"))
+        self.assertIn('<option value="episode_release" selected>Episode release</option>', html)
+        self.assertIn("data-progress-sort-direction", html)
+        footer_start = html.index('<div class="progress-actions">')
+        footer_end = html.index("</div>", footer_start)
+        self.assertNotIn("/drop-toggle", html[footer_start:footer_end])
+        self.assertIn("S02E03 (S03E01)", html)
         self.assertNotIn("return confirm(", html)
         self.assertNotIn("scheduleWatchPanelRefreshIfPending", html)
         self.assertIn("refreshWatchPanel", watch_script)
+
+    def test_progress_filters_normalize_to_dropped_and_forward_sort_state(self) -> None:
+        self.progress.items = [
+            ProgressSnapshot(trakt_id=1, title="Active", completed=1, aired=2, percent_completed=50.0),
+            ProgressSnapshot(trakt_id=2, title="Paused", completed=1, aired=2, percent_completed=50.0, is_paused=True),
+            ProgressSnapshot(
+                trakt_id=3,
+                title="Dropped",
+                completed=1,
+                aired=2,
+                percent_completed=50.0,
+                is_dropped=True,
+                is_paused=True,
+            ),
+        ]
+        config = self.app.state.services.auth.config
+        config.show_paused_in_progress = False
+        config.show_dropped_in_progress = True
+        config.web_progress_sort_mode = "last_watched"
+        config.web_progress_sort_direction = "asc"
+
+        response = self.client.get(
+            "/progress?show_paused=1&show_dropped=1&sort=Last+watched&direction=asc"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Dropped", response.text)
+        self.assertNotIn(">Active<", response.text)
+        self.assertNotIn(">Paused<", response.text)
+        self.assertIn('data-show-paused="0"', response.text)
+        self.assertIn('data-show-dropped="1"', response.text)
+        self.assertIn('class="progress-card is-dropped"', response.text)
+        self.assertNotIn('class="progress-card is-paused"', response.text)
+        self.assertEqual(
+            self.progress.dashboard_calls[-1],
+            {"view": "dropped", "sort_mode": "last_watched", "descending": False},
+        )
+        self.assertNotIn("/pause-toggle", response.text)
+        self.assertIn('title="Undrop"', response.text)
+
+    def test_progress_paused_view_renders_resume_before_drop(self) -> None:
+        self.progress.items = [
+            ProgressSnapshot(
+                trakt_id=2,
+                title="Paused",
+                completed=1,
+                aired=2,
+                percent_completed=50.0,
+                is_paused=True,
+            ),
+        ]
+        self.app.state.services.auth.config.show_paused_in_progress = True
+
+        response = self.client.get("/progress?show_paused=1&show_dropped=0")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("resume.svg", response.text)
+        self.assertIn('title="Resume"', response.text)
+        self.assertIn('title="Drop"', response.text)
+
+    def test_progress_pause_toggle_calls_remote_first_interaction_and_preserves_state(self) -> None:
+        response = self.client.post(
+            "/progress/1/pause-toggle",
+            data={
+                "hide_upcoming": "1",
+                "show_paused": "0",
+                "show_dropped": "0",
+                "sort": "last_watched",
+                "direction": "asc",
+                "min_year": "2020",
+                "use_year_filter": "1",
+                "is_paused": "0",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(
+            self.interactions.pause_calls,
+            [{"trakt_id": 1, "paused": True, "progress": self.progress.items[0]}],
+        )
+        location = response.headers["location"]
+        self.assertIn("show_paused=0", location)
+        self.assertIn("sort=last_watched", location)
+        self.assertIn("direction=asc", location)
+        self.assertIn("min_year=2020", location)
+
+    def test_progress_resume_toggle_uses_paused_bucket(self) -> None:
+        self.progress.items[0].is_paused = True
+
+        response = self.client.post(
+            "/progress/1/pause-toggle",
+            data={
+                "show_paused": "1",
+                "show_dropped": "0",
+                "sort": "episode_release",
+                "direction": "desc",
+                "is_paused": "1",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(
+            self.interactions.pause_calls,
+            [{"trakt_id": 1, "paused": False, "progress": self.progress.items[0]}],
+        )
+        self.assertEqual(self.progress.dashboard_calls[-1]["view"], "paused")
+
+    def test_progress_new_items_remain_first_without_changing_bucket_order(self) -> None:
+        regular = self.progress.items[0]
+        new_item = self.progress.items[1]
+        self.progress.items = [regular, new_item]
+        self.unseen_episode_ids = {new_item.next_episode.trakt_id}
+
+        response = self.client.get("/progress")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(response.text.index("Andor"), response.text.index("Severance"))
+        self.assertIn("progress-new-badge", response.text)
 
     def test_progress_refresh_returns_only_requested_cards(self) -> None:
         response = self.client.post(

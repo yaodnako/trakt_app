@@ -39,12 +39,23 @@
     const DEBUG_MODE = runtimeBoolean("trakt-debug-mode");
     const NOTIFICATIONS_BROWSER_POLL_ENABLED = runtimeBoolean("trakt-notifications-browser-poll-enabled", true);
     const NOTIFICATION_SOUND_URL = runtimeValue("trakt-notification-sound-url");
+    const NOTIFICATION_SOURCE_PATHS = {
+        progress: "/progress",
+        release: "/release-tracking",
+    };
     const confirmOverlay = document.getElementById("trakt-confirm-overlay");
     const confirmTitle = document.getElementById("trakt-confirm-title");
     const confirmMessage = document.getElementById("trakt-confirm-message");
     const confirmAccept = confirmOverlay?.querySelector("[data-trakt-confirm-accept]");
     const PLAY_PROMPT_STORAGE_KEY = "trakt-progress-play-prompts";
     let lastDebugSeq = Number(runtimeValue("trakt-debug-initial-seq", "0")) || 0;
+    let lastNotificationActivitySeq = Number(runtimeValue("trakt-notification-activity-initial-seq", "0")) || 0;
+    let unreadNotificationSources = new Set(
+        runtimeValue("trakt-notification-pending-sources")
+            .split(",")
+            .filter((source) => Object.hasOwn(NOTIFICATION_SOURCE_PATHS, source))
+    );
+    const notificationPulseTimers = new Map();
     let audioContext = null;
     let audioUnlocked = false;
     let alertAudio = null;
@@ -65,6 +76,76 @@
     }
     window.pushFlashToast = pushFlashToast;
     window.traktDebugMode = DEBUG_MODE;
+
+    function syncNotificationNavState() {
+        for (const source of Object.keys(NOTIFICATION_SOURCE_PATHS)) {
+            const unread = unreadNotificationSources.has(source);
+            document.body.classList.toggle(`has-notification-${source}`, unread);
+            const link = document.querySelector(`.nav a[data-notification-source="${source}"]`);
+            if (!link) {
+                continue;
+            }
+            if (unread) {
+                link.setAttribute("data-notification-unread", "true");
+                link.setAttribute(
+                    "aria-label",
+                    `${link.dataset.notificationLabel || link.textContent.trim()}: notification waiting`
+                );
+            } else {
+                link.removeAttribute("data-notification-unread");
+                link.removeAttribute("aria-label");
+            }
+        }
+    }
+
+    function setPendingNotificationSources(sources) {
+        unreadNotificationSources = new Set(
+            sources.filter((source) => Object.hasOwn(NOTIFICATION_SOURCE_PATHS, source))
+        );
+        syncNotificationNavState();
+    }
+
+    function pulseNotificationSource(source) {
+        if (!Object.hasOwn(NOTIFICATION_SOURCE_PATHS, source)) {
+            return;
+        }
+        const className = `is-notifying-${source}`;
+        const existingTimer = notificationPulseTimers.get(source);
+        if (existingTimer) {
+            window.clearTimeout(existingTimer);
+        }
+        document.body.classList.remove(className);
+        void document.body.offsetWidth;
+        document.body.classList.add(className);
+        notificationPulseTimers.set(source, window.setTimeout(() => {
+            document.body.classList.remove(className);
+            notificationPulseTimers.delete(source);
+        }, 3600));
+    }
+
+    function handleNotificationSources(sources) {
+        for (const source of new Set(sources)) {
+            if (!Object.hasOwn(NOTIFICATION_SOURCE_PATHS, source)) {
+                continue;
+            }
+            pulseNotificationSource(source);
+            unreadNotificationSources.add(source);
+        }
+        syncNotificationNavState();
+    }
+
+    function handleNotificationActivity(items, activitySeq = null) {
+        const numericSeq = Number(activitySeq);
+        if (Number.isFinite(numericSeq) && numericSeq > 0) {
+            if (numericSeq <= lastNotificationActivitySeq) {
+                return;
+            }
+            lastNotificationActivitySeq = numericSeq;
+        }
+        handleNotificationSources(
+            items.map((item) => String(item && item.source ? item.source : "")).filter(Boolean)
+        );
+    }
 
     const dialogStack = [];
     const managedInertNodes = new Set();
@@ -398,7 +479,10 @@
         form.style.display = "none";
         [
             ["hide_upcoming", prompt.hideUpcoming || "0"],
+            ["show_paused", prompt.showPaused || "0"],
             ["show_dropped", prompt.showDropped || "0"],
+            ["sort", prompt.sort || "episode_release"],
+            ["direction", prompt.direction || "desc"],
             ["min_year", prompt.minYear || ""],
             ["use_year_filter", prompt.useYearFilter || "0"],
         ].forEach(([name, value]) => {
@@ -507,7 +591,10 @@
                     episode: link.dataset.playEpisode || "0",
                     episodeTitle: link.dataset.playEpisodeTitle || "",
                     hideUpcoming: link.dataset.playHideUpcoming || "0",
+                    showPaused: link.dataset.playShowPaused || "0",
                     showDropped: link.dataset.playShowDropped || "0",
+                    sort: link.dataset.playSort || "episode_release",
+                    direction: link.dataset.playDirection || "desc",
                     useYearFilter: link.dataset.playUseYearFilter || "0",
                     minYear: link.dataset.playMinYear || "",
                 });
@@ -536,6 +623,9 @@
     const titleMatrixBody = document.getElementById("title-matrix-overlay-body");
     const titleMatrixTitle = document.getElementById("title-matrix-title");
     const titleMatrixSubtitle = titleMatrixOverlay ? titleMatrixOverlay.querySelector(".title-matrix-subtitle") : null;
+    const titleMatrixTitleRatings = titleMatrixOverlay
+        ? titleMatrixOverlay.querySelector("[data-title-matrix-title-ratings]")
+        : null;
     const titleMatrixTooltip = document.getElementById("title-matrix-tooltip");
     const ratingOverlay = document.getElementById("trakt-rating-overlay");
     const ratingForm = document.getElementById("trakt-rating-form");
@@ -733,6 +823,9 @@
         if (!titleMatrixBody) {
             return;
         }
+        if (titleMatrixTitleRatings) {
+            titleMatrixTitleRatings.hidden = true;
+        }
         titleMatrixBody.innerHTML = `
             <div class="title-matrix-loading-shell">
                 <div class="title-matrix-loading-bar is-wide"></div>
@@ -746,6 +839,26 @@
                 </div>
             </div>
         `;
+    }
+
+    function syncTitleMatrixTitleRatings() {
+        if (!titleMatrixTitleRatings || !titleMatrixBody) {
+            return;
+        }
+        const data = titleMatrixBody.querySelector("[data-title-matrix-title-rating-data]");
+        if (!(data instanceof HTMLElement)) {
+            titleMatrixTitleRatings.hidden = true;
+            return;
+        }
+        const traktRating = titleMatrixTitleRatings.querySelector("[data-title-matrix-trakt-rating]");
+        const imdbRating = titleMatrixTitleRatings.querySelector("[data-title-matrix-imdb-rating]");
+        if (traktRating) {
+            traktRating.textContent = data.dataset.titleTraktRating || "Loading";
+        }
+        if (imdbRating) {
+            imdbRating.textContent = data.dataset.titleImdbRating || "Loading";
+        }
+        titleMatrixTitleRatings.hidden = false;
     }
 
     function closeTitleMatrixOverlay({restoreFocus = true} = {}) {
@@ -864,12 +977,15 @@
         if (!titleMatrixBody) {
             return {
                 hideSeasonZero: true,
+                imdbSeasons: true,
                 ratingMode: "imdb",
             };
         }
         const hideToggle = titleMatrixBody.querySelector("[data-hide-season-zero-toggle]");
+        const imdbSeasonsToggle = titleMatrixBody.querySelector("[data-imdb-seasons-toggle]");
         return {
             hideSeasonZero: hideToggle ? Boolean(hideToggle.checked) : true,
+            imdbSeasons: imdbSeasonsToggle ? Boolean(imdbSeasonsToggle.checked) : true,
             ratingMode: getSelectedTitleMatrixMode(null),
         };
     }
@@ -881,6 +997,10 @@
         const hideToggle = titleMatrixBody.querySelector("[data-hide-season-zero-toggle]");
         if (hideToggle) {
             hideToggle.checked = Boolean(state.hideSeasonZero);
+        }
+        const imdbSeasonsToggle = titleMatrixBody.querySelector("[data-imdb-seasons-toggle]");
+        if (imdbSeasonsToggle) {
+            imdbSeasonsToggle.checked = state.imdbSeasons !== false;
         }
     }
 
@@ -952,15 +1072,30 @@
             return;
         }
         const hideToggle = titleMatrixBody.querySelector("[data-hide-season-zero-toggle]");
+        const imdbSeasonsToggle = titleMatrixBody.querySelector("[data-imdb-seasons-toggle]");
+        applyImdbSeasonLayout(fragmentRoot, Boolean(imdbSeasonsToggle && imdbSeasonsToggle.checked));
         applySeasonZeroVisibility(fragmentRoot, Boolean(hideToggle && hideToggle.checked));
         applyTitleMatrixMode(fragmentRoot, getSelectedTitleMatrixMode(fragmentRoot));
+    }
+
+    function applyImdbSeasonLayout(fragmentRoot, useImdbSeasons) {
+        if (!fragmentRoot) {
+            return;
+        }
+        const selectedLayout = useImdbSeasons ? "imdb" : "trakt";
+        fragmentRoot.classList.toggle("is-imdb-seasons", Boolean(useImdbSeasons));
+        for (const panel of fragmentRoot.querySelectorAll("[data-matrix-layout-panel]")) {
+            panel.hidden = panel.getAttribute("data-matrix-layout-panel") !== selectedLayout;
+        }
+        applyTitleMatrixRowVisibility(fragmentRoot, fragmentRoot.classList.contains("is-hide-season-zero"));
+        syncTitleMatrixHorizontalScroll(fragmentRoot);
     }
 
     function syncTitleMatrixHorizontalScroll(fragmentRoot) {
         if (!fragmentRoot) {
             return;
         }
-        const wrap = fragmentRoot.querySelector(".title-matrix-grid-wrap");
+        const wrap = fragmentRoot.querySelector(".title-matrix-grid-wrap:not([hidden])");
         if (!wrap) {
             return;
         }
@@ -1005,8 +1140,10 @@
         const controlState = getTitleMatrixControlState();
         if (!forceRefresh && !refreshMissing && titleMatrixCache.has(cacheKey)) {
             titleMatrixBody.innerHTML = titleMatrixCache.get(cacheKey);
+            syncTitleMatrixTitleRatings();
             const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
             restoreTitleMatrixControlState(controlState);
+            applyImdbSeasonLayout(fragmentRoot, Boolean(controlState.imdbSeasons));
             applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
             applyTitleMatrixMode(fragmentRoot, normalizedProvider);
             if (refreshMissing && normalizedProvider === "trakt" && titleMatrixRefreshAttempts < 6) {
@@ -1042,11 +1179,13 @@
                     <button type="button" class="button ghost" data-title-matrix-retry>Retry</button>
                 </div>
             `;
+            syncTitleMatrixTitleRatings();
             if (response.ok && html) {
                 titleMatrixCache.set(cacheKey, html);
             }
             const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
             restoreTitleMatrixControlState(controlState);
+            applyImdbSeasonLayout(fragmentRoot, Boolean(controlState.imdbSeasons));
             applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
             applyTitleMatrixMode(fragmentRoot, normalizedProvider);
         } catch (error) {
@@ -1059,6 +1198,7 @@
                     <button type="button" class="button ghost" data-title-matrix-retry>Retry</button>
                 </div>
             `;
+            syncTitleMatrixTitleRatings();
         } finally {
             titleMatrixRequest = null;
         }
@@ -1094,6 +1234,7 @@
             if (!items.length) {
                 return;
             }
+            handleNotificationActivity(items, payload.activity_seq);
             window.dispatchEvent(new CustomEvent("trakt-notifications-received", {detail: {items}}));
             playAlertTone();
             showInPageNotifications(items);
@@ -1106,6 +1247,35 @@
                 const body = item.message || "";
                 new Notification(title, {body});
             }
+        } catch (_error) {
+        }
+    }
+
+    async function pollNotificationActivity() {
+        if (document.visibilityState === "hidden") {
+            return;
+        }
+        try {
+            const response = await fetch(`/notifications/activity?after=${lastNotificationActivitySeq}`, {
+                headers: {"Accept": "application/json"},
+                cache: "no-store",
+            });
+            if (!response.ok) {
+                return;
+            }
+            const payload = await response.json();
+            const events = Array.isArray(payload.events) ? payload.events : [];
+            for (const event of events) {
+                const seq = Number(event && event.seq);
+                if (!Number.isFinite(seq) || seq <= lastNotificationActivitySeq) {
+                    continue;
+                }
+                lastNotificationActivitySeq = seq;
+                handleNotificationSources(Array.isArray(event.sources) ? event.sources : []);
+            }
+            setPendingNotificationSources(
+                Array.isArray(payload.pending_sources) ? payload.pending_sources : []
+            );
         } catch (_error) {
         }
     }
@@ -1221,6 +1391,7 @@
                 titleMatrixBody.innerHTML = titleMatrixCache.get(cacheKey);
                 const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
                 restoreTitleMatrixControlState(controlState);
+                applyImdbSeasonLayout(fragmentRoot, Boolean(controlState.imdbSeasons));
                 applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
                 applyTitleMatrixMode(fragmentRoot, provider);
             } else {
@@ -1237,7 +1408,7 @@
         }
     });
     document.addEventListener("change", (event) => {
-        const toggle = event.target.closest("[data-hide-season-zero-toggle]");
+        const toggle = event.target.closest("[data-hide-season-zero-toggle], [data-imdb-seasons-toggle]");
         if (!toggle || !titleMatrixBody) {
             return;
         }
@@ -1296,11 +1467,23 @@
     setupFlashToast();
     bindPlayPromptLinks();
     renderPlayPrompts();
+    syncNotificationNavState();
+    const topbar = document.querySelector(".topbar");
+    if (topbar) {
+        new MutationObserver(() => syncNotificationNavState()).observe(topbar, {childList: true, subtree: true});
+    }
     document.querySelectorAll("[data-rating-autopen]").forEach((node) => openRatingModalFromTrigger(node));
     if (NOTIFICATIONS_BROWSER_POLL_ENABLED) {
         pollNotifications();
         setInterval(pollNotifications, 60000);
     }
+    pollNotificationActivity();
+    setInterval(pollNotificationActivity, 5000);
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+            pollNotificationActivity();
+        }
+    });
     pollDebugEvents();
     setInterval(pollDebugEvents, 2500);
 })();

@@ -129,6 +129,19 @@ class TraktClient:
     def search_titles(self, query: str, title_type: str | None = None) -> list[TitleSummary]:
         return self.get_search_titles_page(query, title_type, page=1, limit=100).items
 
+    def get_title_translations(self, trakt_id: int, title_type: str, language: str) -> list[dict[str, Any]]:
+        collection = {"movie": "movies", "show": "shows"}.get(title_type)
+        if collection is None:
+            raise ValueError(f"Unsupported title type: {title_type}")
+        data = self._request(
+            "GET",
+            f"/{collection}/{int(trakt_id)}/translations/{language.strip().casefold()}",
+            use_cache=False,
+        )
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
     def get_search_titles_page(
         self,
         query: str,
@@ -475,8 +488,47 @@ class TraktClient:
         except ValueError:
             return None
 
+    def get_paused_shows(self, limit: int = 100, page: int = 1) -> list[dict[str, Any]]:
+        return self._request(
+            "GET",
+            "/users/hidden/progress_watched",
+            params={"type": "show", "limit": limit, "page": page},
+            use_cache=False,
+        )
+
     def get_dropped_shows(self, limit: int = 100, page: int = 1) -> list[dict[str, Any]]:
-        return self._request("GET", "/users/hidden/dropped", params={"limit": limit, "page": page})
+        return self._request(
+            "GET",
+            "/users/hidden/dropped",
+            params={"type": "show", "limit": limit, "page": page},
+            use_cache=False,
+        )
+
+    def add_paused_show(self, trakt_id: int) -> dict[str, Any]:
+        return self._add_hidden_show("progress_watched", trakt_id)
+
+    def remove_paused_show(self, trakt_id: int) -> dict[str, Any]:
+        return self._remove_hidden_show("progress_watched", trakt_id)
+
+    def add_dropped_show(self, trakt_id: int) -> dict[str, Any]:
+        return self._add_hidden_show("dropped", trakt_id)
+
+    def remove_dropped_show(self, trakt_id: int) -> dict[str, Any]:
+        return self._remove_hidden_show("dropped", trakt_id)
+
+    def _add_hidden_show(self, section: str, trakt_id: int) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/users/hidden/{section}",
+            json={"shows": [{"ids": {"trakt": int(trakt_id)}}]},
+        )
+
+    def _remove_hidden_show(self, section: str, trakt_id: int) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/users/hidden/{section}/remove",
+            json={"shows": [{"ids": {"trakt": int(trakt_id)}}]},
+        )
 
     def get_last_activities(self, *, use_cache: bool = True) -> dict[str, Any]:
         payload = self._request("GET", "/sync/last_activities", use_cache=use_cache)

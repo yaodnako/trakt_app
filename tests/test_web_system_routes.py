@@ -47,7 +47,15 @@ class WebSystemRouteTests(unittest.TestCase):
                 is_configured=lambda: True,
             ),
             sync=SimpleNamespace(imdb_dataset_status=lambda: "ready", sync_assets_repair=lambda: None),
-            notifications=SimpleNamespace(poll_upcoming=lambda send_native=False: []),
+            notifications=SimpleNamespace(
+                poll_upcoming=lambda send_native=False: [],
+                record_activity=lambda items: 7,
+                activity_after=lambda after=0: (
+                    [{"seq": 7, "sources": ["progress"]}] if after < 7 else []
+                ),
+                current_activity_seq=lambda: 7,
+                pending_sources=lambda: ["progress"],
+            ),
             operations=SimpleNamespace(list_after=lambda after=0: []),
             enrich_queue=SimpleNamespace(is_running=lambda: False),
         )
@@ -86,6 +94,44 @@ class WebSystemRouteTests(unittest.TestCase):
         self.assertEqual(response.headers["content-type"], "image/gif")
         self.assertEqual(response.headers["x-trakt-image-pending"], "1")
         self.assertEqual(self.image_jobs, [(target_url, 1)])
+
+    def test_notification_activity_exposes_only_new_local_delivery_events(self) -> None:
+        response = self.client.get("/notifications/activity", params={"after": 6})
+
+        self.assertEqual(
+            response.json(),
+            {
+                "events": [{"seq": 7, "sources": ["progress"]}],
+                "seq": 7,
+                "pending_sources": ["progress"],
+            },
+        )
+
+    def test_browser_notification_poll_returns_recorded_activity_sequence(self) -> None:
+        self.app.state.services.notifications.poll_upcoming = lambda send_native=False: [
+            {"show_title": "Show", "message": "S01E02", "source": "progress"}
+        ]
+
+        response = self.client.get("/notifications/poll")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["activity_seq"], 7)
+        self.assertEqual(response.json()["items"][0]["source"], "progress")
+
+    def test_notification_nav_state_is_not_cleared_by_navigation(self) -> None:
+        script = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "ui_core.js").read_text(
+            encoding="utf-8"
+        )
+        styles = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "style.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('runtimeValue("trakt-notification-pending-sources")', script)
+        self.assertIn("setPendingNotificationSources", script)
+        self.assertNotIn("clearCurrentNotificationSource", script)
+        self.assertNotIn("trakt-notification-nav-unread-v1", script)
+        self.assertIn("notification-badge-heartbeat", styles)
+        self.assertIn("notification-badge-ripple", styles)
 
     def test_cached_image_rejects_arbitrary_and_private_urls_before_fetch(self) -> None:
         arbitrary = self.client.get("/cached-image", params={"url": "https://example.com/image.jpg"})

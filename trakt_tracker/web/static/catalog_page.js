@@ -125,6 +125,7 @@
         if (watchTitle) {
             watchTitle.textContent = trigger.dataset.title || "Episodes";
         }
+        window.traktShowWatchPanel?.configureTitleRatings(watchOverlay, null);
         window.traktShowWatchPanel?.configurePlayAction(watchOverlay, trigger);
         openOverlay(watchOverlay);
         await loadWatchPanel("", {focusDefault: trigger.dataset.unwatchFocus !== "true"});

@@ -37,7 +37,10 @@ class AppConfig:
     kinopoisk_domain_options: str = "net,ru"
     open_in_embedded_player: bool = False
     hide_upcoming_in_progress: bool = False
+    show_paused_in_progress: bool = False
     show_dropped_in_progress: bool = False
+    web_progress_sort_mode: str = "episode_release"
+    web_progress_sort_direction: str = "desc"
     web_progress_min_year: int | None = None
     web_progress_year_filter_enabled: bool = False
     omdb_api_key: str = ""

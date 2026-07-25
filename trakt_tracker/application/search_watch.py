@@ -18,6 +18,8 @@ class SearchWatchEpisode:
     trakt_votes: int | None = None
     imdb_rating: float | None = None
     imdb_votes: int | None = None
+    imdb_season: int | None = None
+    imdb_episode: int | None = None
     first_aired: datetime | None = None
     is_released: bool = True
     is_watched: bool = False
@@ -46,6 +48,11 @@ class SearchShowWatchPanel:
     title: str
     poster_url: str = ""
     slug: str = ""
+    title_trakt_rating: float | None = None
+    title_trakt_votes: int | None = None
+    title_imdb_rating: float | None = None
+    title_imdb_votes: int | None = None
+    title_ratings_status: str = "unknown"
     seasons: list[SearchWatchSeason] = field(default_factory=list)
     default_episode_key: tuple[int, int] | None = None
 
@@ -110,6 +117,11 @@ class SearchWatchService:
             title=(title_row.title if title_row is not None and title_row.title else f"Show {trakt_id}"),
             poster_url=(title_row.poster_url if title_row is not None else ""),
             slug=(title_row.slug if title_row is not None else ""),
+            title_trakt_rating=(title_row.trakt_rating if title_row is not None else None),
+            title_trakt_votes=(title_row.trakt_votes if title_row is not None else None),
+            title_imdb_rating=(title_row.imdb_rating if title_row is not None else None),
+            title_imdb_votes=(title_row.imdb_votes if title_row is not None else None),
+            title_ratings_status=(title_row.ratings_status if title_row is not None else "unknown"),
             seasons=seasons,
             default_episode_key=default_episode_key,
         )
@@ -120,6 +132,8 @@ class SearchWatchService:
         episodes = client.get_show_episodes(trakt_id)
         with self._db.session() as session:
             self._episode_repo.replace_show_episodes(session, trakt_id, episodes)
+        if self._episode_metadata is not None:
+            self._episode_metadata.repair_episode_imdb_ratings(trakt_id)
         return bool(episodes)
 
     def enrich_missing_stills(self, trakt_id: int, season: int) -> bool:
@@ -285,6 +299,8 @@ class SearchWatchService:
             trakt_votes=row.get("trakt_votes"),
             imdb_rating=row.get("imdb_rating"),
             imdb_votes=row.get("imdb_votes"),
+            imdb_season=row.get("imdb_season"),
+            imdb_episode=row.get("imdb_episode"),
             first_aired=row.get("first_aired"),
             is_released=cls._is_released(row.get("first_aired")),
             is_watched=(season, number) in watched_keys,

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from trakt_tracker.config import AppConfig, ConfigStore
 from trakt_tracker.profiles import mark_setup_complete, read_setup_state
 from trakt_tracker.web.app import create_app
-from trakt_tracker.web_tray import TrayNotificationPoller
+from trakt_tracker.web_tray import TrayNotificationPoller, WebPortalTrayWindow
 
 
 def _app(tmp_path: Path):
@@ -225,3 +225,46 @@ def test_tray_poller_refreshes_profile_before_polling() -> None:
     poller._run()
 
     assert calls == ["refresh", "authorized"]
+
+
+def test_tray_poller_emits_notification_before_progress_sync() -> None:
+    calls: list[str] = []
+    items = [{"show_title": "Show", "message": "S01E02", "source": "progress"}]
+    services = SimpleNamespace(
+        auth=SimpleNamespace(is_authorized=lambda: calls.append("authorized") or True),
+        notifications=SimpleNamespace(
+            poll_upcoming=lambda send_native=True: calls.append("poll") or items
+        ),
+        progress=SimpleNamespace(
+            sync_progress=lambda dropped_only=False: calls.append("progress")
+        ),
+    )
+    runtime = SimpleNamespace(
+        active_slug="alpha",
+        services=services,
+        refresh_active_profile=lambda: calls.append("refresh") or False,
+    )
+    poller = TrayNotificationPoller(runtime)
+    poller.notificationsReceived.connect(lambda delivered: calls.append("emit"))
+
+    poller._run()
+
+    assert calls == ["refresh", "authorized", "poll", "emit", "progress"]
+
+
+def test_tray_notification_activity_is_recorded_before_sound() -> None:
+    calls: list[object] = []
+    items = [{"show_title": "Show", "message": "S01E02", "source": "progress"}]
+    window = SimpleNamespace(
+        _append_log=lambda message: calls.append(message),
+        _runtime=SimpleNamespace(
+            services=SimpleNamespace(
+                notifications=SimpleNamespace(record_activity=lambda delivered: calls.append(delivered))
+            )
+        ),
+        _play_notification_sound=lambda: calls.append("sound"),
+    )
+
+    WebPortalTrayWindow._on_notifications_received(window, items)
+
+    assert calls == ["notifications received: 1", items, "sound"]

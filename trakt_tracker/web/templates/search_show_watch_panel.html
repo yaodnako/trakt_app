@@ -7,6 +7,8 @@
     data-search-watch-watched-count="{{ panel.watched_count }}"
     data-search-watch-released-count="{{ panel.released_count }}"
     data-search-watch-released-watched-count="{{ panel.released_watched_count }}"
+    data-search-watch-trakt-rating="{% if panel.title_trakt_rating is not none %}{{ panel.title_trakt_rating|rating_with_votes(panel.title_trakt_votes) }}{% elif panel.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"
+    data-search-watch-imdb-rating="{% if panel.title_imdb_rating is not none %}{{ panel.title_imdb_rating|rating_with_votes(panel.title_imdb_votes) }}{% elif panel.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"
     {% if panel.default_episode_key %}data-default-episode-key="{{ panel.default_episode_key[0] }}-{{ panel.default_episode_key[1] }}"{% endif %}
 >
     <div class="search-watch-seasons" role="tablist" aria-label="Seasons">
@@ -113,7 +115,7 @@
                     </svg>
                 </span>
                 {% endif %}
-                <span class="search-watch-episode-label">S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}</span>
+                <span class="search-watch-episode-label">S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}{% if episode.imdb_season is not none and episode.imdb_episode is not none and (episode.imdb_season != episode.season or episode.imdb_episode != episode.number) %} (S{{ "%02d"|format(episode.imdb_season) }}E{{ "%02d"|format(episode.imdb_episode) }}){% endif %}</span>
                 </a>
                 {% if episode.is_watched %}
                 <button

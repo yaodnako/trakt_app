@@ -202,7 +202,7 @@ class HistorySyncWorkflow:
             self.refresh_show(trakt_id)
         self._run_sync_event_refreshes(title_sync_targets, episode_sync_targets)
         self._episode_metadata.backfill_episode_imdb_ids_from_payloads(history_items + rating_items)
-        self._episode_metadata.enrich_episode_imdb_ratings()
+        self._episode_metadata.repair_episode_imdb_ratings()
         return True
 
     def refresh_show(self, trakt_id: int):
@@ -222,6 +222,7 @@ class HistorySyncWorkflow:
                 trigger=TRIGGER_SYNC_EVENT,
                 requested_parts=(ASSET_KIND_POSTER,),
             )
+        self._episode_metadata.repair_episode_imdb_ratings(trakt_id)
         if progress.next_episode is not None:
             self._episode_metadata.enrich_episode_key(
                 trakt_id,
@@ -301,7 +302,7 @@ class HistorySyncWorkflow:
         if run_enrichment:
             self._run_sync_event_refreshes(title_sync_targets, episode_sync_targets)
             self._episode_metadata.backfill_episode_imdb_ids_from_payloads(history_items + ratings)
-            self._episode_metadata.enrich_episode_imdb_ratings()
+            self._episode_metadata.repair_episode_imdb_ratings()
         return removed_count
 
     @staticmethod
@@ -490,7 +491,17 @@ class HistorySyncWorkflow:
         watched_at_known = bool(watched_at_raw)
         watched_at = datetime.fromisoformat(watched_at_raw.replace("Z", "+00:00")) if watched_at_raw else datetime(1970, 1, 1, tzinfo=UTC)
         if watched_at_known:
-            state.last_watched_at = watched_at
+            current_last_watched_at = state.last_watched_at
+            current_utc = (
+                current_last_watched_at.replace(tzinfo=UTC)
+                if current_last_watched_at is not None and current_last_watched_at.tzinfo is None
+                else current_last_watched_at.astimezone(UTC)
+                if current_last_watched_at is not None
+                else None
+            )
+            watched_at_utc = watched_at.replace(tzinfo=UTC) if watched_at.tzinfo is None else watched_at.astimezone(UTC)
+            if current_utc is None or watched_at_utc > current_utc:
+                state.last_watched_at = watched_at
         self._history.add_event(
             session,
             trakt_history_id=item.get("id"),

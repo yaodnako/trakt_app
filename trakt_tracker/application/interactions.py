@@ -101,3 +101,21 @@ class InteractionService:
             self._progress.drop_show(trakt_id)
         else:
             self._progress.undrop_show(trakt_id)
+        refresh_pending = getattr(self._notifications, "refresh_pending_sources", None)
+        if callable(refresh_pending):
+            refresh_pending()
+
+    def set_progress_paused(
+        self,
+        trakt_id: int,
+        *,
+        paused: bool,
+        progress: ProgressSnapshot | None = None,
+    ) -> None:
+        if paused:
+            self._progress.pause_show(trakt_id, progress=progress)
+        else:
+            self._progress.resume_show(trakt_id)
+        refresh_pending = getattr(self._notifications, "refresh_pending_sources", None)
+        if callable(refresh_pending):
+            refresh_pending()

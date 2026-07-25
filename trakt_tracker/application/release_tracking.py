@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from threading import Lock
 import time
+from typing import Callable
 
 from trakt_tracker.application.enrich_state import ENRICH_STATUS_UNKNOWN
-from trakt_tracker.domain import TitleSummary, TitleType
+from trakt_tracker.domain import ProgressView, TitleSummary, TitleType
 from trakt_tracker.infrastructure.notifications import NotificationMessage
 
 
@@ -20,6 +21,14 @@ class ReleaseTrackingService:
         self._titles = titles
         self._list_count_refresh_lock = Lock()
         self._list_count_refreshed_at = 0.0
+        self._notification_state_callback: Callable[[], None] | None = None
+
+    def set_notification_state_callback(self, callback: Callable[[], None]) -> None:
+        self._notification_state_callback = callback
+
+    def _notify_notification_state_changed(self) -> None:
+        if self._notification_state_callback is not None:
+            self._notification_state_callback()
 
     def refresh(self) -> list:
         items = self._auth.get_client().get_release_tracking()
@@ -130,11 +139,14 @@ class ReleaseTrackingService:
             self.refresh()
             with self._db.session() as session:
                 self._repository.set_list_count(session, title_type, trakt_id, list_count)
+        self._notify_notification_state_changed()
         return tracked
 
     def set_acknowledged(self, title_type: str, trakt_id: int, *, acknowledged: bool) -> bool:
         with self._db.session() as session:
-            return self._repository.set_acknowledged(session, title_type, trakt_id, acknowledged)
+            result = self._repository.set_acknowledged(session, title_type, trakt_id, acknowledged)
+        self._notify_notification_state_changed()
+        return result
 
     def poll(self, *, send_native: bool = True) -> list[dict]:
         config = self._config_store.load()
@@ -163,12 +175,29 @@ class ReleaseTrackingService:
                 if send_native:
                     self._sender.send(NotificationMessage(title=row.title, body=body))
                 self._repository.mark_sent(session, row.title_type, int(row.trakt_id))
-                sent.append({"show_title": row.title, "message": body})
+                sent.append({"show_title": row.title, "message": body, "source": "release"})
         return sent
 
     def released_count(self) -> int:
         with self._db.session() as session:
             return self._repository.released_count(session)
+
+    def has_due_unacknowledged_release(self) -> bool:
+        now = datetime.now(tz=UTC)
+        config = self._config_store.load()
+        with self._db.session() as session:
+            for row in self._repository.list_all(session):
+                release_at = self._as_utc(row.release_at)
+                if release_at is None or row.acknowledged_at is not None:
+                    continue
+                delay_minutes = (
+                    int(getattr(config, "movie_release_notification_delay_minutes", 10080) or 0)
+                    if row.title_type == "movie"
+                    else int(getattr(config, "notification_release_delay_minutes", 120) or 0)
+                )
+                if now >= release_at + timedelta(minutes=max(0, delay_minutes)):
+                    return True
+            return False
 
     def progress_waiting_count(self) -> int:
         now = datetime.now(tz=UTC)
@@ -176,7 +205,7 @@ class ReleaseTrackingService:
         with self._db.session() as session:
             items = self._progress_repository.list_in_progress(
                 session,
-                dropped_only=bool(getattr(config, "show_dropped_in_progress", False)),
+                view=ProgressView.ACTIVE,
             )
             if bool(getattr(config, "hide_upcoming_in_progress", False)):
                 items = [

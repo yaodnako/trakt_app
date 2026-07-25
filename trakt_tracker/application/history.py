@@ -536,6 +536,8 @@ class HistoryService:
         offset: int = 0,
         title_filter: str | None = None,
         rated_only: bool = False,
+        sort_by: str = "last_watched",
+        sort_direction: str = "desc",
     ) -> list[dict]:
         return self._history_read_model.history_title_summaries(
             title_type=title_type,
@@ -543,6 +545,8 @@ class HistoryService:
             offset=offset,
             title_filter=title_filter,
             rated_only=rated_only,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
         )
 
     def history_titles(self, title_type: str | None = None) -> list[str]:

@@ -633,11 +633,12 @@ def register_system_routes(app, *, render, template_filters) -> None:
         services: ServiceContainer = request.app.state.services
         bg_tasks = request.app.state.bg_tasks
         if not services.auth.is_authorized():
-            return JSONResponse({"items": []})
+            return JSONResponse({"items": [], "activity_seq": None})
         try:
             items = services.notifications.poll_upcoming(send_native=False)
         except Exception:
             items = []
+        activity_seq = services.notifications.record_activity(items) if items else None
         if items:
             bg_tasks.start(
                 "progress_sync",
@@ -645,7 +646,26 @@ def register_system_routes(app, *, render, template_filters) -> None:
                 operations=services.operations,
                 fn=lambda: services.progress.sync_progress(dropped_only=False),
             )
-        return JSONResponse({"items": items})
+        return JSONResponse({"items": items, "activity_seq": activity_seq})
+
+    @app.get("/notifications/activity")
+    async def notification_activity(request: Request, after: int = 0) -> JSONResponse:
+        services: ServiceContainer = request.app.state.services
+        if not services.auth.is_authorized():
+            return JSONResponse(
+                {
+                    "events": [],
+                    "seq": services.notifications.current_activity_seq(),
+                    "pending_sources": [],
+                }
+            )
+        return JSONResponse(
+            {
+                "events": services.notifications.activity_after(after),
+                "seq": services.notifications.current_activity_seq(),
+                "pending_sources": services.notifications.pending_sources(),
+            }
+        )
 
     @app.get("/debug/events")
     async def debug_events(request: Request, after: int = 0) -> JSONResponse:

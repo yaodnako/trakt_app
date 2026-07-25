@@ -16,10 +16,10 @@
 {% else %}
 <section class="empty-state panel" data-progress-empty-state>
     <h3>No progress cards</h3>
-    {% if hide_upcoming or show_dropped or use_year_filter %}
+    {% if hide_upcoming or show_paused or show_dropped or use_year_filter %}
     <p>Current filters hide all cards.</p>
     <div class="chip-row">
-        <a class="button ghost" href="/progress?hide_upcoming=0&show_dropped=0&use_year_filter=0">Clear filters</a>
+        <a class="button ghost" href="/progress?hide_upcoming=0&show_paused=0&show_dropped=0&use_year_filter=0&sort={{ sort_mode }}&direction={{ sort_direction }}">Clear filters</a>
     </div>
     {% else %}
     <p>Try syncing from Settings or toggling the current filters.</p>

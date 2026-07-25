@@ -174,7 +174,26 @@
         target?.focus?.({preventScroll: true});
     }
 
+    function configureTitleRatings(overlay, body) {
+        const action = overlay?.querySelector?.("[data-search-watch-title-ratings]");
+        if (!(action instanceof HTMLButtonElement)) return;
+        const panel = body?.querySelector?.("[data-search-watch-panel]");
+        const traktId = Number(panel?.dataset.searchWatchTraktId || "0");
+        const title = panel?.dataset.searchWatchTitle || "";
+        action.hidden = !traktId;
+        if (!traktId) return;
+        action.dataset.titleMatrixTitle = title;
+        action.dataset.titleMatrixTraktId = String(traktId);
+        action.dataset.titleMatrixUrl = `/titles/show/${traktId}/episode-ratings-matrix`;
+        action.setAttribute("aria-label", `Open episode ratings matrix for ${title || "this series"}`);
+        const traktRating = action.querySelector("[data-search-watch-trakt-rating]");
+        const imdbRating = action.querySelector("[data-search-watch-imdb-rating]");
+        if (traktRating) traktRating.textContent = panel.dataset.searchWatchTraktRating || "Loading";
+        if (imdbRating) imdbRating.textContent = panel.dataset.searchWatchImdbRating || "Loading";
+    }
+
     function configureScopeActions(overlay, trigger, body) {
+        configureTitleRatings(overlay, body);
         const panel = body?.querySelector?.("[data-search-watch-panel]");
         const traktId = Number(panel?.dataset.searchWatchTraktId || trigger?.dataset?.traktId || "0");
         const title = panel?.dataset.searchWatchTitle || trigger?.dataset?.title || "";
@@ -189,6 +208,7 @@
             action.dataset.title = title;
         });
         if (mark instanceof HTMLButtonElement) {
+            mark.dataset.removeFromWatchlist = trigger?.dataset?.removeFromWatchlist || "false";
             mark.hidden = !traktId || releasedCount <= releasedWatchedCount;
             mark.title = `Mark all released episodes of ${title || "this series"} watched`;
             mark.setAttribute("aria-label", mark.title);
@@ -240,6 +260,7 @@
         captureState,
         configurePlayAction,
         configureScopeActions,
+        configureTitleRatings,
         focusDefaultEpisode,
         focusUnwatchScope,
         patchArtwork,

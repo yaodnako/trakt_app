@@ -6,6 +6,10 @@
     <div class="progress-toolbar history-toolbar">
         <form method="get" action="/history" class="history-filter-form">
             <input type="hidden" name="view" value="{{ history_view }}">
+            {% if history_view != 'titles' %}
+            <input type="hidden" name="sort" value="{{ history_sort }}">
+            {% endif %}
+            <input type="hidden" name="sort_dir" value="{{ history_sort_direction }}">
             <select name="type" class="history-type-select" aria-label="History type">
                 <option value="all" {% if history_type == 'all' %}selected{% endif %}>All</option>
                 <option value="movie" {% if history_type == 'movie' %}selected{% endif %}>Movies</option>
@@ -21,10 +25,24 @@
                 <input type="checkbox" name="rated_only" value="1" {% if history_rated_only %}checked{% endif %}>
                 Rated ★
             </label>
+            {% if history_view == 'titles' %}
+            <select name="sort" aria-label="Sort watched titles">
+                <option value="rating" {% if history_sort == 'rating' %}selected{% endif %}>Average rating</option>
+                <option value="last_watched" {% if history_sort == 'last_watched' %}selected{% endif %}>Last watched</option>
+                <option value="release_year" {% if history_sort == 'release_year' %}selected{% endif %}>Release year</option>
+            </select>
+            <button
+                type="button"
+                class="button ghost"
+                data-history-sort-direction
+                aria-label="Sort {{ 'descending' if history_sort_direction == 'desc' else 'ascending' }}; activate to reverse"
+                title="Reverse sort direction"
+            >{{ '↓' if history_sort_direction == 'desc' else '↑' }}</button>
+            {% endif %}
         </form>
         <a
             class="button ghost history-view-toggle"
-            href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page=1&view={{ 'episodes' if history_view == 'titles' else 'titles' }}"
+            href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page=1&view={{ 'episodes' if history_view == 'titles' else 'titles' }}&sort={{ history_sort }}&sort_dir={{ history_sort_direction }}"
         >
             {{ 'View by episodes' if history_view == 'titles' else 'View by titles' }}
         </a>
@@ -51,6 +69,8 @@
     data-history-rated-only="{{ '1' if history_rated_only else '0' }}"
     data-history-page="{{ page }}"
     data-history-view="{{ history_view }}"
+    data-history-sort="{{ history_sort }}"
+    data-history-sort-direction="{{ history_sort_direction }}"
     data-history-sync-running="{{ '1' if history_sync_running else '0' }}"
 >
     {% if history_view == 'titles' and history_title_cards %}
@@ -62,10 +82,10 @@
 
     <nav class="pager history-pager history-pager-bottom" aria-label="History pages">
         {% if page > 1 %}
-        <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page - 1 }}&view={{ history_view }}">Previous</a>
+        <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page - 1 }}&view={{ history_view }}&sort={{ history_sort }}&sort_dir={{ history_sort_direction }}">Previous</a>
         {% endif %}
         {% if has_next %}
-        <a class="button" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page + 1 }}&view={{ history_view }}">Next</a>
+        <a class="button" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page + 1 }}&view={{ history_view }}&sort={{ history_sort }}&sort_dir={{ history_sort_direction }}">Next</a>
         {% endif %}
     </nav>
     {% elif history_view != 'titles' and history_days %}
@@ -87,10 +107,10 @@
 
     <nav class="pager history-pager history-pager-bottom" aria-label="History pages">
         {% if page > 1 %}
-        <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page - 1 }}&view={{ history_view }}">Previous</a>
+        <a class="button ghost" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page - 1 }}&view={{ history_view }}&sort={{ history_sort }}&sort_dir={{ history_sort_direction }}">Previous</a>
         {% endif %}
         {% if has_next %}
-        <a class="button" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page + 1 }}&view={{ history_view }}">Next</a>
+        <a class="button" href="/history?type={{ history_type }}&title={{ history_title_filter|urlencode }}&rated_only={{ '1' if history_rated_only else '0' }}&page={{ page + 1 }}&view={{ history_view }}&sort={{ history_sort }}&sort_dir={{ history_sort_direction }}">Next</a>
         {% endif %}
     </nav>
     {% else %}
@@ -98,7 +118,7 @@
         {% if history_type != 'all' or history_title_filter or history_rated_only %}
         <h3>No matches</h3>
         <p>No history entries match the selected filters.</p>
-        <a class="button ghost" href="/history?view={{ history_view }}">Clear filters</a>
+        <a class="button ghost" href="/history?view={{ history_view }}&sort={{ history_sort }}&sort_dir={{ history_sort_direction }}">Clear filters</a>
         {% else %}
         <h3>No history yet</h3>
         <p>Update Trakt data from Settings to import watched titles.</p>

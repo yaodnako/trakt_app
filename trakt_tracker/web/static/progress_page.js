@@ -23,18 +23,170 @@
         if (toggle instanceof HTMLInputElement) {
             const params = new URLSearchParams({
                 hide_upcoming: root.dataset.hideUpcoming || "0",
+                show_paused: root.dataset.showPaused || "0",
                 show_dropped: root.dataset.showDropped || "0",
+                sort: root.dataset.sort || "episode_release",
+                direction: root.dataset.direction || "desc",
                 use_year_filter: root.dataset.useYearFilter || "0",
                 min_year: root.dataset.minYear || "",
             });
-            params.set(toggle.dataset.progressToggle || "", toggle.checked ? "1" : "0");
+            const toggleName = toggle.dataset.progressToggle || "";
+            params.set(toggleName, toggle.checked ? "1" : "0");
+            if (toggle.checked && toggleName === "show_paused") {
+                params.set("show_dropped", "0");
+            } else if (toggle.checked && toggleName === "show_dropped") {
+                params.set("show_paused", "0");
+            }
             window.location.assign(`/progress?${params.toString()}`);
+            return;
+        }
+        const sortSelect = event.target.closest("[data-progress-sort-select]");
+        if (sortSelect instanceof HTMLSelectElement && sortSelect.form) {
+            sortSelect.form.requestSubmit();
             return;
         }
         const yearToggle = event.target.closest("[data-progress-year-toggle]");
         if (yearToggle instanceof HTMLInputElement && yearToggle.form) {
             yearToggle.form.elements.use_year_filter.value = yearToggle.checked ? "1" : "0";
             yearToggle.form.requestSubmit();
+        }
+    });
+
+    let pinnedTitleActions = null;
+
+    function setTitleActionsExpanded(actions, expanded) {
+        if (!(actions instanceof HTMLElement)) {
+            return;
+        }
+        actions.classList.toggle("is-open", expanded);
+        const toggle = actions.querySelector("[data-progress-actions-toggle]");
+        if (toggle) {
+            toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+        }
+        if (!expanded && pinnedTitleActions === actions) {
+            pinnedTitleActions = null;
+        }
+    }
+
+    function closeOtherTitleActions(current = null) {
+        document.querySelectorAll("[data-progress-title-actions].is-open").forEach((actions) => {
+            if (actions !== current) {
+                setTitleActionsExpanded(actions, false);
+            }
+        });
+    }
+
+    function openTitleActions(actions, {pinned = false} = {}) {
+        if (pinnedTitleActions && !document.contains(pinnedTitleActions)) {
+            pinnedTitleActions = null;
+        }
+        actions.classList.remove("is-escape-closed");
+        closeOtherTitleActions(actions);
+        setTitleActionsExpanded(actions, true);
+        if (pinned) {
+            pinnedTitleActions = actions;
+        }
+    }
+
+    document.addEventListener("pointerover", (event) => {
+        if (event.pointerType && event.pointerType !== "mouse") {
+            return;
+        }
+        const actions = event.target.closest("[data-progress-title-actions]");
+        if (!actions || actions.contains(event.relatedTarget)) {
+            return;
+        }
+        if (pinnedTitleActions && !document.contains(pinnedTitleActions)) {
+            pinnedTitleActions = null;
+        }
+        if (pinnedTitleActions && pinnedTitleActions !== actions) {
+            return;
+        }
+        openTitleActions(actions);
+    });
+
+    document.addEventListener("pointerout", (event) => {
+        if (event.pointerType && event.pointerType !== "mouse") {
+            return;
+        }
+        const actions = event.target.closest("[data-progress-title-actions]");
+        if (!actions || actions.contains(event.relatedTarget) || actions === pinnedTitleActions) {
+            return;
+        }
+        if (!actions.contains(document.activeElement)) {
+            setTitleActionsExpanded(actions, false);
+        }
+    });
+
+    document.addEventListener("focusin", (event) => {
+        const actions = event.target.closest("[data-progress-title-actions]");
+        if (actions && !actions.classList.contains("is-escape-closed")) {
+            openTitleActions(actions);
+        }
+    });
+
+    document.addEventListener("focusout", (event) => {
+        const actions = event.target.closest("[data-progress-title-actions]");
+        if (!actions) {
+            return;
+        }
+        window.setTimeout(() => {
+            if (!actions.contains(document.activeElement)) {
+                actions.classList.remove("is-escape-closed");
+                setTitleActionsExpanded(actions, false);
+            }
+        }, 0);
+    });
+
+    document.addEventListener("click", (event) => {
+        const directionButton = event.target.closest("[data-progress-sort-direction]");
+        if (directionButton instanceof HTMLButtonElement && directionButton.form) {
+            const directionInput = directionButton.form.elements.direction;
+            if (directionInput instanceof HTMLInputElement) {
+                directionInput.value = directionInput.value === "asc" ? "desc" : "asc";
+                directionButton.form.requestSubmit();
+            }
+            return;
+        }
+
+        const toggle = event.target.closest("[data-progress-actions-toggle]");
+        if (toggle) {
+            event.preventDefault();
+            const actions = toggle.closest("[data-progress-title-actions]");
+            if (!actions) {
+                return;
+            }
+            actions.classList.remove("is-escape-closed");
+            if (actions === pinnedTitleActions) {
+                setTitleActionsExpanded(actions, false);
+            } else {
+                openTitleActions(actions, {pinned: true});
+            }
+            return;
+        }
+
+        if (!event.target.closest("[data-progress-title-actions]")) {
+            closeOtherTitleActions();
+            pinnedTitleActions = null;
+        }
+    });
+
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") {
+            return;
+        }
+        const actions = pinnedTitleActions
+            || document.activeElement?.closest?.("[data-progress-title-actions]")
+            || document.querySelector("[data-progress-title-actions].is-open");
+        if (!actions) {
+            return;
+        }
+        event.preventDefault();
+        actions.classList.add("is-escape-closed");
+        setTitleActionsExpanded(actions, false);
+        const toggle = actions.querySelector("[data-progress-actions-toggle]");
+        if (toggle instanceof HTMLElement) {
+            toggle.focus({preventScroll: true});
         }
     });
 
@@ -46,7 +198,10 @@
         constructor(root) {
             this.root = root;
             this.hideUpcoming = root.dataset.hideUpcoming || "0";
+            this.showPaused = root.dataset.showPaused || "0";
             this.showDropped = root.dataset.showDropped || "0";
+            this.sort = root.dataset.sort || "episode_release";
+            this.direction = root.dataset.direction || "desc";
             this.minYear = root.dataset.minYear || "";
             this.useYearFilter = root.dataset.useYearFilter || "0";
             this.idleRefreshIntervalMs = 300000;
@@ -287,7 +442,10 @@
                     cache: "no-store",
                     body: JSON.stringify({
                         hide_upcoming: this.hideUpcoming,
+                        show_paused: this.showPaused,
                         show_dropped: this.showDropped,
+                        sort: this.sort,
+                        direction: this.direction,
                         min_year: this.minYear,
                         use_year_filter: this.useYearFilter,
                         viewport_card_keys: this.viewportKeys(),

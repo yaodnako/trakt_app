@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
@@ -9,6 +10,7 @@ from typing import Callable
 
 from trakt_tracker.application.catalog import CatalogService
 from trakt_tracker.application.episode_ratings_matrix import EpisodeRatingsMatrixService
+from trakt_tracker.application.episode_imdb_reconciliation import EpisodeIMDbReconciliationService
 from trakt_tracker.application.enrich_queue import (
     EnrichQueueService,
     TASK_KIND_SHOW_EPISODE_HYDRATION,
@@ -32,6 +34,7 @@ from trakt_tracker.application.notification_refresh import NotificationRefreshWo
 from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
 from trakt_tracker.application.release_tracking import ReleaseTrackingService
 from trakt_tracker.application.search_watch import SearchWatchService
+from trakt_tracker.application.title_aliases import TitleAliasService
 from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_history_items,
     load_cached_trakt_rating_items,
@@ -48,7 +51,13 @@ from trakt_tracker.config import (
     resolved_trakt_client_secret,
     trakt_cache_provider,
 )
-from trakt_tracker.domain import DashboardState, EpisodeSummary, ProgressSnapshot
+from trakt_tracker.domain import (
+    DashboardState,
+    EpisodeSummary,
+    ProgressSnapshot,
+    ProgressSortMode,
+    ProgressView,
+)
 from trakt_tracker.infrastructure.keyring_store import TokenStore
 from trakt_tracker.infrastructure.notifications import NotificationSender
 from trakt_tracker.infrastructure.cache import BinaryCache, ProviderCache
@@ -67,6 +76,7 @@ from trakt_tracker.persistence.repositories import (
     ProgressRepository,
     ReleaseTrackingRepository,
     SyncStateRepository,
+    TitleAliasRepository,
     TitleRepository,
     UserStateRepository,
 )
@@ -87,6 +97,7 @@ class ServiceContainer:
     progress: "ProgressService"
     release_tracking: "ReleaseTrackingService"
     search_watch: "SearchWatchService"
+    title_aliases: "TitleAliasService"
     notifications: "NotificationService"
     sync: "SyncService"
     operations: "OperationLog"
@@ -294,6 +305,7 @@ class ProgressService:
         episode_metadata: EpisodeMetadataService,
         catalog: CatalogService | None = None,
         enrich_queue: EnrichQueueService | None = None,
+        notification_repo: NotificationRepository | None = None,
     ) -> None:
         self._workflow = ProgressSyncWorkflow(
             db,
@@ -309,13 +321,26 @@ class ProgressService:
             episode_metadata,
             history_repo=history_repo,
             catalog=catalog,
+            notification_repo=notification_repo,
         )
 
     def refresh_show_progress(self, trakt_id: int, *, fresh: bool = False) -> ProgressSnapshot:
         return self._workflow.refresh_show_progress(trakt_id, fresh=fresh)
 
-    def dashboard_progress(self, *, dropped_only: bool = False) -> list[ProgressSnapshot]:
-        return self._workflow.dashboard_progress(dropped_only=dropped_only)
+    def dashboard_progress(
+        self,
+        *,
+        view: ProgressView | str = ProgressView.ACTIVE,
+        sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
+        descending: bool = True,
+        dropped_only: bool | None = None,
+    ) -> list[ProgressSnapshot]:
+        return self._workflow.dashboard_progress(
+            view=view,
+            sort_mode=sort_mode,
+            descending=descending,
+            dropped_only=dropped_only,
+        )
 
     def select_title_enrich_keys(
         self,
@@ -351,16 +376,28 @@ class ProgressService:
         self,
         trakt_ids: list[int] | None = None,
         *,
-        dropped_only: bool = False,
+        view: ProgressView | str = ProgressView.ACTIVE,
+        sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
+        descending: bool = True,
+        dropped_only: bool | None = None,
         force_full_assets: bool = False,
         defer_assets: bool = False,
     ) -> list[ProgressSnapshot]:
         return self._workflow.sync_progress(
             trakt_ids,
+            view=view,
+            sort_mode=sort_mode,
+            descending=descending,
             dropped_only=dropped_only,
             force_full_assets=force_full_assets,
             defer_assets=defer_assets,
         )
+
+    def pause_show(self, trakt_id: int, *, progress: ProgressSnapshot | None = None) -> None:
+        self._workflow.pause_show(trakt_id, progress=progress)
+
+    def resume_show(self, trakt_id: int) -> None:
+        self._workflow.resume_show(trakt_id)
 
     def drop_show(self, trakt_id: int) -> None:
         self._workflow.drop_show(trakt_id)
@@ -383,6 +420,8 @@ class PlayService:
 
 
 class NotificationService:
+    _ACTIVITY_SOURCES = frozenset({"progress", "release"})
+
     def __init__(
         self,
         db: Database,
@@ -404,21 +443,67 @@ class NotificationService:
             sender,
         )
         self._release_tracking = release_tracking
+        self._activity_lock = Lock()
+        self._activity_seq = 0
+        self._activity_events: deque[dict] = deque(maxlen=32)
+        self._pending_sources: set[str] = set()
 
     def poll_upcoming(self, *, send_native: bool = True) -> list[dict]:
         items = self._workflow.poll_upcoming(send_native=send_native)
         if self._release_tracking is not None:
             items.extend(self._release_tracking.poll(send_native=send_native))
+        self.refresh_pending_sources()
         return items
 
     def mark_episode_seen(self, *, show_trakt_id: int, show_title: str, episode: EpisodeSummary) -> None:
         self._workflow.mark_episode_seen(show_trakt_id=show_trakt_id, show_title=show_title, episode=episode)
+        self.refresh_pending_sources()
 
     def unseen_episode_ids(self) -> set[int]:
         return self._workflow.unseen_episode_ids()
 
     def upcoming_items(self) -> list[dict]:
         return self._workflow.upcoming_items()
+
+    def record_activity(self, items: list[dict]) -> int:
+        sources = sorted(
+            {
+                str(item.get("source", "") or "")
+                for item in items
+                if isinstance(item, dict) and str(item.get("source", "") or "") in self._ACTIVITY_SOURCES
+            }
+        )
+        with self._activity_lock:
+            if sources:
+                self._activity_seq += 1
+                self._activity_events.append({"seq": self._activity_seq, "sources": sources})
+            return self._activity_seq
+
+    def activity_after(self, after: int = 0) -> list[dict]:
+        with self._activity_lock:
+            return [
+                {"seq": int(event["seq"]), "sources": list(event["sources"])}
+                for event in self._activity_events
+                if int(event["seq"]) > max(0, int(after))
+            ]
+
+    def current_activity_seq(self) -> int:
+        with self._activity_lock:
+            return self._activity_seq
+
+    def refresh_pending_sources(self) -> list[str]:
+        pending: set[str] = set()
+        if self._workflow.has_due_unseen_current_episode():
+            pending.add("progress")
+        if self._release_tracking is not None and self._release_tracking.has_due_unacknowledged_release():
+            pending.add("release")
+        with self._activity_lock:
+            self._pending_sources = pending
+            return sorted(self._pending_sources)
+
+    def pending_sources(self) -> list[str]:
+        with self._activity_lock:
+            return sorted(self._pending_sources)
 
 
 class SyncService:
@@ -546,7 +631,8 @@ class SyncService:
             load_cached_trakt_history_items(self._auth.config.active_slug)
             + load_cached_trakt_rating_items(self._auth.config.active_slug)
         )
-        self._episode_metadata.enrich_episode_imdb_ratings()
+        if changed:
+            self._episode_metadata.enrich_episode_imdb_ratings()
         self._episode_metadata.repair_episode_imdb_ratings()
         return changed
 
@@ -881,6 +967,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     sync_state = SyncStateRepository()
     notification_repo = NotificationRepository()
     release_tracking_repo = ReleaseTrackingRepository()
+    title_alias_repo = TitleAliasRepository()
     operations = OperationLog()
 
     def client_factory(config: AppConfig) -> TraktClient:
@@ -902,12 +989,30 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     cache = CacheService(auth.config.active_slug)
     image_queue = ArtworkQueue(BinaryCache("images"), max_workers=4, timeout=8)
     imdb_client = IMDbDatasetClient(cache_ttl_hours=config_store.load().cache_ttl_hours)
-    episode_metadata = EpisodeMetadataService(db, episode_repo, imdb_client, titles, auth, tmdb_factory)
+    imdb_reconciliation = EpisodeIMDbReconciliationService(db, episode_repo, imdb_client)
+    episode_metadata = EpisodeMetadataService(
+        db,
+        episode_repo,
+        imdb_client,
+        titles,
+        auth,
+        tmdb_factory,
+        imdb_reconciliation=imdb_reconciliation,
+    )
     history_read_model = HistoryReadModelService(db, history, user_states, titles, episode_repo, episode_metadata)
     catalog = CatalogService(db, auth, titles, user_states, sync_state, tmdb_factory, imdb_client, history)
-    episode_ratings_matrix = EpisodeRatingsMatrixService(db, auth, titles, history, episode_repo, imdb_client)
+    episode_ratings_matrix = EpisodeRatingsMatrixService(
+        db,
+        auth,
+        titles,
+        history,
+        episode_repo,
+        imdb_client,
+        imdb_reconciliation=imdb_reconciliation,
+    )
     history_service = HistoryService(db, auth, titles, user_states, history, episode_repo, history_read_model, episode_metadata)
     search_watch = SearchWatchService(db, auth, titles, history, episode_repo, history_service, episode_metadata)
+    title_aliases = TitleAliasService(db, auth, title_alias_repo)
     enrich_queue = EnrichQueueService(
         {
             "history_title": lambda task: catalog.enrich_title_key(
@@ -939,7 +1044,22 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         max_workers=2,
     )
     play = PlayService(auth)
-    progress_service = ProgressService(db, auth, history, progress, episode_repo, titles, user_states, sync_state, tmdb_factory, imdb_client, operations, episode_metadata, catalog)
+    progress_service = ProgressService(
+        db,
+        auth,
+        history,
+        progress,
+        episode_repo,
+        titles,
+        user_states,
+        sync_state,
+        tmdb_factory,
+        imdb_client,
+        operations,
+        episode_metadata,
+        catalog,
+        notification_repo=notification_repo,
+    )
     notification_sender = NotificationSender()
     release_tracking = ReleaseTrackingService(
         db,
@@ -960,6 +1080,11 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         notification_sender,
         release_tracking,
     )
+    def refresh_notification_state() -> None:
+        notifications.refresh_pending_sources()
+
+    release_tracking.set_notification_state_callback(refresh_notification_state)
+    notifications.refresh_pending_sources()
     interactions = InteractionService(history_service, notifications, progress_service)
     sync = SyncService(
         db,
@@ -991,6 +1116,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         progress=progress_service,
         release_tracking=release_tracking,
         search_watch=search_watch,
+        title_aliases=title_aliases,
         notifications=notifications,
         sync=sync,
         operations=operations,

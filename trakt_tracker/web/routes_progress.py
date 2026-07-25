@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import Request
@@ -23,13 +24,52 @@ from trakt_tracker.application.services import ServiceContainer
 from trakt_tracker.config import ConfigStore
 from trakt_tracker.domain import RatingInput
 from trakt_tracker.web.viewmodels import (
+    DEFAULT_PROGRESS_SORT_DIRECTION,
+    DEFAULT_PROGRESS_SORT_MODE,
     filter_progress_items,
+    normalize_progress_sort_direction,
+    normalize_progress_sort_mode,
     parse_bool_flag,
     parse_progress_year,
+    PROGRESS_SORT_OPTIONS,
     ratings_refresh_due,
     TITLE_RATINGS_READY_REFRESH_SECONDS,
     EPISODE_RATINGS_READY_REFRESH_SECONDS,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _ProgressPageState:
+    hide_upcoming: bool
+    show_paused: bool
+    show_dropped: bool
+    min_year: int | None
+    use_year_filter: bool
+    sort_mode: str
+    sort_direction: str
+
+    @property
+    def view(self) -> str:
+        if self.show_dropped:
+            return "dropped"
+        if self.show_paused:
+            return "paused"
+        return "active"
+
+    @property
+    def descending(self) -> bool:
+        return self.sort_direction == "desc"
+
+    def context(self) -> dict[str, object]:
+        return {
+            "hide_upcoming": self.hide_upcoming,
+            "show_paused": self.show_paused,
+            "show_dropped": self.show_dropped,
+            "min_year": self.min_year,
+            "use_year_filter": self.use_year_filter,
+            "sort_mode": self.sort_mode,
+            "sort_direction": self.sort_direction,
+        }
 
 
 def register_progress_routes(app, *, render, progress_redirect) -> None:
@@ -37,7 +77,10 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
     async def progress_page(
         request: Request,
         hide_upcoming: str = "",
+        show_paused: str = "",
         show_dropped: str = "",
+        sort: str = "",
+        direction: str = "",
         min_year: str = "",
         use_year_filter: str = "",
         flash: str = "",
@@ -48,44 +91,42 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
     ) -> HTMLResponse:
         services: ServiceContainer = request.app.state.services
         config = services.auth.config
-        hide_upcoming_value = parse_bool_flag(hide_upcoming, config.hide_upcoming_in_progress)
-        show_dropped_value = parse_bool_flag(show_dropped, config.show_dropped_in_progress)
-        min_year_value = parse_progress_year(min_year)
-        if min_year_value is None:
-            min_year_value = config.web_progress_min_year
-        use_year_filter_value = parse_bool_flag(use_year_filter, config.web_progress_year_filter_enabled)
+        state = _parse_progress_query_state(
+            config,
+            hide_upcoming=hide_upcoming,
+            show_paused=show_paused,
+            show_dropped=show_dropped,
+            min_year=min_year,
+            use_year_filter=use_year_filter,
+            sort_mode=sort,
+            sort_direction=direction,
+        )
         config_changed = False
-        if config.hide_upcoming_in_progress != hide_upcoming_value:
-            config.hide_upcoming_in_progress = hide_upcoming_value
+        if config.hide_upcoming_in_progress != state.hide_upcoming:
+            config.hide_upcoming_in_progress = state.hide_upcoming
             config_changed = True
-        if config.show_dropped_in_progress != show_dropped_value:
-            config.show_dropped_in_progress = show_dropped_value
+        if getattr(config, "show_paused_in_progress", False) != state.show_paused:
+            config.show_paused_in_progress = state.show_paused
             config_changed = True
-        if config.web_progress_min_year != min_year_value:
-            config.web_progress_min_year = min_year_value
+        if config.show_dropped_in_progress != state.show_dropped:
+            config.show_dropped_in_progress = state.show_dropped
             config_changed = True
-        if config.web_progress_year_filter_enabled != use_year_filter_value:
-            config.web_progress_year_filter_enabled = use_year_filter_value
+        if getattr(config, "web_progress_sort_mode", DEFAULT_PROGRESS_SORT_MODE) != state.sort_mode:
+            config.web_progress_sort_mode = state.sort_mode
+            config_changed = True
+        if getattr(config, "web_progress_sort_direction", DEFAULT_PROGRESS_SORT_DIRECTION) != state.sort_direction:
+            config.web_progress_sort_direction = state.sort_direction
+            config_changed = True
+        if config.web_progress_min_year != state.min_year:
+            config.web_progress_min_year = state.min_year
+            config_changed = True
+        if config.web_progress_year_filter_enabled != state.use_year_filter:
+            config.web_progress_year_filter_enabled = state.use_year_filter
             config_changed = True
         if config_changed:
             ConfigStore().save(config)
-        items = services.progress.dashboard_progress(dropped_only=show_dropped_value)
-        items = filter_progress_items(
-            items,
-            hide_upcoming=hide_upcoming_value,
-            show_dropped=show_dropped_value,
-            min_year=min_year_value,
-            use_year_filter=use_year_filter_value,
-        )
+        _all_items, new_items, progress_items = _load_progress_items(services, state=state)
         unseen_episode_ids = services.notifications.unseen_episode_ids()
-        new_items = [
-            item for item in items
-            if item.next_episode is not None and item.next_episode.trakt_id in unseen_episode_ids and not item.is_dropped
-        ]
-        progress_items = [
-            item for item in items
-            if item.next_episode is None or item.next_episode.trakt_id not in unseen_episode_ids or item.is_dropped
-        ]
         return render(
             request,
             "progress.html",
@@ -94,10 +135,8 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                 "new_items": new_items,
                 "progress_items": progress_items,
                 "unseen_episode_ids": unseen_episode_ids,
-                "hide_upcoming": hide_upcoming_value,
-                "show_dropped": show_dropped_value,
-                "min_year": min_year_value,
-                "use_year_filter": use_year_filter_value,
+                **state.context(),
+                "progress_sort_options": PROGRESS_SORT_OPTIONS,
                 "progress_sync_running": request.app.state.bg_tasks.is_running("progress_sync"),
                 "flash": flash,
                 "rate_trakt_id": rate_trakt_id,
@@ -114,12 +153,16 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             payload = await request.json()
         except Exception:
             payload = {}
-        hide_upcoming_value = parse_bool_flag(str(payload.get("hide_upcoming", "")), services.auth.config.hide_upcoming_in_progress)
-        show_dropped_value = parse_bool_flag(str(payload.get("show_dropped", "")), services.auth.config.show_dropped_in_progress)
-        min_year_value = parse_progress_year(str(payload.get("min_year", "")))
-        if min_year_value is None:
-            min_year_value = services.auth.config.web_progress_min_year
-        use_year_filter_value = parse_bool_flag(str(payload.get("use_year_filter", "")), services.auth.config.web_progress_year_filter_enabled)
+        state = _parse_progress_query_state(
+            services.auth.config,
+            hide_upcoming=str(payload.get("hide_upcoming", "")),
+            show_paused=str(payload.get("show_paused", "")),
+            show_dropped=str(payload.get("show_dropped", "")),
+            min_year=str(payload.get("min_year", "")),
+            use_year_filter=str(payload.get("use_year_filter", "")),
+            sort_mode=str(payload.get("sort", "")),
+            sort_direction=str(payload.get("direction", "")),
+        )
         viewport_card_keys = _normalize_card_keys(payload.get("viewport_card_keys", []))
         nearby_card_keys = _normalize_card_keys(payload.get("nearby_card_keys", []))
         page_card_keys = _normalize_card_keys(payload.get("page_card_keys", []))
@@ -130,10 +173,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             queue_after_revision = 0
         all_items, new_items, progress_items = _load_progress_items(
             services,
-            hide_upcoming=hide_upcoming_value,
-            show_dropped=show_dropped_value,
-            min_year=min_year_value,
-            use_year_filter=use_year_filter_value,
+            state=state,
         )
         items_by_key = {f"progress:{item.trakt_id}": item for item in all_items}
         current_page_keys = [f"progress:{item.trakt_id}" for item in all_items]
@@ -203,10 +243,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                         {
                             "progress_item": item,
                             "progress_is_new": item in new_items,
-                            "hide_upcoming": hide_upcoming_value,
-                            "show_dropped": show_dropped_value,
-                            "min_year": min_year_value,
-                            "use_year_filter": use_year_filter_value,
+                            **state.context(),
                         },
                     ),
                 }
@@ -225,10 +262,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                         {
                             "new_items": new_items,
                             "progress_items": progress_items,
-                            "hide_upcoming": hide_upcoming_value,
-                            "show_dropped": show_dropped_value,
-                            "min_year": min_year_value,
-                            "use_year_filter": use_year_filter_value,
+                            **state.context(),
                         },
                     )
                     if bool(page_card_keys) and page_card_keys != current_page_keys
@@ -242,24 +276,20 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
         services: ServiceContainer = request.app.state.services
         bg_tasks = request.app.state.bg_tasks
         form = await request.form()
-        hide_upcoming_value = parse_bool_flag(str(form.get("hide_upcoming", "")))
-        show_dropped_value = parse_bool_flag(str(form.get("show_dropped", "")))
-        min_year_value = parse_progress_year(str(form.get("min_year", "")))
-        use_year_filter_value = parse_bool_flag(str(form.get("use_year_filter", "")))
+        state = _parse_progress_form_state(form)
         started = bg_tasks.start(
             "progress_sync",
             source="Progress sync (manual full)",
             operations=services.operations,
             fn=lambda: services.progress.sync_progress(
-                dropped_only=show_dropped_value,
+                view=state.view,
+                sort_mode=state.sort_mode,
+                descending=state.descending,
                 force_full_assets=False,
             ),
         )
         return progress_redirect(
-            hide_upcoming=hide_upcoming_value,
-            show_dropped=show_dropped_value,
-            min_year=min_year_value,
-            use_year_filter=use_year_filter_value,
+            **state.context(),
             flash="Progress sync started." if started else "Progress sync is already running.",
         )
 
@@ -268,34 +298,35 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
         request: Request,
         trakt_id: int,
         hide_upcoming: str = "",
+        show_paused: str = "",
         show_dropped: str = "",
+        sort: str = "",
+        direction: str = "",
         min_year: str = "",
         use_year_filter: str = "",
     ) -> RedirectResponse:
         services: ServiceContainer = request.app.state.services
-        hide_upcoming_value = parse_bool_flag(hide_upcoming, services.auth.config.hide_upcoming_in_progress)
-        show_dropped_value = parse_bool_flag(show_dropped, services.auth.config.show_dropped_in_progress)
-        min_year_value = parse_progress_year(min_year)
-        if min_year_value is None:
-            min_year_value = services.auth.config.web_progress_min_year
-        use_year_filter_value = parse_bool_flag(use_year_filter, services.auth.config.web_progress_year_filter_enabled)
-        current = _find_progress_item(services, trakt_id, dropped_only=show_dropped_value)
+        state = _parse_progress_query_state(
+            services.auth.config,
+            hide_upcoming=hide_upcoming,
+            show_paused=show_paused,
+            show_dropped=show_dropped,
+            min_year=min_year,
+            use_year_filter=use_year_filter,
+            sort_mode=sort,
+            sort_direction=direction,
+        )
+        current = _find_progress_item(services, trakt_id, state=state)
         services.operations.publish("Play", f"Play requested: trakt_id={trakt_id}")
         if current is None:
             return progress_redirect(
-                hide_upcoming=hide_upcoming_value,
-                show_dropped=show_dropped_value,
-                min_year=min_year_value,
-                use_year_filter=use_year_filter_value,
+                **state.context(),
                 flash="Title not found.",
             )
         target_url = services.play.resolve_kinopoisk_url(current.title)
         if not target_url:
             return progress_redirect(
-                hide_upcoming=hide_upcoming_value,
-                show_dropped=show_dropped_value,
-                min_year=min_year_value,
-                use_year_filter=use_year_filter_value,
+                **state.context(),
                 flash=f"Kinopoisk not found for {current.title}.",
             )
         return RedirectResponse(url=target_url, status_code=302)
@@ -304,25 +335,24 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
     async def progress_watch(request: Request, trakt_id: int) -> RedirectResponse:
         services: ServiceContainer = request.app.state.services
         form = await request.form()
-        hide_upcoming_value, show_dropped_value, min_year_value, use_year_filter_value = _parse_progress_form_state(form)
-        current = _find_progress_item(services, trakt_id, dropped_only=show_dropped_value)
+        state = _parse_progress_form_state(form)
+        current = _find_progress_item(services, trakt_id, state=state)
         if current is None or current.next_episode is None:
             return progress_redirect(
-                hide_upcoming=hide_upcoming_value,
-                show_dropped=show_dropped_value,
-                min_year=min_year_value,
-                use_year_filter=use_year_filter_value,
+                **state.context(),
                 flash="No next episode to mark watched.",
             )
         episode = current.next_episode
         services.operations.publish("Progress action", f"Mark watched: {current.title} S{episode.season:02d}E{episode.number:02d}")
         services.interactions.mark_progress_episode_watched(current, watched_at=datetime.now())
-        services.progress.sync_progress([current.trakt_id], dropped_only=show_dropped_value)
+        services.progress.sync_progress(
+            [current.trakt_id],
+            view=state.view,
+            sort_mode=state.sort_mode,
+            descending=state.descending,
+        )
         return progress_redirect(
-            hide_upcoming=hide_upcoming_value,
-            show_dropped=show_dropped_value,
-            min_year=min_year_value,
-            use_year_filter=use_year_filter_value,
+            **state.context(),
             flash=f"Marked {current.title} {episode.season:02d}x{episode.number:02d} watched.",
             rate_trakt_id=current.trakt_id,
             rate_season=episode.season,
@@ -334,14 +364,11 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
     async def progress_seen(request: Request, trakt_id: int) -> RedirectResponse:
         services: ServiceContainer = request.app.state.services
         form = await request.form()
-        hide_upcoming_value, show_dropped_value, min_year_value, use_year_filter_value = _parse_progress_form_state(form)
-        current = _find_progress_item(services, trakt_id, dropped_only=show_dropped_value)
+        state = _parse_progress_form_state(form)
+        current = _find_progress_item(services, trakt_id, state=state)
         if current is None or current.next_episode is None:
             return progress_redirect(
-                hide_upcoming=hide_upcoming_value,
-                show_dropped=show_dropped_value,
-                min_year=min_year_value,
-                use_year_filter=use_year_filter_value,
+                **state.context(),
                 flash="No released episode to mark seen.",
             )
         episode = current.next_episode
@@ -349,18 +376,12 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             services.interactions.mark_progress_episode_seen(current, now=datetime.now(tz=UTC))
         except RuntimeError as exc:
             return progress_redirect(
-                hide_upcoming=hide_upcoming_value,
-                show_dropped=show_dropped_value,
-                min_year=min_year_value,
-                use_year_filter=use_year_filter_value,
+                **state.context(),
                 flash=str(exc),
             )
         services.operations.publish("Progress action", f"Marked seen: {current.title} S{episode.season:02d}E{episode.number:02d}")
         return progress_redirect(
-            hide_upcoming=hide_upcoming_value,
-            show_dropped=show_dropped_value,
-            min_year=min_year_value,
-            use_year_filter=use_year_filter_value,
+            **state.context(),
             flash=f"Marked {current.title} {episode.season:02d}x{episode.number:02d} seen.",
         )
 
@@ -368,7 +389,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
     async def progress_rate(request: Request) -> RedirectResponse:
         services: ServiceContainer = request.app.state.services
         form = await request.form()
-        hide_upcoming_value, show_dropped_value, min_year_value, use_year_filter_value = _parse_progress_form_state(form)
+        state = _parse_progress_form_state(form)
         trakt_id = int(str(form.get("trakt_id", "0") or "0"))
         season = int(str(form.get("season", "0") or "0"))
         episode = int(str(form.get("episode", "0") or "0"))
@@ -393,12 +414,14 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                 flash = f"Rating failed: {exc}"
         else:
             flash = "Skipped rating."
-        services.progress.sync_progress([trakt_id], dropped_only=show_dropped_value)
+        services.progress.sync_progress(
+            [trakt_id],
+            view=state.view,
+            sort_mode=state.sort_mode,
+            descending=state.descending,
+        )
         return progress_redirect(
-            hide_upcoming=hide_upcoming_value,
-            show_dropped=show_dropped_value,
-            min_year=min_year_value,
-            use_year_filter=use_year_filter_value,
+            **state.context(),
             flash=flash,
         )
 
@@ -406,7 +429,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
     async def progress_drop_toggle(request: Request, trakt_id: int) -> RedirectResponse:
         services: ServiceContainer = request.app.state.services
         form = await request.form()
-        hide_upcoming_value, show_dropped_value, min_year_value, use_year_filter_value = _parse_progress_form_state(form)
+        state = _parse_progress_form_state(form)
         current_is_dropped = parse_bool_flag(str(form.get("is_dropped", "")))
         if current_is_dropped:
             services.interactions.set_progress_dropped(trakt_id, dropped=False)
@@ -415,51 +438,140 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             services.interactions.set_progress_dropped(trakt_id, dropped=True)
             flash = "Show dropped."
         return progress_redirect(
-            hide_upcoming=hide_upcoming_value,
-            show_dropped=show_dropped_value,
-            min_year=min_year_value,
-            use_year_filter=use_year_filter_value,
+            **state.context(),
             flash=flash,
         )
 
+    @app.post("/progress/{trakt_id}/pause-toggle")
+    async def progress_pause_toggle(request: Request, trakt_id: int) -> RedirectResponse:
+        services: ServiceContainer = request.app.state.services
+        form = await request.form()
+        state = _parse_progress_form_state(form)
+        current = _find_progress_item(services, trakt_id, state=state)
+        if current is None:
+            return progress_redirect(
+                **state.context(),
+                flash="Title not found.",
+            )
+        current_is_paused = bool(getattr(current, "is_paused", False))
+        services.interactions.set_progress_paused(
+            trakt_id,
+            paused=not current_is_paused,
+            progress=current,
+        )
+        return progress_redirect(
+            **state.context(),
+            flash="Show resumed." if current_is_paused else "Show paused.",
+        )
 
-def _parse_progress_form_state(form) -> tuple[bool, bool, int | None, bool]:
-    hide_upcoming_value = parse_bool_flag(str(form.get("hide_upcoming", "")))
-    show_dropped_value = parse_bool_flag(str(form.get("show_dropped", "")))
-    min_year_value = parse_progress_year(str(form.get("min_year", "")))
-    use_year_filter_value = parse_bool_flag(str(form.get("use_year_filter", "")))
-    return hide_upcoming_value, show_dropped_value, min_year_value, use_year_filter_value
+
+def _parse_progress_query_state(
+    config,
+    *,
+    hide_upcoming: str,
+    show_paused: str,
+    show_dropped: str,
+    min_year: str,
+    use_year_filter: str,
+    sort_mode: str,
+    sort_direction: str,
+) -> _ProgressPageState:
+    min_year_value = parse_progress_year(min_year)
+    if min_year_value is None:
+        min_year_value = config.web_progress_min_year
+    return _make_progress_state(
+        hide_upcoming=parse_bool_flag(hide_upcoming, config.hide_upcoming_in_progress),
+        show_paused=parse_bool_flag(show_paused, getattr(config, "show_paused_in_progress", False)),
+        show_dropped=parse_bool_flag(show_dropped, config.show_dropped_in_progress),
+        min_year=min_year_value,
+        use_year_filter=parse_bool_flag(use_year_filter, config.web_progress_year_filter_enabled),
+        sort_mode=normalize_progress_sort_mode(
+            sort_mode,
+            getattr(config, "web_progress_sort_mode", DEFAULT_PROGRESS_SORT_MODE),
+        ),
+        sort_direction=normalize_progress_sort_direction(
+            sort_direction,
+            getattr(config, "web_progress_sort_direction", DEFAULT_PROGRESS_SORT_DIRECTION),
+        ),
+    )
 
 
-def _find_progress_item(services: ServiceContainer, trakt_id: int, *, dropped_only: bool):
-    items = services.progress.dashboard_progress(dropped_only=dropped_only)
+def _parse_progress_form_state(form) -> _ProgressPageState:
+    return _make_progress_state(
+        hide_upcoming=parse_bool_flag(str(form.get("hide_upcoming", ""))),
+        show_paused=parse_bool_flag(str(form.get("show_paused", ""))),
+        show_dropped=parse_bool_flag(str(form.get("show_dropped", ""))),
+        min_year=parse_progress_year(str(form.get("min_year", ""))),
+        use_year_filter=parse_bool_flag(str(form.get("use_year_filter", ""))),
+        sort_mode=normalize_progress_sort_mode(str(form.get("sort", ""))),
+        sort_direction=normalize_progress_sort_direction(str(form.get("direction", ""))),
+    )
+
+
+def _make_progress_state(
+    *,
+    hide_upcoming: bool,
+    show_paused: bool,
+    show_dropped: bool,
+    min_year: int | None,
+    use_year_filter: bool,
+    sort_mode: str,
+    sort_direction: str,
+) -> _ProgressPageState:
+    if show_dropped:
+        show_paused = False
+    elif show_paused:
+        show_dropped = False
+    return _ProgressPageState(
+        hide_upcoming=hide_upcoming,
+        show_paused=show_paused,
+        show_dropped=show_dropped,
+        min_year=min_year,
+        use_year_filter=use_year_filter,
+        sort_mode=normalize_progress_sort_mode(sort_mode),
+        sort_direction=normalize_progress_sort_direction(sort_direction),
+    )
+
+
+def _find_progress_item(services: ServiceContainer, trakt_id: int, *, state: _ProgressPageState):
+    items = services.progress.dashboard_progress(
+        view=state.view,
+        sort_mode=state.sort_mode,
+        descending=state.descending,
+    )
     return next((item for item in items if item.trakt_id == trakt_id), None)
 
 
 def _load_progress_items(
     services: ServiceContainer,
     *,
-    hide_upcoming: bool,
-    show_dropped: bool,
-    min_year: int | None,
-    use_year_filter: bool,
+    state: _ProgressPageState,
 ):
-    items = services.progress.dashboard_progress(dropped_only=show_dropped)
+    items = services.progress.dashboard_progress(
+        view=state.view,
+        sort_mode=state.sort_mode,
+        descending=state.descending,
+    )
     items = filter_progress_items(
         items,
-        hide_upcoming=hide_upcoming,
-        show_dropped=show_dropped,
-        min_year=min_year,
-        use_year_filter=use_year_filter,
+        hide_upcoming=state.hide_upcoming,
+        show_paused=state.show_paused,
+        show_dropped=state.show_dropped,
+        min_year=state.min_year,
+        use_year_filter=state.use_year_filter,
     )
     unseen_episode_ids = services.notifications.unseen_episode_ids()
     new_items = [
         item for item in items
-        if item.next_episode is not None and item.next_episode.trakt_id in unseen_episode_ids and not item.is_dropped
+        if state.view == "active"
+        and item.next_episode is not None
+        and item.next_episode.trakt_id in unseen_episode_ids
+        and not item.is_dropped
+        and not getattr(item, "is_paused", False)
     ]
     progress_items = [
         item for item in items
-        if item.next_episode is None or item.next_episode.trakt_id not in unseen_episode_ids or item.is_dropped
+        if item not in new_items
     ]
     return [*new_items, *progress_items], new_items, progress_items
 

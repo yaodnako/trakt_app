@@ -29,6 +29,8 @@ class EpisodeIMDbResolution:
     imdb_id: str = ""
     imdb_rating: float | None = None
     imdb_votes: int | None = None
+    imdb_season: int | None = None
+    imdb_episode: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,8 @@ class EpisodeIMDbResolver:
             imdb_id=chosen.imdb_id,
             imdb_rating=rating,
             imdb_votes=votes,
+            imdb_season=chosen.season,
+            imdb_episode=chosen.episode,
         )
 
     def _candidates(
@@ -187,6 +191,8 @@ class EpisodeIMDbResolver:
                 imdb_id=imdb_id,
                 imdb_rating=self._as_float(metadata.get("imdb_rating")),
                 imdb_votes=self._as_int(metadata.get("imdb_votes")),
+                imdb_season=self._as_int(metadata.get("season")),
+                imdb_episode=self._as_int(metadata.get("episode")),
             )
         return EpisodeIMDbResolution(imdb_id=imdb_id)
 
