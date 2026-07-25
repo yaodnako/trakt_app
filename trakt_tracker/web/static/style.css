@@ -243,14 +243,17 @@ body.is-notifying-release .nav a[data-notification-source="release"] .nav-badge:
 .history-toolbar {
     justify-content: flex-start;
     align-items: center;
+    flex-wrap: nowrap;
+    width: 100%;
 }
 
 .history-filter-form {
     display: flex;
     gap: 10px;
     align-items: center;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     flex: 1 1 auto;
+    min-width: 0;
 }
 
 .history-type-select {
@@ -273,6 +276,27 @@ body.is-notifying-release .nav a[data-notification-source="release"] .nav-badge:
     align-items: center;
     justify-content: center;
     line-height: 1;
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.history-filter-form > select[name="sort"] {
+    width: 150px;
+    min-width: 150px;
+    margin-left: auto;
+    padding: 8px 32px 8px 12px;
+    border-radius: 999px;
+    flex: 0 0 auto;
+}
+
+.history-filter-form > [data-history-sort-direction] {
+    width: 38px;
+    min-width: 38px;
+    height: 38px;
+    min-height: 38px;
+    padding: 0;
+    border-radius: 999px;
+    flex: 0 0 auto;
 }
 
 .settings-form {
@@ -591,6 +615,11 @@ select {
     margin-top: auto;
 }
 
+.progress-toolbar {
+    width: 100%;
+    flex-wrap: nowrap;
+}
+
 .progress-sort-form,
 .progress-sort-field {
     display: inline-flex;
@@ -598,21 +627,24 @@ select {
 }
 
 .progress-sort-form {
-    gap: 6px;
+    order: 3;
+    gap: 4px;
+    margin-left: auto;
+    flex: 0 0 auto;
 }
 
 .progress-sort-field select {
     width: auto;
-    min-width: 166px;
-    padding: 10px 34px 10px 13px;
+    min-width: 150px;
+    padding: 8px 32px 8px 12px;
     border-radius: 999px;
 }
 
 .progress-sort-direction {
-    width: 42px;
-    height: 42px;
+    width: 38px;
+    height: 38px;
     border-radius: 999px;
-    font-size: 1.15rem;
+    font-size: 1.05rem;
     font-weight: 700;
 }
 
@@ -661,6 +693,8 @@ select {
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
+    order: 2;
+    flex: 0 0 auto;
 }
 
 .year-filter-form {
@@ -1552,7 +1586,7 @@ tbody tr:hover {
 .progress-title-actions {
     position: absolute;
     z-index: 6;
-    top: 6px;
+    top: 0;
     left: 50%;
     display: grid;
     grid-template-columns: repeat(3, 44px);
@@ -1582,9 +1616,25 @@ tbody tr:hover {
     border-radius: 999px;
     background: transparent;
     box-shadow: none;
+    position: relative;
     cursor: pointer;
     pointer-events: auto;
     transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s ease;
+}
+
+.progress-title-action-button::before {
+    content: "";
+    position: absolute;
+    z-index: 0;
+    left: 50%;
+    top: 50%;
+    width: 32px;
+    height: 30px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 6px 14px rgba(31, 28, 24, 0.16);
+    transform: translate(-50%, -50%);
 }
 
 .progress-title-actions-toggle:hover,
@@ -1598,16 +1648,29 @@ tbody tr:hover {
     outline-offset: 2px;
 }
 
-.progress-title-actions-toggle img,
-.progress-title-action-button img {
-    width: 26px;
-    height: 26px;
+.progress-title-actions-toggle img {
+    position: relative;
+    z-index: 1;
+    width: 22px;
+    height: 22px;
     display: block;
     object-fit: contain;
     pointer-events: none;
-    filter:
-        drop-shadow(0 0 2px rgba(255, 255, 255, 0.96))
-        drop-shadow(0 2px 3px rgba(18, 18, 18, 0.34));
+}
+
+.progress-title-action-button img {
+    position: relative;
+    z-index: 1;
+    width: 18px;
+    height: 18px;
+    display: block;
+    object-fit: contain;
+    pointer-events: none;
+}
+
+.progress-title-action-button.drop-toggle img {
+    width: 26px;
+    height: 26px;
 }
 
 .progress-title-action-side {
@@ -1643,11 +1706,6 @@ tbody tr:hover {
 
 .progress-title-action-button.drop-toggle.drop {
     color: #b2435a;
-}
-
-.progress-card .poster-badge,
-.progress-card .history-rating-badge {
-    top: 56px;
 }
 
 .progress-title-stack h3 a {
@@ -3742,6 +3800,11 @@ tbody tr:hover {
 }
 
 @media (max-width: 860px) {
+    .progress-toolbar,
+    .history-toolbar {
+        flex-wrap: wrap;
+    }
+
     .filter-grid,
     .settings-section-grid,
     .settings-field-grid-two {
@@ -3757,6 +3820,16 @@ tbody tr:hover {
     .history-filter-form {
         flex-direction: column;
         align-items: stretch;
+    }
+
+    .history-filter-form > select[name="sort"] {
+        width: 100%;
+        min-width: 0;
+        margin-left: 0;
+    }
+
+    .history-filter-form > [data-history-sort-direction] {
+        align-self: flex-end;
     }
 
     .history-type-select {
