@@ -68,7 +68,8 @@
 </div>
 {%- endmacro %}
 {% set matrix_error = matrix_error_message if matrix_error_message is defined else (matrix.error_message if matrix else "") %}
-{% set use_imdb_seasons = imdb_seasons_enabled if imdb_seasons_enabled is defined else true %}
+{% set imdb_layout_available = matrix.imdb_layout_available if matrix else true %}
+{% set use_imdb_seasons = (imdb_seasons_enabled if imdb_seasons_enabled is defined else true) and imdb_layout_available %}
 {% if matrix %}
 <div
     data-title-matrix-title-rating-data
@@ -78,15 +79,20 @@
 ></div>
 {% endif %}
 {% if matrix and matrix.has_episodes %}
-<div class="title-matrix-fragment is-hide-season-zero{% if use_imdb_seasons %} is-imdb-seasons{% endif %}" data-matrix-provider="{{ matrix.provider }}" data-matrix-imdb-subtitle="IMDb episode ratings by season" data-matrix-trakt-subtitle="Trakt episode ratings by season" data-matrix-my-subtitle="My episode ratings by season">
+<div class="title-matrix-fragment is-hide-season-zero{% if use_imdb_seasons %} is-imdb-seasons{% endif %}" data-matrix-provider="{{ matrix.provider }}" data-imdb-layout-available="{{ '1' if imdb_layout_available else '0' }}" data-matrix-imdb-subtitle="IMDb episode ratings by season" data-matrix-trakt-subtitle="Trakt episode ratings by season" data-matrix-my-subtitle="My episode ratings by season">
     {% if matrix_error %}
     <div class="title-matrix-inline-note">
         Latest refresh hit an error. Showing cached episode data.
     </div>
     {% endif %}
+    {% if not imdb_layout_available %}
+    <div class="title-matrix-inline-note">
+        IMDb seasons are unavailable because this Trakt show combines multiple IMDb series. Trakt seasons are shown.
+    </div>
+    {% endif %}
     <div class="title-matrix-options">
         <label class="title-matrix-option">
-            <input type="checkbox" data-imdb-seasons-toggle {% if use_imdb_seasons %}checked{% endif %}>
+            <input type="checkbox" data-imdb-seasons-toggle {% if use_imdb_seasons %}checked{% endif %}{% if not imdb_layout_available %} disabled data-layout-locked="1"{% endif %}>
             <span>IMDb seasons</span>
         </label>
         <label class="title-matrix-option">
@@ -152,7 +158,9 @@
         </span>
         {% endfor %}
     </div>
+    {% if imdb_layout_available %}
     {{ render_matrix_grid(matrix.imdb_seasons or matrix.seasons, matrix.imdb_rows or matrix.rows, "imdb", not use_imdb_seasons) }}
+    {% endif %}
     {{ render_matrix_grid(matrix.seasons, matrix.rows, "trakt", use_imdb_seasons) }}
 </div>
 {% else %}

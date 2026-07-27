@@ -13,26 +13,56 @@ from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
 
+_DOH_CACHE_TTL_SECONDS = 60.0
+_doh_cache_guard = threading.Lock()
+_doh_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
+_doh_host_locks: dict[str, threading.Lock] = {}
+
+
 def resolve_ipv4_with_doh(host: str, *, timeout: float) -> list[str]:
-    query = urlencode({"name": host, "type": "A"})
-    request = UrlRequest(
-        f"https://1.1.1.1/dns-query?{query}",
-        headers={"Accept": "application/dns-json"},
-    )
-    with urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    addresses: list[str] = []
-    for answer in payload.get("Answer", []):
-        if not isinstance(answer, dict) or answer.get("type") != 1:
-            continue
-        address = str(answer.get("data", "") or "")
-        try:
-            socket.inet_aton(address)
-        except OSError:
-            continue
-        if address not in addresses:
-            addresses.append(address)
-    return addresses
+    normalized_host = str(host or "").strip().casefold()
+    with _doh_cache_guard:
+        host_lock = _doh_host_locks.setdefault(normalized_host, threading.Lock())
+    with host_lock:
+        now = monotonic()
+        with _doh_cache_guard:
+            cached = _doh_cache.get(normalized_host)
+        if cached is not None and cached[0] > now:
+            return list(cached[1])
+
+        query = urlencode({"name": normalized_host, "type": "A"})
+        request = UrlRequest(
+            f"https://1.1.1.1/dns-query?{query}",
+            headers={"Accept": "application/dns-json"},
+        )
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        addresses: list[str] = []
+        for answer in payload.get("Answer", []):
+            if not isinstance(answer, dict) or answer.get("type") != 1:
+                continue
+            address = str(answer.get("data", "") or "")
+            try:
+                socket.inet_aton(address)
+            except OSError:
+                continue
+            if address not in addresses:
+                addresses.append(address)
+        if addresses:
+            with _doh_cache_guard:
+                _doh_cache[normalized_host] = (
+                    monotonic() + _DOH_CACHE_TTL_SECONDS,
+                    tuple(addresses),
+                )
+        return addresses
+
+
+def _invalidate_doh_cache(host: str, addresses: list[str]) -> None:
+    normalized_host = str(host or "").strip().casefold()
+    with _doh_cache_guard:
+        cached = _doh_cache.get(normalized_host)
+        if cached is not None and cached[1] == tuple(addresses):
+            _doh_cache.pop(normalized_host, None)
 
 
 def fragment_client_hello_records(data: bytes) -> bytes:
@@ -79,6 +109,7 @@ def request_with_fragmented_tls(
         except (OSError, ssl.SSLError, ValueError) as exc:
             last_error = exc
     if last_error is not None:
+        _invalidate_doh_cache(host, addresses)
         raise last_error
     raise OSError(f"DNS-over-HTTPS lookup returned no IPv4 addresses for {host}")
 

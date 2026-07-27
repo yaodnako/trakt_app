@@ -11,6 +11,7 @@
     data-search-watch-trakt-rating="{% if panel.title_trakt_rating is not none %}{{ panel.title_trakt_rating|rating_with_votes(panel.title_trakt_votes) }}{% elif panel.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"
     data-search-watch-imdb-rating="{% if panel.title_imdb_rating is not none %}{{ panel.title_imdb_rating|rating_with_votes(panel.title_imdb_votes) }}{% elif panel.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"
     data-season-layout="{{ panel.season_layout }}"
+    data-imdb-layout-available="{{ '1' if panel.imdb_layout_available else '0' }}"
     data-imdb-mapping-complete="{{ '1' if panel.imdb_mapping_complete else '0' }}"
     data-imdb-mapping-pending="{{ '1' if panel.imdb_mapping_pending else '0' }}"
     {% if panel.default_episode_key %}data-default-episode-key="{{ panel.default_episode_key[0] }}-{{ panel.default_episode_key[1] }}"{% endif %}
@@ -21,10 +22,15 @@
                 type="checkbox"
                 data-search-watch-imdb-seasons-toggle
                 {% if panel.season_layout == 'imdb' %}checked{% endif %}
+                {% if not panel.imdb_layout_available %}disabled{% endif %}
             >
             <span>IMDb seasons</span>
         </label>
-        {% if panel.season_layout == 'imdb' and not panel.imdb_mapping_complete %}
+        {% if not panel.imdb_layout_available %}
+        <span class="search-watch-layout-note">
+            IMDb seasons are unavailable because this Trakt show combines multiple IMDb series. Trakt seasons are shown.
+        </span>
+        {% elif panel.season_layout == 'imdb' and not panel.imdb_mapping_complete %}
         <span class="search-watch-layout-note">
             {% if panel.imdb_mapping_pending %}
             Completing IMDb mapping. Season actions are temporarily unavailable.
@@ -142,14 +148,15 @@
                     src="{{ episode.still_url|episode_preview_url|cached_image_url }}"
                     alt="{{ episode.title }} still"
                     loading="lazy"
+                    data-still-artwork
                     {% if spoiler_hidden %}data-spoiler-image{% endif %}
                 >
                 {% elif episode.still_status == 'unknown' %}
-                <span>Loading</span>
+                <span data-still-artwork>Loading</span>
                 {% elif episode.still_status == 'retryable_failure' %}
-                <span>Retrying...</span>
+                <span data-still-artwork>Retrying...</span>
                 {% else %}
-                <span>No preview</span>
+                <span data-still-artwork>No preview</span>
                 {% endif %}
                 {% if episode.is_watched %}
                 <span class="search-watch-seen-overlay" aria-label="Watched">
@@ -233,9 +240,15 @@
     {% endfor %}
 </div>
 {% elif panel %}
+{% if refresh_completed|default(false) %}
+<div class="title-matrix-empty-state">
+    <p>No episodes found.</p>
+</div>
+{% else %}
 <div class="title-matrix-empty-state" data-watch-panel-pending="1">
     <p>Loading episodes...</p>
 </div>
+{% endif %}
 {% elif error_message %}
 <div class="title-matrix-empty-state">
     <p>{{ error_message }}</p>

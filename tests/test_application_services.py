@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event, Lock, Thread
 from types import SimpleNamespace
 
 from trakt_tracker.application.catalog import CatalogService
@@ -206,6 +207,7 @@ class _FakeImdbClient:
         self.episode_title_ids: dict[tuple[str, str], str] = {}
         self.episode_metadata: dict[str, dict] = {}
         self.episode_lookup_calls: list[tuple[str, int, int]] = []
+        self.episode_metadata_calls: list[str] = []
 
     def enrich_title(self, title: TitleSummary) -> TitleSummary:
         return replace(title, imdb_rating=8.5, imdb_votes=12345)
@@ -255,6 +257,7 @@ class _FakeImdbClient:
         return self.episode_title_ids.get((show_imdb_id, normalized_title), "")
 
     def lookup_episode_metadata(self, imdb_id: str) -> dict | None:
+        self.episode_metadata_calls.append(imdb_id)
         return self.episode_metadata.get(imdb_id)
 
 
@@ -375,6 +378,64 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(resolution.imdb_id, "tt-trakt")
         self.assertEqual(resolution.imdb_rating, 7.8)
         self.assertEqual(resolution.imdb_votes, 15500)
+
+    def test_episode_imdb_resolver_preserves_title_matched_alternate_parent_id(self) -> None:
+        self.imdb.ready = True
+        self.imdb.episode_metadata["tt-tybw"] = self._imdb_episode_metadata(
+            parent="tt-tybw-show",
+            season=1,
+            episode=1,
+            title="The Blood Warfare",
+            rating=9.1,
+            votes=14408,
+        )
+        self.imdb.episode_ids[("tt-bleach", 2, 1)] = "tt-original-s2e1"
+        self.imdb.episode_metadata["tt-original-s2e1"] = self._imdb_episode_metadata(
+            parent="tt-bleach",
+            season=2,
+            episode=1,
+            title="Totsunyu! Shinigami no sekai",
+            rating=7.8,
+            votes=1418,
+        )
+
+        resolution = EpisodeIMDbResolver(self.imdb).resolve(
+            show_imdb_id="tt-bleach",
+            season=2,
+            episode=1,
+            title="The Blood Warfare",
+            trakt_imdb_id="tt-tybw",
+        )
+
+        self.assertEqual(resolution.imdb_id, "tt-tybw")
+        self.assertEqual(resolution.imdb_rating, 9.1)
+        self.assertEqual(resolution.imdb_votes, 14408)
+        self.assertIsNone(resolution.imdb_season)
+        self.assertIsNone(resolution.imdb_episode)
+        self.assertTrue(resolution.is_alternate_parent)
+
+    def test_episode_imdb_resolver_accepts_punctuation_only_alternate_parent_title_difference(self) -> None:
+        self.imdb.ready = True
+        self.imdb.episode_metadata["tt-tybw"] = self._imdb_episode_metadata(
+            parent="tt-tybw-show",
+            season=1,
+            episode=8,
+            title="The Shooting Star Project (Zero Mix)",
+            rating=8.2,
+            votes=5010,
+        )
+
+        resolution = EpisodeIMDbResolver(self.imdb).resolve(
+            show_imdb_id="tt-bleach",
+            season=2,
+            episode=8,
+            title="The Shooting Star Project [Zero Mix]",
+            trakt_imdb_id="tt-tybw",
+        )
+
+        self.assertEqual(resolution.imdb_id, "tt-tybw")
+        self.assertEqual(resolution.imdb_rating, 8.2)
+        self.assertTrue(resolution.is_alternate_parent)
 
     def test_episode_imdb_resolver_uses_number_candidate_when_title_matches(self) -> None:
         self.imdb.ready = True
@@ -1308,6 +1369,96 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(panel.seasons[0].episodes[0].imdb_season, 2)
         self.assertEqual(panel.seasons[0].episodes[0].imdb_episode, 1)
 
+    def test_search_watch_still_enrichment_is_singleflight_per_season(self) -> None:
+        class _BlockingEpisodeMetadata:
+            def __init__(self, db, episode_repo) -> None:
+                self._db = db
+                self._episode_repo = episode_repo
+                self.started = Event()
+                self.release = Event()
+                self.guard = Lock()
+                self.calls = 0
+                self.active = 0
+                self.max_active = 0
+
+            def enrich_episode_stills(self, keys, **kwargs):
+                with self.guard:
+                    self.calls += 1
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                self.started.set()
+                self.release.wait(timeout=2)
+                with self._db.session() as session:
+                    show_trakt_id, season, episode = keys[0]
+                    self._episode_repo.update_still_enrich_state(
+                        session,
+                        show_trakt_id,
+                        season,
+                        episode,
+                        status="ready",
+                        still_url="https://still.example/pilot.jpg",
+                    )
+                with self.guard:
+                    self.active -= 1
+                return True
+
+        history_service = HistoryService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            self.episode_repo,
+            self.history_read_model,
+            self.episode_metadata,
+        )
+        episode_metadata = _BlockingEpisodeMetadata(self.db, self.episode_repo)
+        service = SearchWatchService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.history_repo,
+            self.episode_repo,
+            history_service,
+            episode_metadata=episode_metadata,
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=5, title_type="show", title="Example"))
+            self.episode_repo.replace_show_episodes(
+                session,
+                5,
+                [
+                    EpisodeSummary(
+                        trakt_id=501,
+                        season=1,
+                        number=1,
+                        title="Pilot",
+                        first_aired=datetime.now(tz=UTC) - timedelta(days=1),
+                    ),
+                ],
+            )
+
+        results: list[bool] = []
+        first = Thread(target=lambda: results.append(service.enrich_missing_stills(5, 1)))
+        second = Thread(target=lambda: results.append(service.enrich_missing_stills(5, 1)))
+        first.start()
+        try:
+            self.assertTrue(episode_metadata.started.wait(timeout=1))
+            second.start()
+            time.sleep(0.05)
+
+            self.assertEqual(episode_metadata.calls, 1)
+            self.assertEqual(episode_metadata.max_active, 1)
+        finally:
+            episode_metadata.release.set()
+            first.join(timeout=2)
+            if second.ident is not None:
+                second.join(timeout=2)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(episode_metadata.calls, 1)
+        self.assertEqual(sorted(results), [False, True])
+
     def test_search_watch_panel_opens_first_released_unwatched_regular_episode(self) -> None:
         history_service = HistoryService(
             self.db, self.auth, self.titles, self.user_states, self.history_repo,
@@ -1574,6 +1725,62 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual([item.trakt_id for item in self.trakt_client.history_item_batches[0]], [502])
         self.assertEqual(service.repair_imdb_seasons(5), 1)
         self.assertEqual(metadata.repairs, [5])
+
+    def test_search_watch_uses_trakt_layout_for_alternate_imdb_parent(self) -> None:
+        history_service = HistoryService(
+            self.db, self.auth, self.titles, self.user_states, self.history_repo,
+            self.episode_repo, self.history_read_model, self.episode_metadata,
+        )
+        service = SearchWatchService(
+            self.db, self.auth, self.titles, self.history_repo, self.episode_repo,
+            history_service, episode_metadata=self.episode_metadata,
+        )
+        now = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=30850, title_type="show", title="Bleach", imdb_id="tt-bleach"),
+            )
+            self.episode_repo.replace_show_episodes(
+                session,
+                30850,
+                [
+                    EpisodeSummary(
+                        trakt_id=501,
+                        season=1,
+                        number=1,
+                        title="The Day I Became a Shinigami",
+                        first_aired=now - timedelta(days=2),
+                    ),
+                    EpisodeSummary(
+                        trakt_id=601,
+                        season=2,
+                        number=1,
+                        title="The Blood Warfare",
+                        first_aired=now - timedelta(days=1),
+                    ),
+                ],
+            )
+            original = self.episode_repo.find_episode(session, 30850, 1, 1)
+            original.imdb_id = "tt-original"
+            original.imdb_rating = 7.7
+            original.imdb_votes = 2607
+            original.imdb_match_status = "resolved"
+            original.imdb_season = 1
+            original.imdb_episode = 1
+            alternate = self.episode_repo.find_episode(session, 30850, 2, 1)
+            alternate.imdb_id = "tt-tybw"
+            alternate.imdb_rating = 9.1
+            alternate.imdb_votes = 14408
+            alternate.imdb_match_status = "alternate_parent"
+
+        panel = service.load_show_panel(30850, season_layout="imdb")
+
+        self.assertEqual(panel.season_layout, "trakt")
+        self.assertFalse(panel.imdb_layout_available)
+        self.assertTrue(panel.imdb_mapping_complete)
+        self.assertEqual([season.season for season in panel.seasons], [1, 2])
+        self.assertTrue(all(season.bulk_allowed for season in panel.seasons))
 
     def test_search_watch_imdb_unwatch_is_exact_reversible_and_transactional(self) -> None:
         history_service = HistoryService(
@@ -2461,7 +2668,10 @@ class ApplicationServiceTests(unittest.TestCase):
 
     def test_sync_trakt_data_runs_full_progress_before_notification_refresh(self) -> None:
         calls: list[tuple[str, dict]] = []
-        status_callback = lambda _message: None
+
+        def status_callback(_message: str) -> None:
+            return None
+
         service = object.__new__(SyncService)
         service._enrich_queue = None
         service.refresh_history = lambda **kwargs: calls.append(("history", kwargs))
@@ -2592,16 +2802,23 @@ class ApplicationServiceTests(unittest.TestCase):
         config_store = ConfigStore(Path(self.tmpdir.name) / "config.json")
         services = build_services(config_store, self.db)
         sync_calls: list[bool] = []
+        repair_calls: list[bool] = []
 
         services.sync._imdb_client.sync = lambda force=False, status_callback=None: sync_calls.append(force) or True
         services.sync._episode_metadata.backfill_episode_imdb_ids_from_payloads = lambda payloads: None
-        services.sync._episode_metadata.enrich_episode_imdb_ratings = lambda: None
+        services.sync._episode_metadata.enrich_episode_imdb_ratings = lambda: (_ for _ in ()).throw(
+            AssertionError("duplicate IMDb enrichment pass")
+        )
+        services.sync._episode_metadata.repair_episode_imdb_ratings = (
+            lambda *, refresh_known=False: repair_calls.append(refresh_known) or 0
+        )
 
         self.assertTrue(services.sync.should_auto_sync_imdb_dataset(3))
         self.assertTrue(services.sync.maybe_sync_imdb_dataset(3))
         self.assertFalse(services.sync.should_auto_sync_imdb_dataset(3))
         self.assertFalse(services.sync.maybe_sync_imdb_dataset(3))
         self.assertEqual(sync_calls, [True])
+        self.assertEqual(repair_calls, [True])
 
     def test_sync_service_skips_known_episode_reenrichment_when_imdb_dataset_is_unchanged(self) -> None:
         config_store = ConfigStore(Path(self.tmpdir.name) / "config.json")
@@ -3314,6 +3531,95 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertEqual(row.imdb_id, "tt33300001")
             self.assertEqual(row.imdb_match_status, "resolved")
 
+    def test_episode_ratings_matrix_populates_known_imdb_id_once_per_revision(self) -> None:
+        self.imdb.ready = True
+        self.imdb.episode_metadata["tt0856437"] = self._imdb_episode_metadata(
+            parent="tt0434665",
+            season=1,
+            episode=1,
+            title="The Day I Became a Shinigami",
+            rating=7.7,
+            votes=2607,
+        )
+        service = EpisodeRatingsMatrixService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.history_repo,
+            self.episode_repo,
+            self.imdb,
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=30850, title_type="show", title="Bleach", imdb_id="tt0434665"),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                30850,
+                EpisodeSummary(
+                    trakt_id=501,
+                    season=1,
+                    number=1,
+                    title="The Day I Became a Shinigami",
+                    imdb_id="tt0856437",
+                ),
+            )
+
+        first = service.load_show_matrix(30850, allow_network_refresh=False)
+        first_metadata_call_count = len(self.imdb.episode_metadata_calls)
+        second = service.load_show_matrix(30850, allow_network_refresh=False)
+
+        self.assertEqual(first.rows[0].cells[0].display_value, "7.7")
+        self.assertEqual(first.rows[0].cells[0].imdb_votes, 2607)
+        self.assertEqual(second.rows[0].cells[0].display_value, "7.7")
+        self.assertGreater(first_metadata_call_count, 0)
+        self.assertEqual(len(self.imdb.episode_metadata_calls), first_metadata_call_count)
+        first_revision_call_count = self.imdb.revision_calls
+        service.load_show_matrix(30850, allow_network_refresh=False)
+        self.assertEqual(self.imdb.revision_calls, first_revision_call_count)
+        with self.db.session() as session:
+            row = self.episode_repo.find_episode(session, 30850, 1, 1)
+            self.assertEqual(row.imdb_id, "tt0856437")
+            self.assertEqual(row.imdb_rating, 7.7)
+            self.assertEqual(row.imdb_votes, 2607)
+            self.assertEqual((row.imdb_season, row.imdb_episode), (1, 1))
+
+    def test_episode_ratings_matrix_marks_alternate_parent_layout_unavailable(self) -> None:
+        service = EpisodeRatingsMatrixService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.history_repo,
+            self.episode_repo,
+            self.imdb,
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=30850, title_type="show", title="Bleach", imdb_id="tt0434665"),
+            )
+            row = self.episode_repo.upsert_episode(
+                session,
+                30850,
+                EpisodeSummary(
+                    trakt_id=601,
+                    season=2,
+                    number=1,
+                    title="The Blood Warfare",
+                    imdb_id="tt17073864",
+                    imdb_rating=9.1,
+                    imdb_votes=14408,
+                ),
+            )
+            row.imdb_match_status = "alternate_parent"
+
+        matrix = service.load_show_matrix(30850, allow_network_refresh=False)
+
+        self.assertFalse(matrix.imdb_layout_available)
+        self.assertEqual(matrix.rows[0].cells[0].display_value, "9.1")
+        self.assertEqual(matrix.rows[0].cells[0].imdb_url, "https://www.imdb.com/title/tt17073864")
+
     def test_episode_ratings_matrix_retries_no_match_only_after_imdb_revision_changes(self) -> None:
         self.imdb.ready = True
         service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)
@@ -3351,7 +3657,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(matrix.rows[38].cells[0].imdb_url, "https://www.imdb.com/title/tt41157278")
         with self.db.session() as session:
             row = self.episode_repo.find_episode(session, 198225, 1, 39)
-            self.assertEqual(row.imdb_match_status, "resolved")
+            self.assertEqual(row.imdb_match_status, "resolved_no_rating")
 
     def test_episode_ratings_matrix_does_not_remap_known_imdb_id_without_rating(self) -> None:
         self.imdb.ready = True
@@ -3387,7 +3693,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(matrix.imdb_rows[0].cells[0].imdb_url, "https://www.imdb.com/title/tt41157278")
         with self.db.session() as session:
             row = self.episode_repo.find_episode(session, 198225, 1, 39)
-            self.assertEqual(row.imdb_match_status, "resolved")
+            self.assertEqual(row.imdb_match_status, "resolved_no_rating")
             self.assertEqual((row.imdb_season, row.imdb_episode), (3, 1))
 
     def test_episode_ratings_matrix_builds_trakt_values_and_averages(self) -> None:

@@ -1122,7 +1122,9 @@
         const imdbSeasonsToggle = titleMatrixBody.querySelector("[data-imdb-seasons-toggle]");
         return {
             hideSeasonZero: hideToggle ? Boolean(hideToggle.checked) : true,
-            imdbSeasons: imdbSeasonsToggle ? Boolean(imdbSeasonsToggle.checked) : true,
+            imdbSeasons: imdbSeasonsToggle && !imdbSeasonsToggle.disabled
+                ? Boolean(imdbSeasonsToggle.checked)
+                : false,
             ratingMode: getSelectedTitleMatrixMode(null),
         };
     }
@@ -1137,7 +1139,7 @@
         }
         const imdbSeasonsToggle = titleMatrixBody.querySelector("[data-imdb-seasons-toggle]");
         if (imdbSeasonsToggle) {
-            imdbSeasonsToggle.checked = state.imdbSeasons !== false;
+            imdbSeasonsToggle.checked = !imdbSeasonsToggle.disabled && state.imdbSeasons !== false;
         }
     }
 
@@ -1210,7 +1212,11 @@
         }
         const hideToggle = titleMatrixBody.querySelector("[data-hide-season-zero-toggle]");
         const imdbSeasonsToggle = titleMatrixBody.querySelector("[data-imdb-seasons-toggle]");
-        applyImdbSeasonLayout(fragmentRoot, Boolean(imdbSeasonsToggle && imdbSeasonsToggle.checked));
+        const imdbLayoutAvailable = fragmentRoot.getAttribute("data-imdb-layout-available") !== "0";
+        applyImdbSeasonLayout(
+            fragmentRoot,
+            Boolean(imdbLayoutAvailable && imdbSeasonsToggle && imdbSeasonsToggle.checked),
+        );
         applySeasonZeroVisibility(fragmentRoot, Boolean(hideToggle && hideToggle.checked));
         applyTitleMatrixMode(fragmentRoot, getSelectedTitleMatrixMode(fragmentRoot));
     }
@@ -1581,7 +1587,7 @@
         const toggle = titleMatrixBody?.querySelector("[data-imdb-seasons-toggle]");
         const fragmentRoot = titleMatrixBody?.querySelector(".title-matrix-fragment");
         if (toggle) {
-            toggle.checked = enabled;
+            toggle.checked = !toggle.disabled && enabled;
         }
         applyTitleMatrixToggles(fragmentRoot);
     });

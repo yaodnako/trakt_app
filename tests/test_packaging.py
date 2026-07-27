@@ -28,6 +28,13 @@ def test_build_script_never_contains_provider_values() -> None:
     assert "client_secret=" not in build_script.casefold()
 
 
+def test_verify_script_propagates_tool_failures() -> None:
+    verify_script = (ROOT / "tools" / "verify.ps1").read_text(encoding="utf-8")
+
+    assert verify_script.count("if ($LASTEXITCODE -ne 0)") == 2
+    assert verify_script.count("exit $LASTEXITCODE") == 3
+
+
 def test_portable_readme_describes_local_data_and_manual_updates() -> None:
     readme = (ROOT / "tools" / "PORTABLE_README.txt").read_text(encoding="utf-8")
     assert "%LOCALAPPDATA%\\TraktTracker" in readme

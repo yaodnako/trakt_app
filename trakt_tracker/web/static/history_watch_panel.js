@@ -48,39 +48,60 @@
         );
     }
 
-    function scheduleWatchPanelRefresh(requestUrl, token) {
+    function scheduleMappingRefresh(token) {
         if (watchRefreshTimer) window.clearTimeout(watchRefreshTimer);
-        const selectedSeason = watchBody?.querySelector(".search-watch-episode-grid:not(.is-hidden)");
-        const panelPending = watchBody?.querySelector("[data-watch-panel-pending='1']");
         const mappingPending = watchBody?.querySelector("[data-search-watch-panel]")?.dataset.imdbMappingPending === "1";
-        if (mappingPending && mappingRefreshAttempts < 8) {
-            watchRefreshTimer = window.setTimeout(() => {
-                mappingRefreshAttempts += 1;
-                loadWatchPanel("", {preserve: true});
-            }, 900);
-            return;
-        }
-        if (!panelPending && !selectedSeason?.querySelector(".search-watch-still[data-still-pending='1']")) return;
-        watchRefreshTimer = window.setTimeout(() => refreshWatchPanel(requestUrl, token), 900);
+        if (!mappingPending || mappingRefreshAttempts >= 8) return;
+        watchRefreshTimer = window.setTimeout(() => {
+            if (token !== watchRefreshToken || watchOverlay?.hidden) return;
+            mappingRefreshAttempts += 1;
+            loadWatchPanel("", {preserve: true});
+        }, 900);
     }
 
-    async function refreshWatchPanel(requestUrl, token) {
+    async function refreshWatchPanel(requestUrl, token, {state = null, focusDefault = false} = {}) {
         if (token !== watchRefreshToken || watchOverlay?.hidden) return;
-        const selectedSeason = watchBody?.querySelector(".search-watch-episode-grid:not(.is-hidden)");
-        const panelPending = watchBody?.querySelector("[data-watch-panel-pending='1']");
-        if (!panelPending && !selectedSeason?.querySelector(".search-watch-still[data-still-pending='1']")) return;
+        if (watchRefreshTimer) window.clearTimeout(watchRefreshTimer);
+        watchRefreshTimer = 0;
+        if (!window.traktShowWatchPanel?.needsRefresh(watchBody)) {
+            scheduleMappingRefresh(token);
+            return;
+        }
         watchRefreshController?.abort();
-        watchRefreshController = new AbortController();
+        const controller = new AbortController();
+        watchRefreshController = controller;
+        const panelWasPending = Boolean(watchBody?.querySelector("[data-watch-panel-pending='1']"));
+        const refreshUrl = new URL(requestUrl, window.location.href);
+        refreshUrl.searchParams.set("refresh", "1");
+        if (!panelWasPending) refreshUrl.searchParams.set("artwork_patch", "1");
+        let needsArtworkFollowup = false;
         try {
-            const response = await fetch(requestUrl, {
-                headers: {"Accept": "text/html"}, cache: "no-store", signal: watchRefreshController.signal,
+            const response = await fetch(refreshUrl.toString(), {
+                headers: {"Accept": "text/html"}, cache: "no-store", signal: controller.signal,
             });
-            if (!response.ok || token !== watchRefreshToken) return;
-            window.traktShowWatchPanel?.patchArtwork(watchBody, await response.text());
+            const html = await response.text();
+            if (token !== watchRefreshToken) return;
+            if (!response.ok && !panelWasPending) return;
+            const replacedPanel = window.traktShowWatchPanel?.applyRefresh(watchBody, html);
+            if (replacedPanel) {
+                if (state) window.traktShowWatchPanel?.restoreState(watchBody, state);
+                else if (focusDefault) window.traktShowWatchPanel?.focusDefaultEpisode(watchBody);
+                window.traktShowWatchPanel?.configureScopeActions(watchOverlay, activeTrigger, watchBody);
+            }
+            needsArtworkFollowup = Boolean(
+                replacedPanel && window.traktShowWatchPanel?.needsRefresh(watchBody)
+            );
         } catch (_error) {
             // Keep the already rendered episode panel visible when artwork refresh fails.
         } finally {
-            if (token === watchRefreshToken) scheduleWatchPanelRefresh(requestUrl, token);
+            if (watchRefreshController === controller) watchRefreshController = null;
+            if (token === watchRefreshToken && !watchOverlay?.hidden) {
+                if (needsArtworkFollowup) {
+                    void refreshWatchPanel(requestUrl, token, {state, focusDefault});
+                } else {
+                    scheduleMappingRefresh(token);
+                }
+            }
         }
     }
 
@@ -104,7 +125,7 @@
             if (state) window.traktShowWatchPanel?.restoreState(watchBody, state);
             else if (focusDefault) window.traktShowWatchPanel?.focusDefaultEpisode(watchBody);
             window.traktShowWatchPanel?.configureScopeActions(watchOverlay, activeTrigger, watchBody);
-            scheduleWatchPanelRefresh(requestUrl, token);
+            await refreshWatchPanel(requestUrl, token, {state, focusDefault});
         } catch (error) {
             if (token === watchRefreshToken && error.name !== "AbortError") {
                 const errorNode = document.createElement("div");
@@ -232,7 +253,7 @@
             const selectedPanel = watchBody.querySelector(`[data-search-watch-season-panel="${season}"]`);
             if (selectedPanel?.querySelector(".search-watch-still[data-still-pending='1']") && activePanelUrl) {
                 const separator = activePanelUrl.includes("?") ? "&" : "?";
-                scheduleWatchPanelRefresh(`${activePanelUrl}${separator}season=${encodeURIComponent(season)}`, watchRefreshToken);
+                refreshWatchPanel(`${activePanelUrl}${separator}season=${encodeURIComponent(season)}`, watchRefreshToken);
             }
             return;
         }

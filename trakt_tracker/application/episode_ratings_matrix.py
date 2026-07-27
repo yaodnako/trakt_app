@@ -8,7 +8,10 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
     ENRICH_STATUS_RETRYABLE_FAILURE,
 )
-from trakt_tracker.application.episode_imdb_reconciliation import EpisodeIMDbReconciliationService
+from trakt_tracker.application.episode_imdb_reconciliation import (
+    IMDB_MATCH_STATUS_ALTERNATE_PARENT,
+    EpisodeIMDbReconciliationService,
+)
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_EPISODE_RATINGS,
     TRIGGER_VISIBLE_RATINGS_REFRESH,
@@ -103,6 +106,7 @@ class EpisodeRatingsMatrixViewModel:
     rows: list[EpisodeMatrixRow] = field(default_factory=list)
     imdb_seasons: list[EpisodeMatrixSeason] = field(default_factory=list)
     imdb_rows: list[EpisodeMatrixRow] = field(default_factory=list)
+    imdb_layout_available: bool = True
     legend: list[EpisodeMatrixLegendItem] = field(default_factory=list)
     has_episodes: bool = False
     error_message: str = ""
@@ -526,11 +530,19 @@ class EpisodeRatingsMatrixService:
                 my_avg_color=rating_bucket_color(overall_my_average),
             )
         )
-        imdb_seasons, imdb_rows = self._build_imdb_season_layout(
-            episode_rows=episode_rows,
-            trakt_rows=matrix_rows,
-            provider=provider,
+        imdb_layout_available = not any(
+            str(row.get("imdb_match_status") or "") == IMDB_MATCH_STATUS_ALTERNATE_PARENT
+            for row in episode_rows
+            if int(row.get("season") or 0) >= 1
         )
+        if imdb_layout_available:
+            imdb_seasons, imdb_rows = self._build_imdb_season_layout(
+                episode_rows=episode_rows,
+                trakt_rows=matrix_rows,
+                provider=provider,
+            )
+        else:
+            imdb_seasons, imdb_rows = [], []
         return EpisodeRatingsMatrixViewModel(
             trakt_id=trakt_id,
             title=title,
@@ -544,6 +556,7 @@ class EpisodeRatingsMatrixService:
             rows=matrix_rows,
             imdb_seasons=imdb_seasons,
             imdb_rows=imdb_rows,
+            imdb_layout_available=imdb_layout_available,
             legend=self._legend_items(),
             has_episodes=True,
             error_message=error_message,

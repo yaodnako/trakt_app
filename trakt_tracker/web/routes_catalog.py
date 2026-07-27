@@ -6,11 +6,9 @@ from datetime import UTC, datetime
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from trakt_tracker.application.enrich_queue import build_history_episode_task, build_show_episode_hydration_task
+from trakt_tracker.application.enrich_queue import build_history_episode_task
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_EPISODE_RATINGS,
-    ASSET_KIND_STILL,
-    TRIGGER_PAGE_CONTEXT,
     TRIGGER_VISIBLE_RATINGS_REFRESH,
 )
 from trakt_tracker.application.search_watch import (
@@ -792,6 +790,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
         trakt_id: int,
         season: int | None = None,
         refresh: bool = False,
+        artwork_patch: bool = False,
     ) -> HTMLResponse:
         services: ServiceContainer = request.app.state.services
         try:
@@ -800,29 +799,61 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                 if bool(getattr(services.auth.config, "web_imdb_seasons_enabled", True))
                 else SEASON_LAYOUT_TRAKT
             )
-            if season is None:
-                panel = await asyncio.to_thread(
-                    services.search_watch.load_show_panel,
-                    trakt_id,
-                    season_layout=season_layout,
-                )
-            else:
-                panel = await asyncio.to_thread(
+
+            async def load_panel():
+                if season is None:
+                    return await asyncio.to_thread(
+                        services.search_watch.load_show_panel,
+                        trakt_id,
+                        season_layout=season_layout,
+                    )
+                return await asyncio.to_thread(
                     services.search_watch.load_show_panel,
                     trakt_id,
                     season,
                     season_layout=season_layout,
                 )
+
+            panel = await load_panel()
+            hydrated_during_request = False
+            if refresh and not getattr(panel, "seasons", []):
+                await asyncio.to_thread(services.search_watch.hydrate_show_episodes, trakt_id)
+                panel = await load_panel()
+                hydrated_during_request = True
             selected_season = _default_season_number(panel)
-            if not getattr(panel, "seasons", []):
-                services.enrich_queue.submit(
-                    build_show_episode_hydration_task(title_key=f"watch-panel:{trakt_id}", trakt_id=trakt_id)
-                )
-            elif selected_season is not None:
-                _enqueue_missing_season_stills(services, panel, selected_season)
+            bg_tasks = getattr(request.app.state, "bg_tasks", None)
+            if refresh and selected_season is not None:
+                if hydrated_during_request:
+                    if bg_tasks is not None:
+                        bg_tasks.start(
+                            f"search_enrichment_watch_panel_stills_{trakt_id}_{selected_season}",
+                            source="Watch panel stills",
+                            operations=services.operations,
+                            fn=lambda season_number=selected_season: services.search_watch.enrich_missing_stills(
+                                trakt_id,
+                                season_number,
+                            ),
+                        )
+                else:
+                    await asyncio.to_thread(
+                        services.search_watch.enrich_missing_stills,
+                        trakt_id,
+                        selected_season,
+                    )
+                    panel = await load_panel()
             _enqueue_default_season_artwork(services, panel)
+            if artwork_patch and refresh and selected_season is not None and not hydrated_during_request:
+                return HTMLResponse(
+                    render_fragment(
+                        request,
+                        "search_show_watch_stills_patch.html",
+                        {
+                            "panel": panel,
+                            "selected_season": selected_season,
+                        },
+                    )
+                )
             if bool(getattr(panel, "imdb_mapping_pending", False)):
-                bg_tasks = getattr(request.app.state, "bg_tasks", None)
                 if bg_tasks is not None:
                     bg_tasks.start(
                         f"imdb_watch_panel_{trakt_id}",
@@ -836,6 +867,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                     "search_show_watch_panel.html",
                     {
                         "panel": panel,
+                        "refresh_completed": refresh,
                     },
                 )
             )
@@ -1091,29 +1123,6 @@ def _default_season_number(panel) -> int | None:
         if getattr(season, "is_default", False):
             return int(getattr(season, "season", 0) or 0)
     return None
-
-
-def _enqueue_missing_season_stills(services: ServiceContainer, panel, selected_season: int) -> None:
-    tasks = []
-    for season in getattr(panel, "seasons", []):
-        if int(getattr(season, "season", 0) or 0) != int(selected_season):
-            continue
-        for episode in getattr(season, "episodes", []):
-            if not bool(getattr(episode, "is_released", False)) or str(getattr(episode, "still_url", "") or ""):
-                continue
-            tasks.append(
-                build_history_episode_task(
-                    title_key=f"watch-panel:{getattr(panel, 'trakt_id', 0)}",
-                    show_trakt_id=int(getattr(panel, "trakt_id", 0) or 0),
-                    season=int(getattr(episode, "season", 0) or 0),
-                    episode=int(getattr(episode, "number", 0) or 0),
-                    priority=1,
-                    trigger=TRIGGER_PAGE_CONTEXT,
-                    requested_parts=(ASSET_KIND_STILL,),
-                )
-            )
-    if tasks:
-        services.enrich_queue.submit_history_refresh(viewport_tasks=tasks, nearby_tasks=[], page_tasks=[])
 
 
 def _enqueue_default_season_artwork(services: ServiceContainer, panel) -> None:

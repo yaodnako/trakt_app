@@ -1,0 +1,40 @@
+{% for season in panel.seasons %}
+{% if season.season == selected_season %}
+{% for episode in season.episodes %}
+{% set spoiler_hidden = (
+    web_hide_spoilers|default(false)
+    and panel.watched_frontier_key
+    and episode.season > 0
+    and not episode.is_watched
+    and (
+        episode.season > panel.watched_frontier_key[0]
+        or (
+            episode.season == panel.watched_frontier_key[0]
+            and episode.number > panel.watched_frontier_key[1]
+        )
+    )
+) %}
+<a
+    class="search-watch-still"
+    data-episode-key="{{ episode.season }}-{{ episode.number }}"
+    {% if not episode.still_url and episode.is_released %}data-still-pending="1"{% endif %}
+>
+{% if episode.still_url %}
+<img
+    src="{{ episode.still_url|episode_preview_url|cached_image_url }}"
+    alt="{{ episode.title }} still"
+    loading="lazy"
+    data-still-artwork
+    {% if spoiler_hidden %}data-spoiler-image{% endif %}
+>
+{% elif episode.still_status == 'unknown' %}
+<span data-still-artwork>Loading</span>
+{% elif episode.still_status == 'retryable_failure' %}
+<span data-still-artwork>Retrying...</span>
+{% else %}
+<span data-still-artwork>No preview</span>
+{% endif %}
+</a>
+{% endfor %}
+{% endif %}
+{% endfor %}

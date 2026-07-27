@@ -9,7 +9,22 @@ from trakt_tracker.application.episode_imdb_resolver import EpisodeIMDbResolver
 
 IMDB_MATCH_STATUS_UNKNOWN = "unknown"
 IMDB_MATCH_STATUS_RESOLVED = "resolved"
+IMDB_MATCH_STATUS_RESOLVED_NO_RATING = "resolved_no_rating"
+IMDB_MATCH_STATUS_ALTERNATE_PARENT = "alternate_parent"
 IMDB_MATCH_STATUS_NO_MATCH = "no_match"
+_TERMINAL_KNOWN_ID_STATUSES = {
+    IMDB_MATCH_STATUS_RESOLVED,
+    IMDB_MATCH_STATUS_RESOLVED_NO_RATING,
+    IMDB_MATCH_STATUS_ALTERNATE_PARENT,
+}
+
+
+def imdb_match_status_for_resolution(resolution) -> str:
+    if resolution.is_alternate_parent:
+        return IMDB_MATCH_STATUS_ALTERNATE_PARENT
+    if resolution.imdb_rating is None or resolution.imdb_votes is None:
+        return IMDB_MATCH_STATUS_RESOLVED_NO_RATING
+    return IMDB_MATCH_STATUS_RESOLVED
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,33 +51,59 @@ class EpisodeIMDbReconciliationService:
         show_imdb_id: str,
         episode_rows: list[dict],
         force: bool = False,
+        refresh_known: bool = False,
     ) -> bool:
         if not show_imdb_id or not episode_rows:
             return False
+        if force:
+            return True
         mapping_candidates = []
-        coordinate_candidates = []
+        known_id_candidates = []
         for row in episode_rows:
             season = int(row.get("season") or 0)
             episode = int(row.get("number") or 0)
             if season <= 0 or episode <= 0:
                 continue
-            if force:
-                mapping_candidates.append((row, season, episode))
-                continue
             if str(row.get("imdb_id") or ""):
-                if row.get("imdb_season") is None or row.get("imdb_episode") is None:
-                    coordinate_candidates.append(row)
+                status = str(row.get("imdb_match_status") or IMDB_MATCH_STATUS_UNKNOWN)
+                if (
+                    refresh_known
+                    or status not in _TERMINAL_KNOWN_ID_STATUSES
+                    or (
+                        status == IMDB_MATCH_STATUS_RESOLVED
+                        and (row.get("imdb_rating") is None or row.get("imdb_votes") is None)
+                    )
+                    or (
+                        status == IMDB_MATCH_STATUS_RESOLVED
+                        and (row.get("imdb_season") is None or row.get("imdb_episode") is None)
+                    )
+                ):
+                    known_id_candidates.append(row)
                 continue
             mapping_candidates.append((row, season, episode))
-        if not mapping_candidates and not coordinate_candidates:
+        if not mapping_candidates and not known_id_candidates:
             return False
         revision = self._dataset_revision()
         if not revision:
             return False
-        if force:
+        if refresh_known and known_id_candidates:
             return True
-        if any(str(row.get("imdb_coordinates_revision") or "") != revision for row in coordinate_candidates):
-            return True
+        for row in known_id_candidates:
+            status = str(row.get("imdb_match_status") or IMDB_MATCH_STATUS_UNKNOWN)
+            if str(row.get("imdb_coordinates_revision") or "") != revision:
+                return True
+            if status not in _TERMINAL_KNOWN_ID_STATUSES:
+                return True
+            if (
+                status == IMDB_MATCH_STATUS_RESOLVED
+                and (row.get("imdb_season") is None or row.get("imdb_episode") is None)
+            ):
+                return True
+            if (
+                status == IMDB_MATCH_STATUS_RESOLVED
+                and (row.get("imdb_rating") is None or row.get("imdb_votes") is None)
+            ):
+                return True
         for row, season, episode in mapping_candidates:
             attempt_key = self._attempt_key(
                 revision=revision,
@@ -78,7 +119,14 @@ class EpisodeIMDbReconciliationService:
                 return True
         return False
 
-    def reconcile_show(self, show_trakt_id: int, *, show_imdb_id: str, force: bool = False) -> EpisodeIMDbReconciliationResult:
+    def reconcile_show(
+        self,
+        show_trakt_id: int,
+        *,
+        show_imdb_id: str,
+        force: bool = False,
+        refresh_known: bool = False,
+    ) -> EpisodeIMDbReconciliationResult:
         revision = self._dataset_revision()
         if not show_imdb_id or not revision:
             return EpisodeIMDbReconciliationResult()
@@ -92,27 +140,50 @@ class EpisodeIMDbReconciliationService:
                     if season <= 0 or episode <= 0:
                         continue
                     if row.imdb_id and not force:
+                        status = str(row.imdb_match_status or IMDB_MATCH_STATUS_UNKNOWN)
+                        if (
+                            not refresh_known
+                            and row.imdb_coordinates_revision == revision
+                            and status in _TERMINAL_KNOWN_ID_STATUSES
+                            and not (
+                                status == IMDB_MATCH_STATUS_RESOLVED
+                                and (
+                                    row.imdb_rating is None
+                                    or row.imdb_votes is None
+                                    or row.imdb_season is None
+                                    or row.imdb_episode is None
+                                )
+                            )
+                        ):
+                            continue
                         previous = (
+                            row.imdb_id,
+                            row.imdb_rating,
+                            row.imdb_votes,
                             row.imdb_match_status,
                             row.imdb_match_attempt_key,
                             row.imdb_season,
                             row.imdb_episode,
                             row.imdb_coordinates_revision,
                         )
-                        if row.imdb_match_status != IMDB_MATCH_STATUS_RESOLVED or row.imdb_match_attempt_key:
-                            row.imdb_match_status = IMDB_MATCH_STATUS_RESOLVED
-                            row.imdb_match_attempt_key = ""
-                        if (
-                            (row.imdb_season is None or row.imdb_episode is None)
-                            and row.imdb_coordinates_revision != revision
-                        ):
-                            attempted += 1
-                            row.imdb_season, row.imdb_episode = self._lookup_coordinates(
-                                row.imdb_id,
-                                show_imdb_id=show_imdb_id,
-                            )
-                            row.imdb_coordinates_revision = revision
+                        attempted += 1
+                        resolution = self._resolver.resolve_known_id(
+                            show_imdb_id=show_imdb_id,
+                            title=row.title,
+                            imdb_id=row.imdb_id,
+                        )
+                        row.imdb_id = resolution.imdb_id or row.imdb_id
+                        row.imdb_rating = resolution.imdb_rating
+                        row.imdb_votes = resolution.imdb_votes
+                        row.imdb_season = resolution.imdb_season
+                        row.imdb_episode = resolution.imdb_episode
+                        row.imdb_match_status = imdb_match_status_for_resolution(resolution)
+                        row.imdb_match_attempt_key = ""
+                        row.imdb_coordinates_revision = revision
                         current = (
+                            row.imdb_id,
+                            row.imdb_rating,
+                            row.imdb_votes,
                             row.imdb_match_status,
                             row.imdb_match_attempt_key,
                             row.imdb_season,
@@ -159,7 +230,7 @@ class EpisodeIMDbReconciliationService:
                     row.imdb_season = resolution.imdb_season
                     row.imdb_episode = resolution.imdb_episode
                     if resolution.imdb_id:
-                        row.imdb_match_status = IMDB_MATCH_STATUS_RESOLVED
+                        row.imdb_match_status = imdb_match_status_for_resolution(resolution)
                         row.imdb_match_attempt_key = ""
                         row.imdb_coordinates_revision = revision
                         resolved += 1
@@ -192,24 +263,6 @@ class EpisodeIMDbReconciliationService:
             return ""
         revision = getattr(self._imdb_client, "dataset_revision", None)
         return str(revision() if callable(revision) else "ready")
-
-    def _lookup_coordinates(self, imdb_id: str, *, show_imdb_id: str) -> tuple[int | None, int | None]:
-        lookup = getattr(self._imdb_client, "lookup_episode_metadata", None)
-        metadata = lookup(imdb_id) if callable(lookup) else None
-        if not isinstance(metadata, dict):
-            return None, None
-        parent_imdb_id = str(metadata.get("parent_imdb_id") or "")
-        if parent_imdb_id and parent_imdb_id != show_imdb_id:
-            return None, None
-        return self._positive_int(metadata.get("season")), self._positive_int(metadata.get("episode"))
-
-    @staticmethod
-    def _positive_int(value) -> int | None:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return None
-        return parsed if parsed > 0 else None
 
     @staticmethod
     def _attempt_key(*, revision: str, show_imdb_id: str, season: int, episode: int, title: str) -> str:

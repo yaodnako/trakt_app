@@ -21,7 +21,6 @@ TASK_KIND_HISTORY_TITLE = "history_title"
 TASK_KIND_HISTORY_EPISODE = "history_episode"
 TASK_KIND_PROGRESS_TITLE = "progress_title"
 TASK_KIND_PROGRESS_EPISODE = "progress_episode"
-TASK_KIND_SHOW_EPISODE_HYDRATION = "show_episode_hydration"
 
 TASK_STATUS_PENDING = "pending"
 TASK_STATUS_RUNNING = "running"
@@ -177,16 +176,6 @@ def build_progress_episode_task(
                 ).to_payload()
             ],
         },
-    )
-
-
-def build_show_episode_hydration_task(*, trakt_id: int, title_key: str, priority: int = 1) -> EnrichTask:
-    return EnrichTask(
-        kind=TASK_KIND_SHOW_EPISODE_HYDRATION,
-        task_key=f"show-episodes:{int(trakt_id)}",
-        priority=priority,
-        affected_title_keys=(title_key,),
-        payload={"trakt_id": int(trakt_id), "refresh_requests": []},
     )
 
 

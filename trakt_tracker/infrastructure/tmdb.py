@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
+from ipaddress import ip_address
 from time import monotonic
 from typing import Any
 from urllib.error import HTTPError
@@ -41,6 +43,7 @@ class TMDbClient:
         self._client = httpx.Client(timeout=self._request_budget_seconds)
         self._cache = ProviderCache("tmdb")
         self._cache_ttl_hours = cache_ttl_hours
+        self._direct_dns_loopback_only: bool | None = None
 
     def is_configured(self) -> bool:
         return bool(self.api_key or self.read_access_token)
@@ -134,24 +137,61 @@ class TMDbClient:
         if cached is not None:
             return cached
         deadline = monotonic() + self._request_budget_seconds
-        try:
-            response = self._client.request(
-                method,
-                f"{TMDB_API_URL}{path}",
-                headers=headers,
-                params=params,
-                timeout=self._attempt_timeout(deadline, TMDB_DIRECT_ATTEMPT_SECONDS),
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                raise
-            payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
-        except (httpx.HTTPError, ValueError):
-            payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
+        if self._system_dns_is_loopback_only():
+            try:
+                payload = self._request_with_fragmented_tls(
+                    method,
+                    path,
+                    headers=headers,
+                    params=params,
+                    deadline=deadline,
+                )
+            except Exception:
+                payload = self._request_with_curl(
+                    method,
+                    path,
+                    headers=headers,
+                    params=params,
+                    deadline=deadline,
+                )
+        else:
+            try:
+                response = self._client.request(
+                    method,
+                    f"{TMDB_API_URL}{path}",
+                    headers=headers,
+                    params=params,
+                    timeout=self._attempt_timeout(deadline, TMDB_DIRECT_ATTEMPT_SECONDS),
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    raise
+                payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
+            except (httpx.HTTPError, ValueError):
+                payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
         self._cache.set_json(cache_key, payload)
         return payload
+
+    def _system_dns_is_loopback_only(self) -> bool:
+        if self._direct_dns_loopback_only is not None:
+            return self._direct_dns_loopback_only
+        try:
+            addresses = {
+                str(info[4][0]).split("%", 1)[0]
+                for info in socket.getaddrinfo("api.themoviedb.org", 443, type=socket.SOCK_STREAM)
+                if info[4]
+            }
+            parsed = [ip_address(address) for address in addresses]
+        except (OSError, ValueError):
+            self._direct_dns_loopback_only = False
+        else:
+            self._direct_dns_loopback_only = bool(parsed) and all(
+                address.is_loopback or address.is_unspecified
+                for address in parsed
+            )
+        return self._direct_dns_loopback_only
 
     def _request_with_curl(
         self,

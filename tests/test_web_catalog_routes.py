@@ -31,6 +31,7 @@ STATIC_DIR = PROJECT_ROOT / "trakt_tracker" / "web" / "static"
 class _FakeEpisodeRatingsMatrixService:
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self.imdb_layout_available = True
 
     def load_show_matrix(
         self,
@@ -83,6 +84,7 @@ class _FakeEpisodeRatingsMatrixService:
             rows=[row],
             imdb_seasons=[season, overall],
             imdb_rows=[row],
+            imdb_layout_available=self.imdb_layout_available,
             has_episodes=True,
             provider=("trakt" if provider == "trakt" else "imdb"),
         )
@@ -97,11 +99,16 @@ class _FakeSearchWatchService:
         self.mark_calls: list[dict] = []
         self.enrich_still_calls: list[tuple[int, int]] = []
         self.return_still_after_enrich = False
+        self.pending_still_before_enrich = False
+        self.episodes_hydrated = True
+        self.hydrate_result = True
+        self.hydrate_calls: list[int] = []
         self.unmark_calls: list[dict] = []
         self.restore_calls: list[dict] = []
         self.unmark_scope_calls: list[dict] = []
         self.restore_scope_calls: list[list[dict]] = []
         self.mapping_pending = False
+        self.imdb_layout_available = True
         self.repair_calls: list[int] = []
 
     def load_show_panel(
@@ -118,6 +125,16 @@ class _FakeSearchWatchService:
                 "season_layout": season_layout,
             }
         )
+        if not self.episodes_hydrated:
+            return SearchShowWatchPanel(
+                trakt_id=trakt_id,
+                title="The Capture",
+                slug="the-capture",
+                seasons=[],
+                season_layout=season_layout,
+            )
+        effective_layout = season_layout if self.imdb_layout_available else "trakt"
+        selected_season = 1 if default_season is None else default_season
         return SearchShowWatchPanel(
             trakt_id=trakt_id,
             title="The Capture",
@@ -132,7 +149,8 @@ class _FakeSearchWatchService:
                 SearchWatchSeason(
                     season=0,
                     label="S0",
-                    bulk_allowed=season_layout == "trakt",
+                    is_default=selected_season == 0,
+                    bulk_allowed=effective_layout == "trakt",
                     episodes=[
                         SearchWatchEpisode(
                             season=0,
@@ -145,8 +163,8 @@ class _FakeSearchWatchService:
                 SearchWatchSeason(
                     season=1,
                     label="S1",
-                    is_default=True,
-                    bulk_allowed=not (season_layout == "imdb" and self.mapping_pending),
+                    is_default=selected_season == 1,
+                    bulk_allowed=not (effective_layout == "imdb" and self.mapping_pending),
                     episodes=[
                         SearchWatchEpisode(
                             season=1,
@@ -175,7 +193,11 @@ class _FakeSearchWatchService:
                             still_status=(
                                 "ready"
                                 if self.return_still_after_enrich and self.enrich_still_calls
-                                else "checked_no_data"
+                                else (
+                                    "unknown"
+                                    if self.pending_still_before_enrich
+                                    else "checked_no_data"
+                                )
                             ),
                             first_aired=datetime.now(tz=UTC) - timedelta(days=1),
                             is_watched=True,
@@ -183,7 +205,8 @@ class _FakeSearchWatchService:
                     ],
                 ),
             ],
-            season_layout=season_layout,
+            season_layout=effective_layout,
+            imdb_layout_available=self.imdb_layout_available,
             imdb_mapping_complete=not self.mapping_pending,
             imdb_mapping_pending=self.mapping_pending,
         )
@@ -236,6 +259,12 @@ class _FakeSearchWatchService:
     def enrich_missing_stills(self, trakt_id: int, season: int) -> bool:
         self.enrich_still_calls.append((trakt_id, season))
         return True
+
+    def hydrate_show_episodes(self, trakt_id: int) -> bool:
+        self.hydrate_calls.append(trakt_id)
+        if self.hydrate_result:
+            self.episodes_hydrated = True
+        return self.hydrate_result
 
     def repair_imdb_seasons(self, trakt_id: int) -> int:
         self.repair_calls.append(trakt_id)
@@ -508,6 +537,30 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn('data-title-imdb-rating="8.4 (3400)"', html)
         self.assertNotIn("title-matrix-imdb-coordinate", html)
         self.assertNotIn('data-my-rating-toggle', html)
+
+    def test_combined_imdb_series_uses_safe_trakt_layout(self) -> None:
+        self.matrix.imdb_layout_available = False
+        self.search_watch.imdb_layout_available = False
+
+        matrix = self.client.get("/titles/show/138748/episode-ratings-matrix")
+        panel = self.client.get("/search/show/3/watch-panel")
+
+        self.assertEqual(matrix.status_code, 200)
+        self.assertIn('data-imdb-layout-available="0"', matrix.text)
+        self.assertIn("IMDb seasons are unavailable", matrix.text)
+        self.assertIn("data-imdb-seasons-toggle", matrix.text)
+        self.assertIn('disabled data-layout-locked="1"', matrix.text)
+        self.assertNotIn("is-imdb-seasons", matrix.text)
+        self.assertNotIn('data-matrix-layout-panel="imdb"', matrix.text)
+        self.assertIn('data-matrix-layout-panel="trakt"', matrix.text)
+
+        self.assertEqual(panel.status_code, 200)
+        self.assertIn('data-season-layout="trakt"', panel.text)
+        self.assertIn('data-imdb-layout-available="0"', panel.text)
+        self.assertIn("IMDb seasons are unavailable", panel.text)
+        self.assertIn("data-search-watch-imdb-seasons-toggle", panel.text)
+        self.assertIn("disabled", panel.text)
+        self.assertNotIn("IMDb mapping is incomplete", panel.text)
 
     def test_imdb_seasons_preference_is_shared_and_strict(self) -> None:
         response = self.client.post("/ui/preferences/imdb-seasons", json={"enabled": False})
@@ -1317,9 +1370,118 @@ class CatalogRouteTests(unittest.TestCase):
         response = self.client.get("/search/show/3/watch-panel?refresh=1")
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.search_watch.enrich_still_calls, [(3, 1)])
+        self.assertEqual(self.enrich_tasks, [])
+        self.assertIn("no-still.jpg", response.text)
+
+    def test_search_show_watch_panel_artwork_patch_omits_full_episode_panel(self) -> None:
+        self.search_watch.return_still_after_enrich = True
+
+        response = self.client.get("/search/show/3/watch-panel?refresh=1&artwork_patch=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.search_watch.enrich_still_calls, [(3, 1)])
+        self.assertIn('data-episode-key="1-1"', response.text)
+        self.assertIn("no-still.jpg", response.text)
+        self.assertNotIn("search-watch-episode-card", response.text)
+        self.assertNotIn("data-search-watch-panel", response.text)
+
+    def test_search_show_watch_panel_returns_cold_episode_list_before_still_enrichment(self) -> None:
+        self.search_watch.episodes_hydrated = False
+        self.search_watch.return_still_after_enrich = True
+        self.search_watch.pending_still_before_enrich = True
+
+        initial = self.client.get("/search/show/3/watch-panel")
+        episodes_completed = self.client.get("/search/show/3/watch-panel?refresh=1")
+
+        self.assertEqual(initial.status_code, 200)
+        self.assertIn('data-watch-panel-pending="1"', initial.text)
+        self.assertEqual(episodes_completed.status_code, 200)
+        self.assertEqual(self.enrich_tasks, [])
+        self.assertEqual(self.search_watch.hydrate_calls, [3])
         self.assertEqual(self.search_watch.enrich_still_calls, [])
-        self.assertTrue(self.enrich_tasks)
-        self.assertNotIn("no-still.jpg", response.text)
+        self.assertIn("Pilot", episodes_completed.text)
+        self.assertNotIn('data-watch-panel-pending="1"', episodes_completed.text)
+        still_tasks = [
+            kwargs
+            for args, kwargs in self.bg_task_calls
+            if args and args[0] == "search_enrichment_watch_panel_stills_3_1"
+        ]
+        self.assertEqual(len(still_tasks), 1)
+        selected_season = episodes_completed.text.split('data-search-watch-season-panel="1"', 1)[1]
+        self.assertIn('data-still-pending="1"', selected_season)
+
+        stills_completed = self.client.get("/search/show/3/watch-panel?refresh=1")
+
+        self.assertEqual(stills_completed.status_code, 200)
+        self.assertEqual(self.search_watch.enrich_still_calls, [(3, 1)])
+        self.assertIn("no-still.jpg", stills_completed.text)
+        selected_season = stills_completed.text.split('data-search-watch-season-panel="1"', 1)[1]
+        self.assertNotIn('data-still-pending="1"', selected_season)
+
+    def test_search_show_watch_panel_refresh_ends_empty_episode_state(self) -> None:
+        self.search_watch.episodes_hydrated = False
+        self.search_watch.hydrate_result = False
+
+        response = self.client.get("/search/show/3/watch-panel?refresh=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.search_watch.hydrate_calls, [3])
+        self.assertIn("No episodes found.", response.text)
+        self.assertNotIn('data-watch-panel-pending="1"', response.text)
+
+    def test_search_show_watch_panel_refresh_targets_requested_season(self) -> None:
+        response = self.client.get("/search/show/3/watch-panel?season=0&refresh=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.search_watch.hydrate_calls, [])
+        self.assertEqual(self.search_watch.enrich_still_calls, [(3, 0)])
+        self.assertTrue(all(call["default_season"] == 0 for call in self.search_watch.load_calls))
+
+    def test_search_show_watch_panel_refresh_does_not_wait_for_imdb_mapping(self) -> None:
+        self.search_watch.mapping_pending = True
+        self.search_watch.return_still_after_enrich = True
+
+        response = self.client.get("/search/show/3/watch-panel?refresh=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.search_watch.enrich_still_calls, [(3, 1)])
+        self.assertIn("no-still.jpg", response.text)
+        self.assertIn('data-imdb-mapping-pending="1"', response.text)
+
+    def test_watch_panel_clients_share_the_completion_contract(self) -> None:
+        shared = (STATIC_DIR / "show_watch_panel.js").read_text(encoding="utf-8")
+        self.assertIn("function needsRefresh(body)", shared)
+        self.assertIn("body?.querySelector(\"[data-watch-panel-pending='1']\")", shared)
+        self.assertIn("function applyRefresh(body, html)", shared)
+        self.assertIn("body.replaceChildren(", shared)
+
+        for script_name in (
+            "catalog_page.js",
+            "history_watch_panel.js",
+            "release_tracking_page.js",
+        ):
+            script = (STATIC_DIR / script_name).read_text(encoding="utf-8")
+            self.assertIn("traktShowWatchPanel?.needsRefresh(watchBody)", script, script_name)
+            self.assertIn('refreshUrl.searchParams.set("refresh", "1")', script, script_name)
+            self.assertIn('refreshUrl.searchParams.set("artwork_patch", "1")', script, script_name)
+            self.assertIn("traktShowWatchPanel?.applyRefresh(watchBody, html)", script, script_name)
+            self.assertIn("let needsArtworkFollowup = false;", script, script_name)
+            self.assertIn("needsArtworkFollowup = Boolean(", script, script_name)
+            self.assertIn(
+                "void refreshWatchPanel(requestUrl, token, {state, focusDefault});",
+                script,
+                script_name,
+            )
+            self.assertIn("await refreshWatchPanel(requestUrl, token, {state, focusDefault});", script, script_name)
+            self.assertNotIn(
+                'if (watchBody.querySelector("[data-search-watch-panel]")?.dataset.imdbMappingPending !== "1")',
+                script,
+                script_name,
+            )
+
+        history_script = (STATIC_DIR / "history_watch_panel.js").read_text(encoding="utf-8")
+        self.assertNotIn("setTimeout(() => refreshWatchPanel", history_script)
 
     def test_search_show_watch_panel_schedules_still_warm_without_blocking_response(self) -> None:
         response = self.client.get("/search/show/3/watch-panel")

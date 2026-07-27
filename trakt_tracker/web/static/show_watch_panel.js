@@ -116,12 +116,37 @@
             const current = Array.from(body.querySelectorAll(".search-watch-still[data-episode-key]"))
                 .find((node) => node.dataset.episodeKey === key);
             if (!current) return;
-            current.replaceChildren(...Array.from(fresh.childNodes).map((node) => node.cloneNode(true)));
+            const freshArtwork = fresh.querySelector("[data-still-artwork]");
+            if (!freshArtwork) return;
+            const currentArtwork = current.querySelector("[data-still-artwork]");
+            const replacement = freshArtwork.cloneNode(true);
+            if (currentArtwork) currentArtwork.replaceWith(replacement);
+            else current.prepend(replacement);
             if (fresh.dataset.stillPending === "1") current.dataset.stillPending = "1";
             else current.removeAttribute("data-still-pending");
         });
         body.scrollTop = scrollTop;
         body.scrollLeft = scrollLeft;
+    }
+
+    function needsRefresh(body) {
+        const selectedSeason = body?.querySelector(".search-watch-episode-grid:not(.is-hidden)");
+        return Boolean(
+            body?.querySelector("[data-watch-panel-pending='1']")
+            || selectedSeason?.querySelector(".search-watch-still[data-still-pending='1']")
+        );
+    }
+
+    function applyRefresh(body, html) {
+        if (!body) return false;
+        if (!body.querySelector("[data-watch-panel-pending='1']")) {
+            patchArtwork(body, html);
+            return false;
+        }
+        const parsed = document.createElement("div");
+        parsed.innerHTML = html;
+        body.replaceChildren(...Array.from(parsed.childNodes));
+        return true;
     }
 
     function captureState(body) {
@@ -357,6 +382,8 @@
         configureTitleRatings,
         focusDefaultEpisode,
         focusUnwatchScope,
+        applyRefresh,
+        needsRefresh,
         patchArtwork,
         payloadFromElement,
         restoreState,

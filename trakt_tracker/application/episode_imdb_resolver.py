@@ -31,6 +31,7 @@ class EpisodeIMDbResolution:
     imdb_votes: int | None = None
     imdb_season: int | None = None
     imdb_episode: int | None = None
+    is_alternate_parent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +72,16 @@ class EpisodeIMDbResolver:
             trakt_imdb_id=trakt_imdb_id,
         )
         if not candidates:
+            return EpisodeIMDbResolution()
+
+        trakt_candidate = next((candidate for candidate in candidates if candidate.source == "trakt"), None)
+        if (
+            trakt_candidate is not None
+            and trakt_candidate.parent_imdb_id
+            and trakt_candidate.parent_imdb_id != show_imdb_id
+        ):
+            if episode_titles_equivalent(trakt_candidate.title, title):
+                return self._resolution_from_candidate(trakt_candidate, is_alternate_parent=True)
             return EpisodeIMDbResolution()
 
         title_matches = [
@@ -117,6 +128,36 @@ class EpisodeIMDbResolver:
             imdb_votes=votes,
             imdb_season=chosen.season,
             imdb_episode=chosen.episode,
+        )
+
+    def resolve_known_id(
+        self,
+        *,
+        show_imdb_id: str,
+        title: str,
+        imdb_id: str,
+    ) -> EpisodeIMDbResolution:
+        imdb_id = str(imdb_id or "")
+        if not imdb_id:
+            return EpisodeIMDbResolution()
+        metadata = self._lookup_episode_metadata(imdb_id)
+        candidate = self._candidate_from_metadata(imdb_id, "trakt", metadata)
+        is_alternate_parent = bool(
+            candidate.parent_imdb_id
+            and show_imdb_id
+            and candidate.parent_imdb_id != show_imdb_id
+        )
+        if (
+            is_alternate_parent
+            and not episode_titles_equivalent(candidate.title, title)
+        ):
+            return EpisodeIMDbResolution(
+                imdb_id=imdb_id,
+                is_alternate_parent=True,
+            )
+        return self._resolution_from_candidate(
+            candidate,
+            is_alternate_parent=is_alternate_parent,
         )
 
     def _candidates(
@@ -196,6 +237,21 @@ class EpisodeIMDbResolver:
             )
         return EpisodeIMDbResolution(imdb_id=imdb_id)
 
+    @staticmethod
+    def _resolution_from_candidate(
+        candidate: _EpisodeIMDbCandidate,
+        *,
+        is_alternate_parent: bool = False,
+    ) -> EpisodeIMDbResolution:
+        return EpisodeIMDbResolution(
+            imdb_id=candidate.imdb_id,
+            imdb_rating=candidate.imdb_rating,
+            imdb_votes=candidate.imdb_votes,
+            imdb_season=(None if is_alternate_parent else candidate.season),
+            imdb_episode=(None if is_alternate_parent else candidate.episode),
+            is_alternate_parent=is_alternate_parent,
+        )
+
     def _is_ready(self) -> bool:
         return bool(getattr(self._imdb_client, "is_ready", lambda: False)())
 
@@ -243,3 +299,19 @@ def normalize_episode_title(title: str | None) -> str:
 def is_generic_episode_title(title: str | None) -> bool:
     normalized = normalize_episode_title(title)
     return bool(_GENERIC_EPISODE_TITLE_RE.fullmatch(normalized))
+
+
+def episode_titles_equivalent(left: str | None, right: str | None) -> bool:
+    normalized_left = normalize_episode_title(left)
+    normalized_right = normalize_episode_title(right)
+    if not normalized_left or not normalized_right:
+        return False
+    if normalized_left == normalized_right:
+        return True
+    identity_left = " ".join(
+        "".join(character if character.isalnum() else " " for character in normalized_left).split()
+    )
+    identity_right = " ".join(
+        "".join(character if character.isalnum() else " " for character in normalized_right).split()
+    )
+    return bool(identity_left and identity_left == identity_right)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from threading import Lock
 
+from trakt_tracker.application.episode_imdb_reconciliation import IMDB_MATCH_STATUS_ALTERNATE_PARENT
 from trakt_tracker.application.metadata_refresh_policy import ASSET_KIND_STILL, TRIGGER_PAGE_CONTEXT
 from trakt_tracker.domain import EpisodeSummary, HistoryItemInput
 
@@ -91,6 +93,7 @@ class SearchShowWatchPanel:
     default_episode_key: tuple[int, int] | None = None
     watched_frontier_key: tuple[int, int] | None = None
     season_layout: str = SEASON_LAYOUT_TRAKT
+    imdb_layout_available: bool = True
     imdb_mapping_complete: bool = True
     imdb_mapping_pending: bool = False
 
@@ -126,6 +129,8 @@ class SearchWatchService:
         self._episode_repo = episode_repo
         self._history_service = history_service
         self._episode_metadata = episode_metadata
+        self._still_enrichment_locks_guard = Lock()
+        self._still_enrichment_locks: dict[tuple[int, int], Lock] = {}
 
     def load_show_panel(
         self,
@@ -134,17 +139,24 @@ class SearchWatchService:
         *,
         season_layout: str = SEASON_LAYOUT_TRAKT,
     ) -> SearchShowWatchPanel:
-        normalized_layout = normalize_season_layout(season_layout)
+        requested_layout = normalize_season_layout(season_layout)
         with self._db.session() as session:
             title_row = self._titles.get_title(session, trakt_id)
             episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
             watched_keys = self._history.watched_episode_keys(session, trakt_id)
             rated_map = self._history.latest_show_episode_ratings(session, trakt_id)
+        imdb_layout_available = self._imdb_layout_available(episode_rows)
+        normalized_layout = requested_layout if imdb_layout_available else SEASON_LAYOUT_TRAKT
         default_episode_key = self._default_episode_key(episode_rows, watched_keys)
         watched_frontier_key = max((key for key in watched_keys if key[0] > 0), default=None)
-        imdb_mapping_complete = self._imdb_mapping_complete(episode_rows)
+        imdb_mapping_complete = (
+            self._imdb_mapping_complete(episode_rows)
+            if imdb_layout_available
+            else True
+        )
         imdb_mapping_pending = (
-            normalized_layout == SEASON_LAYOUT_IMDB
+            imdb_layout_available
+            and normalized_layout == SEASON_LAYOUT_IMDB
             and not imdb_mapping_complete
             and self._imdb_mapping_pending(trakt_id)
         )
@@ -216,6 +228,7 @@ class SearchWatchService:
             default_episode_key=default_episode_key,
             watched_frontier_key=watched_frontier_key,
             season_layout=normalized_layout,
+            imdb_layout_available=imdb_layout_available,
             imdb_mapping_complete=imdb_mapping_complete,
             imdb_mapping_pending=imdb_mapping_pending,
         )
@@ -233,6 +246,13 @@ class SearchWatchService:
     def enrich_missing_stills(self, trakt_id: int, season: int) -> bool:
         if self._episode_metadata is None:
             return False
+        lock_key = (int(trakt_id), int(season))
+        with self._still_enrichment_locks_guard:
+            season_lock = self._still_enrichment_locks.setdefault(lock_key, Lock())
+        with season_lock:
+            return self._enrich_missing_stills_locked(*lock_key)
+
+    def _enrich_missing_stills_locked(self, trakt_id: int, season: int) -> bool:
         with self._db.session() as session:
             episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
         keys = [
@@ -433,6 +453,16 @@ class SearchWatchService:
             return False
         checker = getattr(self._episode_metadata, "needs_episode_imdb_reconciliation", None)
         return bool(checker and checker(int(trakt_id)))
+
+    @classmethod
+    def _imdb_layout_available(cls, rows: list[dict]) -> bool:
+        return not any(
+            str(row.get("imdb_match_status") or "") == IMDB_MATCH_STATUS_ALTERNATE_PARENT
+            for row in rows
+            if row.get("season") is not None
+            and int(row["season"]) >= 1
+            and cls._is_released(row.get("first_aired"))
+        )
 
     @classmethod
     def _imdb_mapping_complete(cls, rows: list[dict]) -> bool:

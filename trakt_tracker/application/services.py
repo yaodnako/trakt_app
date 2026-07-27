@@ -15,7 +15,6 @@ from trakt_tracker.application.episode_ratings_matrix import EpisodeRatingsMatri
 from trakt_tracker.application.episode_imdb_reconciliation import EpisodeIMDbReconciliationService
 from trakt_tracker.application.enrich_queue import (
     EnrichQueueService,
-    TASK_KIND_SHOW_EPISODE_HYDRATION,
     build_history_episode_task,
 )
 from trakt_tracker.application.history import HistoryService
@@ -729,8 +728,9 @@ class SyncService:
             + load_cached_trakt_rating_items(self._auth.config.active_slug)
         )
         if changed:
-            self._episode_metadata.enrich_episode_imdb_ratings()
-        self._episode_metadata.repair_episode_imdb_ratings()
+            self._episode_metadata.repair_episode_imdb_ratings(refresh_known=True)
+        else:
+            self._episode_metadata.repair_episode_imdb_ratings()
         return changed
 
     def should_auto_sync_imdb_dataset(self, interval_minutes: int) -> bool:
@@ -1133,9 +1133,6 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
                 int(task.payload["season"]),
                 int(task.payload["episode"]),
                 refresh_requests=task.payload.get("refresh_requests", []),
-            ),
-            TASK_KIND_SHOW_EPISODE_HYDRATION: lambda task: (
-                "ready" if search_watch.hydrate_show_episodes(int(task.payload["trakt_id"])) else "checked_no_data"
             ),
         },
         max_workers=2,
