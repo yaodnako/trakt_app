@@ -16,7 +16,7 @@
             <div class="settings-profile-row">
                 <div>
                     <strong>{{ profile.slug }}</strong>
-                    <span>{{ 'Active' if profile.active else ('Connected' if profile.authorized else 'Disconnected') }}</span>
+                    <span>{{ 'Token update required' if profile.reauthorization_required else ('Active' if profile.active else ('Connected' if profile.authorized else 'Disconnected')) }}</span>
                 </div>
                 <div class="settings-inline-actions">
                     {% if not profile.active and profile.authorized %}
@@ -27,8 +27,8 @@
                     {% endif %}
                     {% if profile.active or not profile.authorized %}
                     <form method="post" action="/settings/trakt-authorize">
-                        <input type="hidden" name="return_to" value="/settings">
-                        <button type="submit" class="button ghost" {% if not trakt_configured %}disabled{% endif %}>Reconnect</button>
+                        <input type="hidden" name="return_to" value="{{ reconnect_return_to if profile.active else '/settings' }}">
+                        <button type="submit" class="button ghost" {% if not trakt_configured %}disabled{% endif %}>{{ 'Update Trakt token' if profile.reauthorization_required else 'Reconnect' }}</button>
                     </form>
                     {% endif %}
                     {% if profile.authorized %}
@@ -65,6 +65,10 @@
                     <label class="settings-checkbox">
                         <input type="checkbox" name="open_in_embedded_player" value="1" {% if config.open_in_embedded_player %}checked{% endif %}>
                         <span>Open Kinopoisk in embedded player</span>
+                    </label>
+                    <label class="settings-checkbox">
+                        <input type="checkbox" name="web_hide_spoilers" value="1" {% if config.web_hide_spoilers %}checked{% endif %}>
+                        <span>Don't show spoilers</span>
                     </label>
                     <label class="settings-checkbox">
                         <input type="checkbox" name="web_portal_start_with_windows" value="1" {% if config.web_portal_start_with_windows %}checked{% endif %}>

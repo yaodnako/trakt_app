@@ -138,7 +138,7 @@ class EpisodeMetadataService:
     def load_cached_trakt_rating_maps(self) -> tuple[dict[int, int], dict[tuple[int, int, int], int]]:
         title_ratings: dict[int, tuple[datetime, int]] = {}
         episode_ratings: dict[tuple[int, int, int], tuple[datetime, int]] = {}
-        for item in load_cached_trakt_rating_items():
+        for item in load_cached_trakt_rating_items(self._active_profile_slug()):
             if not isinstance(item, dict):
                 continue
             rating = item.get("rating")
@@ -183,7 +183,11 @@ class EpisodeMetadataService:
             return {}
         wanted = set(keys)
         result: dict[tuple[int, int, int], dict] = {}
-        payloads = load_cached_trakt_history_items() + load_cached_trakt_rating_items()
+        profile_slug = self._active_profile_slug()
+        payloads = (
+            load_cached_trakt_history_items(profile_slug)
+            + load_cached_trakt_rating_items(profile_slug)
+        )
         for item in payloads:
             if item.get("type") != "episode":
                 continue
@@ -214,6 +218,10 @@ class EpisodeMetadataService:
                 "imdb_votes": resolution.imdb_votes,
             }
         return result
+
+    def _active_profile_slug(self) -> str:
+        config = getattr(self._auth, "config", None)
+        return str(getattr(config, "active_slug", "") or "")
 
     def enrich_episode_imdb_ratings(self) -> None:
         if not self._imdb_client.is_ready():
@@ -258,6 +266,17 @@ class EpisodeMetadataService:
             result = self._imdb_reconciliation.reconcile_show(current_show_id, show_imdb_id=show_imdb_id)
             changed += result.changed
         return changed
+
+    def needs_episode_imdb_reconciliation(self, show_trakt_id: int) -> bool:
+        if not self._imdb_client.is_ready() or self._titles is None:
+            return False
+        with self._db.session() as session:
+            show_imdb_id = self._show_imdb_id(session, int(show_trakt_id))
+            episode_rows = self._episode_repo.list_show_episode_metadata(session, int(show_trakt_id))
+        return self._imdb_reconciliation.needs_reconciliation(
+            show_imdb_id=show_imdb_id,
+            episode_rows=episode_rows,
+        )
 
     def backfill_episode_imdb_ids_from_payloads(self, payloads: list[dict]) -> None:
         if not payloads:

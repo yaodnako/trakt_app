@@ -206,6 +206,7 @@ class ReleaseTrackingService:
             items = self._progress_repository.list_in_progress(
                 session,
                 view=ProgressView.ACTIVE,
+                limit=None,
             )
             if bool(getattr(config, "hide_upcoming_in_progress", False)):
                 items = [

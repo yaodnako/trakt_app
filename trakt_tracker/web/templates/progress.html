@@ -20,11 +20,17 @@
         </label>
         <label class="toggle-chip">
             <input type="checkbox" {% if show_paused %}checked{% endif %} data-progress-toggle="show_paused">
-            <span>Show Paused</span>
+            <span class="progress-filter-label">
+                <img class="progress-filter-icon progress-filter-icon-pause" src="{{ request.url_for('static', path='pause.svg') }}" alt="" aria-hidden="true">
+                <span>Paused</span>
+            </span>
         </label>
         <label class="toggle-chip">
             <input type="checkbox" {% if show_dropped %}checked{% endif %} data-progress-toggle="show_dropped">
-            <span>Show Dropped</span>
+            <span class="progress-filter-label">
+                <img class="progress-filter-icon progress-filter-icon-drop" src="{{ request.url_for('static', path='drop_red.svg') }}" alt="" aria-hidden="true">
+                <span>Dropped</span>
+            </span>
         </label>
         <form method="get" action="/progress" class="progress-sort-form" data-progress-sort-form>
             <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
@@ -35,7 +41,7 @@
             <input type="hidden" name="direction" value="{{ sort_direction }}">
             <label class="progress-sort-field">
                 <span class="visually-hidden">Sort Up next</span>
-                <select name="sort" aria-label="Sort Up next" data-progress-sort-select>
+                <select name="sort" aria-label="Sort Up next" data-progress-sort-select data-progress-sort-mode="{{ sort_mode }}">
                     {% for value, label in progress_sort_options %}
                     <option value="{{ value }}" {% if sort_mode == value %}selected{% endif %}>{{ label }}</option>
                     {% endfor %}

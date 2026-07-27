@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import perf_counter
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -19,6 +19,7 @@ from trakt_tracker.config import ConfigStore, format_local_datetime, get_app_dat
 from trakt_tracker.formatting import format_compact_votes, format_rating_with_votes
 from trakt_tracker.infrastructure.artwork_cache import tmdb_episode_preview_url
 from trakt_tracker.infrastructure.cache import BinaryCache
+from trakt_tracker.infrastructure.trakt.client import TraktReauthorizationRequired
 from trakt_tracker.profiles import read_setup_state, recover_interrupted_setup
 from trakt_tracker.startup_profile import StartupProfiler
 from trakt_tracker.web.routes_catalog import register_catalog_routes
@@ -419,6 +420,50 @@ def create_app(
     except (OSError, ValueError):
         app.state.static_js_version = 0
 
+    def reconnect_required(services: ServiceContainer, *, setup_complete: bool | None = None) -> bool:
+        explicit = getattr(services.auth, "reauthorization_required", None)
+        if callable(explicit) and explicit():
+            return True
+        if services.auth.is_authorized() or not services.auth.config.active_slug:
+            return False
+        if setup_complete is None:
+            setup_complete = read_setup_state(services.database).get("state") == "complete"
+        return bool(setup_complete)
+
+    def reconnect_return_path(request: Request) -> str:
+        if request.method == "GET":
+            return request.url.path + (f"?{request.url.query}" if request.url.query else "")
+        referer = str(request.headers.get("referer", "") or "").strip()
+        if referer:
+            parsed = urlsplit(referer)
+            if parsed.hostname == request.url.hostname and parsed.path.startswith("/") and not parsed.path.startswith("//"):
+                return parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        return "/progress"
+
+    def reconnect_response(request: Request, *, json_response: bool):
+        message = "Trakt could not update your token automatically. Update it to continue."
+        return_to = reconnect_return_path(request)
+        if json_response:
+            return JSONResponse(
+                {
+                    "detail": message,
+                    "code": "trakt_reauth_required",
+                    "return_to": return_to,
+                },
+                status_code=401,
+            )
+        return render(
+            request,
+            "reauthorization_required.html",
+            {
+                "page_title": "Update Trakt token",
+                "flash": "",
+                "reconnect_return_to": return_to,
+                "suppress_auth_banner": True,
+            },
+            status_code=401,
+        )
+
     @app.middleware("http")
     async def capture_request_timing(request: Request, call_next):
         started = perf_counter()
@@ -454,13 +499,30 @@ def create_app(
 
         services: ServiceContainer = request.app.state.services
         authorized = services.auth.is_authorized()
-        setup_complete = authorized and read_setup_state(services.database).get("state") == "complete"
-        if setup_complete:
-            return await call_next(request)
-
+        profile_setup_complete = read_setup_state(services.database).get("state") == "complete"
         accepts_json = "application/json" in request.headers.get("accept", "").casefold()
         sends_json = "application/json" in request.headers.get("content-type", "").casefold()
-        if accepts_json or sends_json:
+        partial_request = request.headers.get("x-trakt-partial", "").casefold() == "catalog"
+        fetch_request = request.headers.get("x-trakt-fetch", "") == "1"
+        json_response = (
+            accepts_json
+            or sends_json
+            or partial_request
+            or fetch_request
+            or path.startswith("/notifications/")
+        )
+        if reconnect_required(services, setup_complete=profile_setup_complete):
+            return reconnect_response(request, json_response=json_response)
+        if authorized and profile_setup_complete:
+            try:
+                response = await call_next(request)
+            except TraktReauthorizationRequired:
+                return reconnect_response(request, json_response=json_response)
+            if reconnect_required(services, setup_complete=True):
+                return reconnect_response(request, json_response=json_response)
+            return response
+
+        if json_response:
             status_code = 401 if not authorized else 409
             return JSONResponse(
                 {"detail": "Trakt authorization required" if not authorized else "Initial setup is incomplete"},
@@ -477,6 +539,9 @@ def create_app(
         return JSONResponse({"status": "ok", "version": app_version()})
 
     def render(request: Request, template_name: str, context: dict, status_code: int = 200) -> HTMLResponse:
+        services: ServiceContainer = request.app.state.services
+        authorized = services.auth.is_authorized()
+        profile_setup_complete = read_setup_state(services.database).get("state") == "complete"
         sound_path = Path(str(request.app.state.services.auth.config.notification_sound_path or "")).expanduser()
         notification_sound_url = ""
         if sound_path.exists() and sound_path.is_file():
@@ -491,10 +556,17 @@ def create_app(
         base_context = {
             "request": request,
             "current_path": request.url.path,
-            "authorized": request.app.state.services.auth.is_authorized(),
-            "configured": request.app.state.services.auth.is_configured(),
+            "authorized": authorized,
+            "reauthorization_required": reconnect_required(
+                services,
+                setup_complete=profile_setup_complete,
+            ),
+            "configured": services.auth.is_configured(),
             "settings_utc_offset": request.app.state.services.auth.config.utc_offset,
             "active_profile_slug": request.app.state.services.auth.config.active_slug,
+            "web_hide_spoilers": bool(
+                getattr(request.app.state.services.auth.config, "web_hide_spoilers", False)
+            ),
             "notification_sound_url": notification_sound_url,
             "notifications_browser_poll_enabled": os.environ.get("TRAKT_TRACKER_TRAY_RUNTIME") != "1",
             "notification_activity_initial_seq": request.app.state.services.notifications.current_activity_seq(),
@@ -513,9 +585,12 @@ def create_app(
         return templates.TemplateResponse(request, template_name, base_context, status_code=status_code)
 
     def render_fragment(request: Request, template_name: str, context: dict) -> str:
+        config = request.app.state.services.auth.config
         fragment_context = {
             "request": request,
             "current_path": request.url.path,
+            "active_profile_slug": config.active_slug,
+            "web_hide_spoilers": bool(getattr(config, "web_hide_spoilers", False)),
         }
         fragment_context.update(context)
         return templates.get_template(template_name).render(fragment_context)

@@ -158,6 +158,7 @@ class ProgressSyncWorkflow:
         sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
         descending: bool = True,
         dropped_only: bool | None = None,
+        limit: int | None = 50,
     ) -> list[ProgressSnapshot]:
         with self._db.session() as session:
             items = self._progress_repo.list_in_progress(
@@ -166,6 +167,7 @@ class ProgressSyncWorkflow:
                 sort_mode=sort_mode,
                 descending=descending,
                 dropped_only=dropped_only,
+                limit=limit,
             )
             title_episode_averages = (
                 self._history.watched_episode_average_ratings(
@@ -238,12 +240,13 @@ class ProgressSyncWorkflow:
         sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
         descending: bool = True,
         dropped_only: bool | None = None,
+        force_refresh: bool = False,
         force_full_assets: bool = False,
         defer_assets: bool = False,
     ) -> list[ProgressSnapshot]:
         normalized_view = self._progress_repo.normalize_view(view, dropped_only=dropped_only)
         self._sync_hidden_status()
-        if trakt_ids is None and self._can_skip_full_progress_sync():
+        if trakt_ids is None and not force_refresh and self._can_skip_full_progress_sync():
             self._operations.publish("Progress sync", "Policy skipped full progress sync; using local dashboard state.")
             return self.dashboard_progress(
                 view=normalized_view,
@@ -307,7 +310,11 @@ class ProgressSyncWorkflow:
                 dropped_ids=dropped_ids,
                 paused_ids=paused_ids,
             )
-            for progress in self._progress_repo.list_in_progress(session, view=ProgressView.PAUSED):
+            for progress in self._progress_repo.list_in_progress(
+                session,
+                view=ProgressView.PAUSED,
+                limit=None,
+            ):
                 self._acknowledge_progress_episode(session, progress)
 
     @staticmethod

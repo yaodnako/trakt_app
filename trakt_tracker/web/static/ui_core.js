@@ -8,18 +8,155 @@
         return;
     }
 
+    const CACHED_IMAGE_RETRY_LIMIT = 30;
+    const CACHED_IMAGE_RETRY_DELAY_MS = 750;
+    const SPOILER_REVEALS_STORAGE_KEY = "trakt-spoiler-reveals-v1";
     const csrfToken = document.querySelector('meta[name="trakt-csrf-token"]')?.content || "";
+    const setupSpoilerProtection = () => {
+        let stored = [];
+        try {
+            const parsed = JSON.parse(window.sessionStorage.getItem(SPOILER_REVEALS_STORAGE_KEY) || "[]");
+            stored = Array.isArray(parsed) ? parsed.filter((key) => typeof key === "string") : [];
+        } catch {
+            stored = [];
+        }
+        const revealed = new Set(stored);
+        const persist = () => {
+            try {
+                window.sessionStorage.setItem(SPOILER_REVEALS_STORAGE_KEY, JSON.stringify(Array.from(revealed)));
+            } catch {
+                // The current DOM still reveals correctly when session storage is unavailable.
+            }
+        };
+        const syncContainer = (container) => {
+            if (!(container instanceof Element)) {
+                return;
+            }
+            const key = container.dataset.spoilerKey || "";
+            const isRevealed = Boolean(key && revealed.has(key));
+            container.classList.toggle("is-spoiler-revealed", isRevealed);
+            const button = container.querySelector("[data-spoiler-reveal]");
+            if (button instanceof HTMLButtonElement) {
+                button.hidden = isRevealed || !container.querySelector("[data-spoiler-image]");
+            }
+        };
+        const syncTree = (root) => {
+            if (!(root instanceof Element) && root !== document) {
+                return;
+            }
+            const containers = new Set();
+            if (root instanceof Element) {
+                const closest = root.closest("[data-spoiler-key]");
+                if (closest) {
+                    containers.add(closest);
+                }
+                if (root.matches("[data-spoiler-key]")) {
+                    containers.add(root);
+                }
+            }
+            root.querySelectorAll?.("[data-spoiler-key]").forEach((container) => containers.add(container));
+            containers.forEach(syncContainer);
+        };
+        document.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-spoiler-reveal]");
+            if (!(button instanceof HTMLButtonElement)) {
+                return;
+            }
+            const container = button.closest("[data-spoiler-key]");
+            const key = container?.dataset.spoilerKey || "";
+            if (!container || !key) {
+                return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            revealed.add(key);
+            persist();
+            document.querySelectorAll("[data-spoiler-key]").forEach((candidate) => {
+                if (candidate.dataset.spoilerKey === key) {
+                    syncContainer(candidate);
+                }
+            });
+        });
+        syncTree(document);
+        if (document.body) {
+            new MutationObserver((records) => {
+                records.forEach((record) => {
+                    record.addedNodes.forEach((node) => {
+                        if (node instanceof Element) {
+                            syncTree(node);
+                        }
+                    });
+                });
+            }).observe(document.body, {childList: true, subtree: true});
+        }
+    };
+    const showTraktReconnectPrompt = (payload = {}) => {
+        const stack = document.getElementById("web-flash-stack");
+        if (!stack || stack.querySelector("[data-trakt-reconnect-prompt]")) {
+            return;
+        }
+        const prompt = document.createElement("div");
+        prompt.className = "web-flash web-flash-action";
+        prompt.dataset.traktReconnectPrompt = "true";
+        prompt.setAttribute("role", "alert");
+
+        const message = document.createElement("span");
+        message.textContent = "Trakt could not update your token automatically.";
+
+        const form = document.createElement("form");
+        form.method = "post";
+        form.action = "/settings/trakt-authorize";
+        const returnTo = document.createElement("input");
+        returnTo.type = "hidden";
+        returnTo.name = "return_to";
+        returnTo.value = (
+            typeof payload.return_to === "string" && payload.return_to.startsWith("/")
+                ? payload.return_to
+                : `${window.location.pathname}${window.location.search}`
+        );
+        const button = document.createElement("button");
+        button.type = "submit";
+        button.className = "web-flash-action-button";
+        button.textContent = "Update Trakt token";
+        form.addEventListener("submit", () => {
+            button.disabled = true;
+            button.textContent = "Opening Trakt…";
+        });
+        form.append(returnTo, button);
+        prompt.append(message, form);
+        stack.appendChild(prompt);
+    };
+    window.showTraktReconnectPrompt = showTraktReconnectPrompt;
+
     const nativeFetch = window.fetch.bind(window);
     window.fetch = (input, init = {}) => {
         const inputRequest = input instanceof Request ? input : null;
         const method = String(init.method || inputRequest?.method || "GET").toUpperCase();
         const target = new URL(inputRequest?.url || String(input), window.location.href);
-        if (["POST", "PUT", "PATCH", "DELETE"].includes(method) && target.origin === window.location.origin) {
+        if (target.origin === window.location.origin) {
             const headers = new Headers(init.headers || inputRequest?.headers || undefined);
-            headers.set("X-Trakt-CSRF", csrfToken);
+            headers.set("X-Trakt-Fetch", "1");
+            if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+                headers.set("X-Trakt-CSRF", csrfToken);
+            }
             init = {...init, headers};
         }
-        return nativeFetch(input, init);
+        return nativeFetch(input, init).then(async (response) => {
+            if (
+                response.status === 401
+                && response.headers.get("content-type")?.includes("application/json")
+            ) {
+                try {
+                    const payload = await response.clone().json();
+                    if (payload.code === "trakt_reauth_required") {
+                        showTraktReconnectPrompt(payload);
+                    }
+                } catch {
+                    // The caller retains the original response and handles non-JSON failures.
+                }
+            }
+            return response;
+        });
     };
     document.addEventListener("submit", (event) => {
         const form = event.target;
@@ -324,7 +461,7 @@
             return;
         }
         const attempts = Number(image.dataset.cachedImageRetry || "0");
-        if (!Number.isFinite(attempts) || attempts >= 8) {
+        if (!Number.isFinite(attempts) || attempts >= CACHED_IMAGE_RETRY_LIMIT) {
             return;
         }
         image.dataset.cachedImageRetry = String(attempts + 1);
@@ -334,7 +471,7 @@
             }
             current.searchParams.set("cb", String(Date.now()));
             image.src = current.toString();
-        }, Math.min(5000, 600 * (attempts + 1)));
+        }, CACHED_IMAGE_RETRY_DELAY_MS);
     }, true);
 
     document.addEventListener("error", (event) => {
@@ -348,13 +485,13 @@
         }
         if (current.pathname !== "/cached-image") return;
         const attempts = Number(image.dataset.cachedImageRetry || "0");
-        if (!Number.isFinite(attempts) || attempts >= 8) return;
+        if (!Number.isFinite(attempts) || attempts >= CACHED_IMAGE_RETRY_LIMIT) return;
         image.dataset.cachedImageRetry = String(attempts + 1);
         window.setTimeout(() => {
             if (!document.contains(image)) return;
             current.searchParams.set("cb", String(Date.now()));
             image.src = current.toString();
-        }, Math.min(5000, 600 * (attempts + 1)));
+        }, CACHED_IMAGE_RETRY_DELAY_MS);
     }, true);
 
     function syncOverlayBodyLock() {
@@ -1407,12 +1544,45 @@
             }
         }
     });
-    document.addEventListener("change", (event) => {
+    document.addEventListener("change", async (event) => {
         const toggle = event.target.closest("[data-hide-season-zero-toggle], [data-imdb-seasons-toggle]");
         if (!toggle || !titleMatrixBody) {
             return;
         }
         const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
+        applyTitleMatrixToggles(fragmentRoot);
+        if (!toggle.matches("[data-imdb-seasons-toggle]")) {
+            return;
+        }
+        const enabled = Boolean(toggle.checked);
+        toggle.disabled = true;
+        try {
+            const savePreference = window.traktSaveImdbSeasonsPreference;
+            if (typeof savePreference !== "function") {
+                throw new Error("IMDb seasons preference is unavailable.");
+            }
+            const result = await savePreference(enabled);
+            document.dispatchEvent(new CustomEvent("trakt:imdb-seasons-preference-changed", {
+                detail: {enabled: Boolean(result.enabled), source: "matrix"},
+            }));
+        } catch (error) {
+            toggle.checked = !enabled;
+            applyTitleMatrixToggles(fragmentRoot);
+            window.pushFlashToast?.(error.message || "Could not save IMDb seasons.", 5200);
+        } finally {
+            if (toggle.isConnected) {
+                toggle.disabled = false;
+            }
+        }
+    });
+    document.addEventListener("trakt:imdb-seasons-preference-changed", (event) => {
+        titleMatrixCache.clear();
+        const enabled = event.detail?.enabled !== false;
+        const toggle = titleMatrixBody?.querySelector("[data-imdb-seasons-toggle]");
+        const fragmentRoot = titleMatrixBody?.querySelector(".title-matrix-fragment");
+        if (toggle) {
+            toggle.checked = enabled;
+        }
         applyTitleMatrixToggles(fragmentRoot);
     });
     document.addEventListener("mouseover", (event) => {
@@ -1464,6 +1634,7 @@
         });
     }
 
+    setupSpoilerProtection();
     setupFlashToast();
     bindPlayPromptLinks();
     renderPlayPrompts();

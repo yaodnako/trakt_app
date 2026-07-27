@@ -8,6 +8,8 @@
     let activePanelUrl = "";
     let pendingAction = null;
     let watchRefreshToken = 0;
+    let mappingRefreshTimer = 0;
+    let mappingRefreshAttempts = 0;
 
     function setOverlayOpen(node, open) {
         if (!node) return;
@@ -48,9 +50,24 @@
         }
     }
 
+    function scheduleMappingRefresh(token) {
+        if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
+        mappingRefreshTimer = 0;
+        const panel = watchBody?.querySelector("[data-search-watch-panel]");
+        if (panel?.dataset.imdbMappingPending !== "1" || mappingRefreshAttempts >= 8) return;
+        mappingRefreshTimer = window.setTimeout(() => {
+            mappingRefreshTimer = 0;
+            if (token !== watchRefreshToken || watchOverlay?.hidden) return;
+            mappingRefreshAttempts += 1;
+            loadWatchPanel("", {preserve: true});
+        }, 900);
+    }
+
     async function loadWatchPanel(panelUrl = "", {preserve = false, focusDefault = false} = {}) {
         const requestUrl = panelUrl || activePanelUrl;
         if (!requestUrl || !watchBody) return;
+        if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
+        mappingRefreshTimer = 0;
         const token = watchRefreshToken;
         const state = preserve ? window.traktShowWatchPanel?.captureState(watchBody) : null;
         if (!preserve) watchBody.innerHTML = '<div class="title-matrix-loading-shell"><div class="title-matrix-loading-bar is-wide"></div></div>';
@@ -61,7 +78,10 @@
             if (state) window.traktShowWatchPanel?.restoreState(watchBody, state);
             else if (focusDefault) window.traktShowWatchPanel?.focusDefaultEpisode(watchBody);
             window.traktShowWatchPanel?.configureScopeActions(watchOverlay, activeTrigger, watchBody);
-            refreshWatchPanel(requestUrl, token);
+            scheduleMappingRefresh(token);
+            if (watchBody.querySelector("[data-search-watch-panel]")?.dataset.imdbMappingPending !== "1") {
+                refreshWatchPanel(requestUrl, token);
+            }
         } catch (_error) {
             if (token === watchRefreshToken) {
                 watchBody.innerHTML = '<div class="title-matrix-empty-state"><p>Could not load episodes.</p></div>';
@@ -73,6 +93,8 @@
         activeTrigger = trigger;
         activePanelUrl = trigger.dataset.watchPanelUrl || "";
         watchRefreshToken += 1;
+        mappingRefreshAttempts = 0;
+        if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
         if (watchTitle) watchTitle.textContent = trigger.dataset.title || "Episodes";
         window.traktShowWatchPanel?.configureTitleRatings(watchOverlay, null);
         window.traktShowWatchPanel?.configurePlayAction(watchOverlay, trigger);
@@ -88,6 +110,7 @@
             scope: target.dataset.scope || "episode",
             season: target.dataset.season || "",
             episode: target.dataset.episode || "",
+            season_layout: target.dataset.seasonLayout || "trakt",
             remove_from_watchlist: target.dataset.removeFromWatchlist === "true",
         };
     }
@@ -215,6 +238,13 @@
         } finally {
             button.disabled = false;
         }
+    });
+    document.addEventListener("trakt:imdb-seasons-preference-changed", () => {
+        if (!watchBody?.querySelector("[data-search-watch-panel]") || watchOverlay?.hidden) return;
+        mappingRefreshAttempts = 0;
+        if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
+        mappingRefreshTimer = 0;
+        loadWatchPanel("", {preserve: true});
     });
     window.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") return;

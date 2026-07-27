@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from collections import deque
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
-from threading import Lock
+from threading import Lock, RLock
 from time import perf_counter
 from typing import Callable
 
@@ -58,7 +60,7 @@ from trakt_tracker.domain import (
     ProgressSortMode,
     ProgressView,
 )
-from trakt_tracker.infrastructure.keyring_store import TokenStore
+from trakt_tracker.infrastructure.keyring_store import TokenBundle, TokenStore
 from trakt_tracker.infrastructure.notifications import NotificationSender
 from trakt_tracker.infrastructure.cache import BinaryCache, ProviderCache
 from trakt_tracker.infrastructure.artwork_cache import has_cached_image, is_trusted_image_url, warm_image_urls
@@ -67,7 +69,12 @@ from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 from trakt_tracker.infrastructure.kinopoisk import KinopoiskClient
 from trakt_tracker.infrastructure.tmdb import TMDbClient
 from trakt_tracker.infrastructure.trakt.client import TraktClient
-from trakt_tracker.infrastructure.trakt.oauth import OAuthCallbackServer, build_authorization_url, open_authorization_url
+from trakt_tracker.infrastructure.trakt.oauth import (
+    OAuthCallbackServer,
+    OAuthCallbackUnavailable,
+    build_authorization_url,
+    open_authorization_url,
+)
 from trakt_tracker.persistence.database import Database
 from trakt_tracker.persistence.repositories import (
     EpisodeRepository,
@@ -142,9 +149,11 @@ class AuthService:
         self._client_factory = client_factory
         self._config = self._config_store.load()
         self._authorize_lock = Lock()
-        self._client_lock = Lock()
+        self._authorization_attempt: Future[str] | None = None
+        self._client_lock = RLock()
         self._client: TraktClient | None = None
         self._retired_clients: list[TraktClient] = []
+        self._reauthorization_required_slugs: set[str] = set()
 
     @property
     def config(self) -> AppConfig:
@@ -189,13 +198,35 @@ class AuthService:
     def get_client(self) -> TraktClient:
         with self._client_lock:
             if self._client is None:
-                self._client = self._client_factory(self._config)
-            client = self._client
-            if self._config.active_slug:
-                slug = self._config.active_slug
-                client.set_tokens(self._token_store.load(slug))
-                client.set_token_refresh_callback(lambda bundle, account=slug: self._token_store.save(account, bundle))
-            return client
+                client = self._client_factory(self._config)
+                if self._config.active_slug:
+                    slug = self._config.active_slug
+                    client.set_tokens(self._token_store.load(slug))
+                    client.set_token_refresh_callback(
+                        lambda bundle, account=slug, source=client: self._persist_refreshed_token(
+                            account,
+                            source,
+                            bundle,
+                        )
+                    )
+                    client.set_reauthorization_callback(
+                        lambda account=slug, source=client: self._require_reauthorization(account, source)
+                    )
+                self._client = client
+            return self._client
+
+    def _persist_refreshed_token(self, slug: str, source: TraktClient, bundle: TokenBundle) -> None:
+        with self._client_lock:
+            if source is not self._client:
+                return
+            self._token_store.save(slug, bundle)
+
+    def _require_reauthorization(self, slug: str, source: TraktClient) -> None:
+        with self._client_lock:
+            if source is not self._client:
+                return
+            self._reauthorization_required_slugs.add(slug)
+            self._token_store.delete(slug)
 
     def close(self) -> None:
         with self._client_lock:
@@ -219,25 +250,59 @@ class AuthService:
     def is_authorized(self) -> bool:
         if not self._config.active_slug:
             return False
+        if self._config.active_slug in self._reauthorization_required_slugs:
+            return False
         return self._token_store.load(self._config.active_slug) is not None
 
+    def reauthorization_required(self) -> bool:
+        return bool(
+            self._config.active_slug
+            and self._config.active_slug in self._reauthorization_required_slugs
+        )
+
     def authorization_running(self) -> bool:
-        return self._authorize_lock.locked()
+        with self._authorize_lock:
+            return self._authorization_attempt is not None
 
     def authorize(self) -> str:
-        if not self._authorize_lock.acquire(blocking=False):
-            raise RuntimeError("Trakt authorization is already in progress")
+        with self._authorize_lock:
+            attempt = self._authorization_attempt
+            owns_attempt = attempt is None
+            if attempt is None:
+                attempt = Future[str]()
+                self._authorization_attempt = attempt
+        if not owns_attempt:
+            return attempt.result()
         try:
-            return self._authorize_once()
+            slug = self._authorize_once()
+        except BaseException as exc:
+            attempt.set_exception(exc)
+            raise
+        else:
+            attempt.set_result(slug)
+            return slug
         finally:
-            self._authorize_lock.release()
+            with self._authorize_lock:
+                if self._authorization_attempt is attempt:
+                    self._authorization_attempt = None
 
     def _authorize_once(self) -> str:
         if not self.is_configured():
             raise RuntimeError("Trakt client_id and client_secret are not configured")
         state = token_urlsafe(32)
         server = OAuthCallbackServer(self._config.redirect_uri, expected_state=state)
-        server.start()
+        try:
+            server.start()
+        except OAuthCallbackUnavailable as exc:
+            logging.getLogger(__name__).warning(
+                "%s; using Trakt device authorization instead",
+                exc,
+            )
+            client = self.get_client()
+            authorization = client.start_device_authorization()
+            open_authorization_url(authorization.activation_url)
+            tokens = client.wait_for_device_authorization(authorization)
+            return self._complete_authorization(client, tokens)
         try:
             open_authorization_url(
                 build_authorization_url(resolved_trakt_client_id(self._config), self._config.redirect_uri, state=state)
@@ -248,10 +313,14 @@ class AuthService:
             raise
         client = self.get_client()
         tokens = client.exchange_code(result.code)
+        return self._complete_authorization(client, tokens)
+
+    def _complete_authorization(self, client: TraktClient, tokens) -> str:
         client.set_tokens(tokens.to_bundle())
         me = client.get_me()
         slug = me.get("user", {}).get("ids", {}).get("slug") or me.get("user", {}).get("username") or "default"
         self._token_store.save(slug, tokens.to_bundle())
+        self._reauthorization_required_slugs.discard(slug)
         latest = self._config_store.load()
         if slug not in latest.known_profile_slugs:
             latest.known_profile_slugs.append(slug)
@@ -266,6 +335,9 @@ class AuthService:
         normalized = str(slug or "").strip()
         if normalized:
             self._token_store.delete(normalized)
+            self._reauthorization_required_slugs.discard(normalized)
+            if normalized == self._config.active_slug:
+                self._invalidate_client()
 
     def clear_provider_overrides(self, provider: str) -> AppConfig:
         normalized = str(provider or "").strip().casefold()
@@ -285,8 +357,7 @@ class AuthService:
         if not self._config.active_slug:
             raise RuntimeError("No Trakt user has been authorized")
         client = self.get_client()
-        refreshed = client.refresh_tokens()
-        self._token_store.save(self._config.active_slug, refreshed.to_bundle())
+        client.refresh_access_token()
 
 class ProgressService:
     def __init__(
@@ -334,12 +405,14 @@ class ProgressService:
         sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
         descending: bool = True,
         dropped_only: bool | None = None,
+        limit: int | None = 50,
     ) -> list[ProgressSnapshot]:
         return self._workflow.dashboard_progress(
             view=view,
             sort_mode=sort_mode,
             descending=descending,
             dropped_only=dropped_only,
+            limit=limit,
         )
 
     def select_title_enrich_keys(
@@ -380,6 +453,7 @@ class ProgressService:
         sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
         descending: bool = True,
         dropped_only: bool | None = None,
+        force_refresh: bool = False,
         force_full_assets: bool = False,
         defer_assets: bool = False,
     ) -> list[ProgressSnapshot]:
@@ -389,6 +463,7 @@ class ProgressService:
             sort_mode=sort_mode,
             descending=descending,
             dropped_only=dropped_only,
+            force_refresh=force_refresh,
             force_full_assets=force_full_assets,
             defer_assets=defer_assets,
         )
@@ -432,6 +507,7 @@ class NotificationService:
         progress_repo: ProgressRepository,
         sender: NotificationSender,
         release_tracking: ReleaseTrackingService | None = None,
+        progress_service: ProgressService | None = None,
     ) -> None:
         self._workflow = NotificationRefreshWorkflow(
             db,
@@ -443,12 +519,15 @@ class NotificationService:
             sender,
         )
         self._release_tracking = release_tracking
+        self._progress_service = progress_service
         self._activity_lock = Lock()
         self._activity_seq = 0
         self._activity_events: deque[dict] = deque(maxlen=32)
         self._pending_sources: set[str] = set()
 
     def poll_upcoming(self, *, send_native: bool = True) -> list[dict]:
+        if self._progress_service is not None:
+            self._progress_service.sync_progress(dropped_only=False)
         items = self._workflow.poll_upcoming(send_native=send_native)
         if self._release_tracking is not None:
             items.extend(self._release_tracking.poll(send_native=send_native))
@@ -526,6 +605,8 @@ class SyncService:
         enrich_queue: EnrichQueueService | None = None,
         image_queue: ArtworkQueue | None = None,
         imdb_client: IMDbDatasetClient | None = None,
+        progress_service: ProgressService | None = None,
+        notification_service: NotificationService | None = None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -538,6 +619,8 @@ class SyncService:
         self._episode_metadata = episode_metadata
         self._enrich_queue = enrich_queue
         self._image_queue = image_queue
+        self._progress_service = progress_service
+        self._notification_service = notification_service
         self._image_cache = BinaryCache("images")
         self._image_failure_cache = ProviderCache("image_failures")
         self._workflow = HistorySyncWorkflow(
@@ -569,9 +652,23 @@ class SyncService:
         self.sync_trakt_data(status_callback=status_callback)
 
     def sync_trakt_data(self, *, status_callback=None) -> None:
+        def sync_all() -> None:
+            self.refresh_history(
+                force_full_assets=False,
+                status_callback=status_callback,
+            )
+            if self._progress_service is not None:
+                self._progress_service.sync_progress(
+                    dropped_only=False,
+                    force_refresh=True,
+                    force_full_assets=False,
+                )
+            if self._notification_service is not None:
+                self._notification_service.refresh_pending_sources()
+
         self._run_with_enrichment_barrier(
             "Trakt data update",
-            lambda: self.refresh_history(force_full_assets=False, status_callback=status_callback),
+            sync_all,
         )
 
     def sync_assets_backfill(self, *, status_callback=None) -> None:
@@ -1079,7 +1176,9 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         progress,
         notification_sender,
         release_tracking,
+        progress_service,
     )
+
     def refresh_notification_state() -> None:
         notifications.refresh_pending_sources()
 
@@ -1101,6 +1200,8 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         enrich_queue,
         image_queue=image_queue,
         imdb_client=imdb_client,
+        progress_service=progress_service,
+        notification_service=notifications,
     )
     return ServiceContainer(
         database=db,

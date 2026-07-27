@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from trakt_tracker.infrastructure.artwork_cache import (
     _candidate_image_urls,
+    _fetch_and_cache_image_uncached,
     _fetch_image_with_curl,
     _fetch_image_with_fragmented_tls,
     fetch_and_cache_image,
@@ -42,6 +43,70 @@ class ArtworkCacheTests(unittest.TestCase):
             tmdb_episode_preview_url("https://example.com/w780/example.jpg"),
             "https://example.com/w780/example.jpg",
         )
+
+    def test_tmdb_image_fetch_uses_fragmented_tls_before_curl(self) -> None:
+        cache = MagicMock()
+        payload = b"\xff\xd8\xffimage"
+        calls: list[str] = []
+
+        def fragmented(*_args, **_kwargs):
+            calls.append("fragmented")
+            return payload, "image/jpeg"
+
+        def curl(*_args, **_kwargs):
+            calls.append("curl")
+            return payload, "image/jpeg"
+
+        with (
+            patch(
+                "trakt_tracker.infrastructure.artwork_cache._fetch_image_with_fragmented_tls",
+                side_effect=fragmented,
+            ),
+            patch(
+                "trakt_tracker.infrastructure.artwork_cache._fetch_image_with_curl",
+                side_effect=curl,
+            ),
+        ):
+            result = _fetch_and_cache_image_uncached(
+                cache,
+                "https://image.tmdb.org/t/p/w342/example.jpg",
+                8,
+            )
+
+        self.assertEqual(result, (payload, "image/jpeg"))
+        self.assertEqual(calls, ["fragmented"])
+
+    def test_tmdb_image_fetch_keeps_curl_as_fragmented_tls_fallback(self) -> None:
+        cache = MagicMock()
+        payload = b"\xff\xd8\xffimage"
+        calls: list[str] = []
+
+        def fragmented(*_args, **_kwargs):
+            calls.append("fragmented")
+            return None
+
+        def curl(*_args, **_kwargs):
+            calls.append("curl")
+            return payload, "image/jpeg"
+
+        with (
+            patch(
+                "trakt_tracker.infrastructure.artwork_cache._fetch_image_with_fragmented_tls",
+                side_effect=fragmented,
+            ),
+            patch(
+                "trakt_tracker.infrastructure.artwork_cache._fetch_image_with_curl",
+                side_effect=curl,
+            ),
+        ):
+            result = _fetch_and_cache_image_uncached(
+                cache,
+                "https://image.tmdb.org/t/p/w342/example.jpg",
+                8,
+            )
+
+        self.assertEqual(result, (payload, "image/jpeg"))
+        self.assertEqual(calls, ["fragmented", "curl"])
 
     def test_concurrent_same_url_uses_one_shared_fetch(self) -> None:
         started = Event()

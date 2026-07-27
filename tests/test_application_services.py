@@ -25,6 +25,8 @@ from trakt_tracker.application.metadata_refresh_policy import TRIGGER_PAGE_CONTE
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
 from trakt_tracker.application.search_watch import SearchWatchService
+import trakt_tracker.application.episode_metadata as episode_metadata_module
+import trakt_tracker.application.history_sync as history_sync_module
 import trakt_tracker.application.services as services_module
 from trakt_tracker.application.services import NotificationService, SyncService, build_services
 from trakt_tracker.config import AppConfig, ConfigStore
@@ -91,7 +93,9 @@ class _FakeTraktClient:
     def __init__(self) -> None:
         self.searched: list[tuple[str, str | None]] = []
         self.history_items: list[HistoryItemInput] = []
+        self.history_item_batches: list[list[HistoryItemInput]] = []
         self.removed_history_items: list[HistoryItemInput] = []
+        self.removed_history_batches: list[list[HistoryItemInput]] = []
         self.ratings: list[RatingInput] = []
         self.episode_details_calls: list[tuple[int, int, int]] = []
         self.title_details_calls: list[tuple[int, str]] = []
@@ -140,6 +144,7 @@ class _FakeTraktClient:
         self.history_items.append(item)
 
     def add_history_items(self, items: list[HistoryItemInput]) -> None:
+        self.history_item_batches.append(list(items))
         self.history_items.extend(items)
 
     def get_watchlist(self) -> list[TitleSummary]:
@@ -150,6 +155,7 @@ class _FakeTraktClient:
         self.watchlist_writes.append((title_type, trakt_id, watchlisted))
 
     def remove_history_items(self, items: list[HistoryItemInput]) -> None:
+        self.removed_history_batches.append(list(items))
         self.removed_history_items.extend(items)
 
     def set_rating(self, item: RatingInput) -> None:
@@ -1340,6 +1346,7 @@ class ApplicationServiceTests(unittest.TestCase):
         panel = service.load_show_panel(5)
 
         self.assertEqual(panel.default_episode_key, (2, 1))
+        self.assertEqual(panel.watched_frontier_key, (1, 1))
         self.assertTrue(next(season for season in panel.seasons if season.season == 2).is_default)
 
     def test_search_watch_panel_includes_episode_user_rating(self) -> None:
@@ -1371,6 +1378,281 @@ class ApplicationServiceTests(unittest.TestCase):
         panel = service.load_show_panel(5)
 
         self.assertEqual(panel.seasons[0].episodes[0].user_rating, 9)
+
+    def test_search_watch_imdb_layout_splits_trakt_season_and_marks_one_batch(self) -> None:
+        history_service = HistoryService(
+            self.db, self.auth, self.titles, self.user_states, self.history_repo,
+            self.episode_repo, self.history_read_model, self.episode_metadata,
+        )
+        service = SearchWatchService(
+            self.db, self.auth, self.titles, self.history_repo, self.episode_repo,
+            history_service, episode_metadata=self.episode_metadata,
+        )
+        now = datetime.now(tz=UTC)
+        episodes = [
+            EpisodeSummary(trakt_id=500, season=0, number=1, title="Special", first_aired=now - timedelta(days=5)),
+            EpisodeSummary(trakt_id=501, season=1, number=1, title="IMDb S1E2", first_aired=now - timedelta(days=5)),
+            EpisodeSummary(trakt_id=502, season=1, number=2, title="IMDb S1E1", first_aired=now - timedelta(days=4)),
+            EpisodeSummary(trakt_id=503, season=1, number=3, title="IMDb S2E2", first_aired=now - timedelta(days=3)),
+            EpisodeSummary(trakt_id=504, season=1, number=4, title="IMDb S2E1", first_aired=now - timedelta(days=2)),
+            EpisodeSummary(trakt_id=505, season=1, number=5, title="Future", first_aired=now + timedelta(days=5)),
+        ]
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=5, title_type="show", title="Split Show"))
+            self.episode_repo.replace_show_episodes(session, 5, episodes)
+            for number, imdb_season, imdb_episode in (
+                (1, 1, 2),
+                (2, 1, 1),
+                (3, 2, 2),
+                (4, 2, 1),
+            ):
+                row = self.episode_repo.find_episode(session, 5, 1, number)
+                row.imdb_season = imdb_season
+                row.imdb_episode = imdb_episode
+            for history_id, episode in enumerate((1, 2, 3), start=1):
+                self.history_repo.add_event(
+                    session,
+                    trakt_history_id=history_id,
+                    title_trakt_id=5,
+                    title="Split Show",
+                    title_type="show",
+                    action="watched",
+                    watched_at=now,
+                    season=1,
+                    episode=episode,
+                    source="trakt",
+                )
+
+        panel = service.load_show_panel(5, season_layout="imdb")
+
+        self.assertEqual([season.season for season in panel.seasons], [0, 1, 2])
+        self.assertTrue(panel.imdb_mapping_complete)
+        self.assertEqual(panel.default_episode_key, (1, 4))
+        self.assertTrue(next(season for season in panel.seasons if season.season == 2).is_default)
+        imdb_season_one = next(season for season in panel.seasons if season.season == 1)
+        self.assertEqual(
+            [(episode.season, episode.number, episode.imdb_episode) for episode in imdb_season_one.episodes],
+            [(1, 2, 1), (1, 1, 2), (1, 5, None)],
+        )
+        self.assertEqual(imdb_season_one.action_released_count, 2)
+        self.assertFalse(next(season for season in panel.seasons if season.season == 0).bulk_allowed)
+
+        count = service.mark_watch(
+            title_type="show",
+            trakt_id=5,
+            title="Split Show",
+            scope="season",
+            season=2,
+            season_layout="imdb",
+            watched_at=now,
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(len(self.trakt_client.history_item_batches), 1)
+        self.assertEqual([item.trakt_id for item in self.trakt_client.history_item_batches[0]], [504])
+
+    def test_search_watch_trakt_season_marks_only_unwatched_released_episodes(self) -> None:
+        history_service = HistoryService(
+            self.db, self.auth, self.titles, self.user_states, self.history_repo,
+            self.episode_repo, self.history_read_model, self.episode_metadata,
+        )
+        service = SearchWatchService(
+            self.db, self.auth, self.titles, self.history_repo, self.episode_repo,
+            history_service,
+        )
+        now = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=5, title_type="show", title="Example"))
+            self.episode_repo.replace_show_episodes(
+                session,
+                5,
+                [
+                    EpisodeSummary(trakt_id=501, season=1, number=1, title="Seen", first_aired=now),
+                    EpisodeSummary(trakt_id=502, season=1, number=2, title="New", first_aired=now),
+                    EpisodeSummary(
+                        trakt_id=503,
+                        season=1,
+                        number=3,
+                        title="Future",
+                        first_aired=now + timedelta(days=5),
+                    ),
+                ],
+            )
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=1,
+                title_trakt_id=5,
+                title="Example",
+                title_type="show",
+                action="watched",
+                watched_at=now,
+                season=1,
+                episode=1,
+                source="trakt",
+            )
+
+        count = service.mark_watch(
+            title_type="show",
+            trakt_id=5,
+            title="Example",
+            scope="season",
+            season=1,
+            season_layout="trakt",
+            watched_at=now,
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(len(self.trakt_client.history_item_batches), 1)
+        self.assertEqual([item.trakt_id for item in self.trakt_client.history_item_batches[0]], [502])
+
+    def test_search_watch_incomplete_imdb_mapping_blocks_bulk_but_not_episode(self) -> None:
+        class _RepairMetadata:
+            def __init__(self) -> None:
+                self.repairs: list[int] = []
+
+            def needs_episode_imdb_reconciliation(self, show_trakt_id: int) -> bool:
+                return True
+
+            def repair_episode_imdb_ratings(self, show_trakt_id: int) -> int:
+                self.repairs.append(show_trakt_id)
+                return 1
+
+        metadata = _RepairMetadata()
+        history_service = HistoryService(
+            self.db, self.auth, self.titles, self.user_states, self.history_repo,
+            self.episode_repo, self.history_read_model, self.episode_metadata,
+        )
+        service = SearchWatchService(
+            self.db, self.auth, self.titles, self.history_repo, self.episode_repo,
+            history_service, episode_metadata=metadata,
+        )
+        now = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=5, title_type="show", title="Incomplete"))
+            self.episode_repo.replace_show_episodes(
+                session,
+                5,
+                [
+                    EpisodeSummary(trakt_id=500, season=0, number=1, title="Special", first_aired=now),
+                    EpisodeSummary(trakt_id=501, season=1, number=1, title="Mapped", first_aired=now),
+                    EpisodeSummary(trakt_id=502, season=1, number=2, title="Unmapped", first_aired=now),
+                    EpisodeSummary(trakt_id=601, season=2, number=1, title="Future", first_aired=now + timedelta(days=5)),
+                ],
+            )
+            mapped = self.episode_repo.find_episode(session, 5, 1, 1)
+            mapped.imdb_season = 1
+            mapped.imdb_episode = 1
+
+        panel = service.load_show_panel(5, season_layout="imdb")
+
+        self.assertFalse(panel.imdb_mapping_complete)
+        self.assertTrue(panel.imdb_mapping_pending)
+        self.assertTrue(all(not season.bulk_allowed for season in panel.seasons))
+        with self.assertRaisesRegex(RuntimeError, "mapping is incomplete"):
+            service.mark_watch(
+                title_type="show",
+                trakt_id=5,
+                title="Incomplete",
+                scope="season",
+                season=1,
+                season_layout="imdb",
+                watched_at=now,
+            )
+        self.assertEqual(self.trakt_client.history_item_batches, [])
+
+        count = service.mark_watch(
+            title_type="show",
+            trakt_id=5,
+            title="Incomplete",
+            scope="episode",
+            season=1,
+            episode=2,
+            season_layout="trakt",
+            watched_at=now,
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual([item.trakt_id for item in self.trakt_client.history_item_batches[0]], [502])
+        self.assertEqual(service.repair_imdb_seasons(5), 1)
+        self.assertEqual(metadata.repairs, [5])
+
+    def test_search_watch_imdb_unwatch_is_exact_reversible_and_transactional(self) -> None:
+        history_service = HistoryService(
+            self.db, self.auth, self.titles, self.user_states, self.history_repo,
+            self.episode_repo, self.history_read_model, self.episode_metadata,
+        )
+        service = SearchWatchService(
+            self.db, self.auth, self.titles, self.history_repo, self.episode_repo,
+            history_service, episode_metadata=self.episode_metadata,
+        )
+        watched_at = datetime(2026, 7, 1, 12, tzinfo=UTC)
+        with self.db.session() as session:
+            self.titles.upsert_title(session, TitleSummary(trakt_id=5, title_type="show", title="Split Show"))
+            self.episode_repo.replace_show_episodes(
+                session,
+                5,
+                [
+                    EpisodeSummary(trakt_id=501, season=1, number=1, title="IMDb One"),
+                    EpisodeSummary(trakt_id=502, season=1, number=2, title="IMDb Two"),
+                    EpisodeSummary(trakt_id=601, season=2, number=1, title="IMDb One Continued"),
+                ],
+            )
+            for season, episode, imdb_season, imdb_episode in (
+                (1, 1, 1, 1),
+                (1, 2, 2, 1),
+                (2, 1, 1, 2),
+            ):
+                row = self.episode_repo.find_episode(session, 5, season, episode)
+                row.imdb_season = imdb_season
+                row.imdb_episode = imdb_episode
+                self.history_repo.add_event(
+                    session,
+                    trakt_history_id=season * 10 + episode,
+                    title_trakt_id=5,
+                    title="Split Show",
+                    title_type="show",
+                    action="watched",
+                    watched_at=watched_at,
+                    season=season,
+                    episode=episode,
+                    source="trakt",
+                )
+
+        restore = service.unmark_scope(
+            title_type="show",
+            trakt_id=5,
+            scope="season",
+            season=1,
+            season_layout="imdb",
+        )
+
+        self.assertEqual(restore["season_layout"], "imdb")
+        self.assertEqual(len(self.trakt_client.removed_history_batches), 1)
+        self.assertEqual([item.trakt_id for item in self.trakt_client.removed_history_batches[0]], [501, 601])
+        with self.db.session() as session:
+            self.assertEqual(self.history_repo.watched_episode_keys(session, 5), {(1, 2)})
+
+        items = list(restore["items"])
+        for item in items:
+            item["watched_at"] = datetime.fromisoformat(item["watched_at"])
+        service.restore_scope(items=items)
+        with self.db.session() as session:
+            self.assertEqual(self.history_repo.watched_episode_keys(session, 5), {(1, 1), (1, 2), (2, 1)})
+
+        original_remove = self.trakt_client.remove_history_items
+        self.trakt_client.remove_history_items = lambda _items: (_ for _ in ()).throw(RuntimeError("offline"))
+        try:
+            with self.assertRaisesRegex(RuntimeError, "offline"):
+                service.unmark_scope(
+                    title_type="show",
+                    trakt_id=5,
+                    scope="season",
+                    season=1,
+                    season_layout="imdb",
+                )
+        finally:
+            self.trakt_client.remove_history_items = original_remove
+        with self.db.session() as session:
+            self.assertEqual(self.history_repo.watched_episode_keys(session, 5), {(1, 1), (1, 2), (2, 1)})
 
     def test_history_remove_episode_watch_preserves_rating_and_recalculates_state(self) -> None:
         service = HistoryService(
@@ -1474,6 +1756,39 @@ class ApplicationServiceTests(unittest.TestCase):
         with self.db.session() as session:
             self.assertEqual(self.history_repo.watched_episode_keys(session, 5), {(1, 1)})
 
+    def test_history_remove_unknown_date_watch_disables_restore(self) -> None:
+        service = HistoryService(
+            self.db, self.auth, self.titles, self.user_states, self.history_repo,
+            self.episode_repo, self.history_read_model, self.episode_metadata,
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=5, title_type="show", title="Example"),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                5,
+                EpisodeSummary(trakt_id=501, season=1, number=1, title="Pilot"),
+            )
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=None,
+                title_trakt_id=5,
+                title="Example",
+                title_type="show",
+                action="watched",
+                watched_at=datetime(1970, 1, 1, tzinfo=UTC),
+                watched_at_known=False,
+                season=1,
+                episode=1,
+                source="local",
+            )
+
+        restore = service.remove_episode_watch(show_trakt_id=5, season=1, episode=1)
+
+        self.assertFalse(restore["can_restore"])
+
     def test_history_remove_movie_scope_preserves_rating_and_can_restore_watch(self) -> None:
         service = HistoryService(
             self.db, self.auth, self.titles, self.user_states, self.history_repo,
@@ -1549,6 +1864,48 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertTrue(restore["still_watched"])
         with self.db.session() as session:
             self.assertEqual(self.history_repo.watched_episode_keys(session, 5), {(2, 1)})
+
+    def test_history_restore_rejects_unknown_date_without_remote_rewrite(self) -> None:
+        service = HistoryService(
+            self.db, self.auth, self.titles, self.user_states, self.history_repo,
+            self.episode_repo, self.history_read_model, self.episode_metadata,
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=5, title_type="show", title="Example"),
+            )
+            self.episode_repo.upsert_episode(
+                session,
+                5,
+                EpisodeSummary(trakt_id=501, season=1, number=1, title="Pilot"),
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "unknown date"):
+            service.restore_episode_watch(
+                show_trakt_id=5,
+                title="Example",
+                season=1,
+                episode=1,
+                watched_at=datetime(1970, 1, 1, tzinfo=UTC),
+                watched_at_known=False,
+            )
+        with self.assertRaisesRegex(RuntimeError, "unknown date"):
+            service.restore_watch_scope(
+                items=[
+                    {
+                        "title_type": "movie",
+                        "trakt_id": 7,
+                        "title": "Movie",
+                        "season": None,
+                        "episode": None,
+                        "watched_at": datetime(1970, 1, 1, tzinfo=UTC),
+                        "watched_at_known": False,
+                    }
+                ]
+            )
+
+        self.assertEqual(self.trakt_client.history_items, [])
 
     def test_history_sync_fetches_movie_watch_history_stream(self) -> None:
         class _HistoryClient:
@@ -1646,6 +2003,48 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertIsNotNone(state)
         self.assertEqual(state.last_watched_at, datetime(2026, 7, 3, 12))
 
+    def test_history_sync_keeps_latest_repeat_watch_when_items_arrive_newest_first(self) -> None:
+        workflow = HistorySyncWorkflow(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            ProgressRepository(),
+            self.episode_repo,
+            self.sync_state,
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+        )
+        for history_id, watched_at in (
+            (2, "2026-07-03T12:00:00.000Z"),
+            (1, "2026-07-01T12:00:00.000Z"),
+        ):
+            with self.db.session() as session:
+                workflow._import_history_item(
+                    session,
+                    {
+                        "id": history_id,
+                        "type": "episode",
+                        "watched_at": watched_at,
+                        "show": {"title": "Example", "ids": {"trakt": 5}},
+                        "episode": {
+                            "title": "Pilot",
+                            "season": 1,
+                            "number": 1,
+                            "ids": {"trakt": 501},
+                        },
+                    },
+                )
+
+        with self.db.session() as session:
+            rows = self.history_repo.list_filtered(session, title_type="show", action="watched")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].trakt_history_id, 2)
+        self.assertEqual(rows[0].watched_at, datetime(2026, 7, 3, 12))
+
     def test_history_sync_reconciliation_removes_absent_remote_watch_and_resets_state(self) -> None:
         workflow = HistorySyncWorkflow(
             self.db,
@@ -1697,6 +2096,149 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(removed, 1)
         self.assertEqual(watched_rows, [])
         self.assertFalse(state.in_history)
+
+    def test_history_sync_reconciliation_recomputes_last_watch_and_refreshes_progress(self) -> None:
+        progress_repo = ProgressRepository()
+        workflow = HistorySyncWorkflow(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            progress_repo,
+            self.episode_repo,
+            self.sync_state,
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+        )
+        older = datetime(2026, 7, 1, 12, tzinfo=UTC)
+        newer = datetime(2026, 7, 3, 12, tzinfo=UTC)
+        with self.db.session() as session:
+            title = self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=5, title_type="show", title="Example"),
+            )
+            state = self.user_states.ensure_state(session, title.id)
+            state.in_history = True
+            state.tracked = True
+            state.last_watched_at = newer
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=1,
+                title_trakt_id=5,
+                title="Example",
+                title_type="show",
+                action="watched",
+                watched_at=older,
+                season=1,
+                episode=1,
+                source="trakt",
+            )
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=2,
+                title_trakt_id=5,
+                title="Example",
+                title_type="show",
+                action="watched",
+                watched_at=newer,
+                season=1,
+                episode=2,
+                source="trakt",
+            )
+        refreshes: list[tuple[int, bool]] = []
+        workflow.refresh_show = lambda trakt_id, *, fresh=False: refreshes.append((trakt_id, fresh))
+
+        workflow._sync_history_and_ratings(
+            [],
+            [],
+            reconciliation_scopes=[
+                _HistoryReconciliationScope(
+                    title_type="show",
+                    present_history_ids={1},
+                    watched_at_cutoff=None,
+                )
+            ],
+            run_enrichment=False,
+        )
+
+        with self.db.session() as session:
+            state = self.user_states.progress_state(session, 5)
+        self.assertIsNotNone(state)
+        self.assertTrue(state.in_history)
+        self.assertEqual(state.last_watched_at, older.replace(tzinfo=None))
+        self.assertEqual(refreshes, [(5, True)])
+
+    def test_full_history_reconciliation_returns_remote_items_for_recovery(self) -> None:
+        remote_item = {
+            "id": 10,
+            "type": "episode",
+            "watched_at": "2026-07-01T12:00:00.000Z",
+            "show": {"title": "Example", "ids": {"trakt": 5}},
+            "episode": {
+                "title": "Pilot",
+                "season": 1,
+                "number": 1,
+                "ids": {"trakt": 501},
+            },
+        }
+
+        class _HistoryClient:
+            def get_watch_history_page(self, *, title_type=None, limit=1000, page=1):
+                batch = [remote_item] if title_type is None and page == 1 else []
+                return batch, {"x-pagination-page-count": "1"}
+
+        items, scopes = HistorySyncWorkflow._fetch_full_history_reconciliation(_HistoryClient())
+
+        self.assertEqual([item["id"] for item in items], [10])
+        self.assertEqual(
+            next(scope.present_history_ids for scope in scopes if scope.title_type == "show"),
+            {10},
+        )
+
+    def test_history_sync_removes_local_rating_residue_absent_from_trakt(self) -> None:
+        workflow = HistorySyncWorkflow(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            ProgressRepository(),
+            self.episode_repo,
+            self.sync_state,
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+        )
+        with self.db.session() as session:
+            title = self.titles.upsert_title(
+                session,
+                TitleSummary(trakt_id=37705, title_type="show", title="Fullmetal Alchemist"),
+            )
+            state = self.user_states.ensure_state(session, title.id)
+            state.rating = 7
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=None,
+                title_trakt_id=37705,
+                title="Fullmetal Alchemist",
+                title_type="show",
+                action="rated",
+                watched_at=datetime.now(tz=UTC),
+                season=1,
+                episode=7,
+                rating=7,
+                source="local",
+            )
+
+        workflow._sync_history_and_ratings([], [], run_enrichment=False)
+
+        with self.db.session() as session:
+            rated_rows = self.history_repo.list_filtered(session, action="rated")
+            state = self.user_states.ensure_state(session, title.id)
+        self.assertEqual(rated_rows, [])
+        self.assertIsNone(state.rating)
 
     def test_recent_history_reconciliation_only_covers_scanned_time_window(self) -> None:
         now = datetime.now(tz=UTC)
@@ -1865,6 +2407,143 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(len(history.items), 1)
         self.assertEqual(len(notifications.seen), 1)
 
+    def test_interaction_service_does_not_acknowledge_new_when_history_write_fails(self) -> None:
+        class _FailingHistory(_FakeHistoryService):
+            def add_history_item(self, item: HistoryItemInput) -> None:
+                raise RuntimeError("Trakt unavailable")
+
+        notifications = _FakeNotificationService()
+        service = InteractionService(_FailingHistory(), notifications, _FakeProgressService())
+        snapshot = ProgressSnapshot(
+            trakt_id=5,
+            title="Severance",
+            completed=1,
+            aired=2,
+            percent_completed=50.0,
+            next_episode=EpisodeSummary(trakt_id=55, season=2, number=3, title="Who Is Alive?"),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Trakt unavailable"):
+            service.mark_progress_episode_watched(snapshot)
+
+        self.assertEqual(notifications.seen, [])
+
+    def test_notification_poll_refreshes_progress_before_matching_calendar(self) -> None:
+        calls: list[tuple[str, dict]] = []
+        progress = SimpleNamespace(
+            sync_progress=lambda **kwargs: calls.append(("progress", kwargs))
+        )
+        service = NotificationService(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            progress_service=progress,
+        )
+        service._workflow = SimpleNamespace(
+            poll_upcoming=lambda **kwargs: calls.append(("notifications", kwargs)) or []
+        )
+        service._release_tracking = None
+        service.refresh_pending_sources = lambda: []
+
+        service.poll_upcoming(send_native=False)
+
+        self.assertEqual(
+            calls,
+            [
+                ("progress", {"dropped_only": False}),
+                ("notifications", {"send_native": False}),
+            ],
+        )
+
+    def test_sync_trakt_data_runs_full_progress_before_notification_refresh(self) -> None:
+        calls: list[tuple[str, dict]] = []
+        status_callback = lambda _message: None
+        service = object.__new__(SyncService)
+        service._enrich_queue = None
+        service.refresh_history = lambda **kwargs: calls.append(("history", kwargs))
+        service._progress_service = SimpleNamespace(
+            sync_progress=lambda **kwargs: calls.append(("progress", kwargs))
+        )
+        service._notification_service = SimpleNamespace(
+            refresh_pending_sources=lambda: calls.append(("notifications", {}))
+        )
+
+        service.sync_trakt_data(status_callback=status_callback)
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "history",
+                    {
+                        "force_full_assets": False,
+                        "status_callback": status_callback,
+                    },
+                ),
+                (
+                    "progress",
+                    {
+                        "dropped_only": False,
+                        "force_refresh": True,
+                        "force_full_assets": False,
+                    },
+                ),
+                ("notifications", {}),
+            ],
+        )
+
+    def test_episode_metadata_reads_active_profile_trakt_cache(self) -> None:
+        calls: list[str] = []
+        original = episode_metadata_module.load_cached_trakt_rating_items
+        self.auth.config.active_slug = "viewer"
+        episode_metadata_module.load_cached_trakt_rating_items = lambda slug: calls.append(slug) or []
+        try:
+            self.episode_metadata.load_cached_trakt_rating_maps()
+        finally:
+            episode_metadata_module.load_cached_trakt_rating_items = original
+
+        self.assertEqual(calls, ["viewer"])
+
+    def test_legacy_history_repair_reads_active_profile_trakt_cache(self) -> None:
+        workflow = HistorySyncWorkflow(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            ProgressRepository(),
+            self.episode_repo,
+            self.sync_state,
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+        )
+        with self.db.session() as session:
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=10,
+                title_trakt_id=501,
+                title="Legacy episode",
+                title_type="episode",
+                action="watched",
+                watched_at=datetime.now(tz=UTC),
+                source="trakt",
+            )
+        self.auth.config.active_slug = "viewer"
+        original = history_sync_module.load_cached_trakt_history_items
+        history_sync_module.load_cached_trakt_history_items = (
+            lambda slug: (_ for _ in ()).throw(RuntimeError(f"profile:{slug}"))
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeError, "profile:viewer"):
+                workflow.repair_legacy_episode_history()
+        finally:
+            history_sync_module.load_cached_trakt_history_items = original
+
     def test_interaction_service_rejects_future_seen_mark(self) -> None:
         history = _FakeHistoryService()
         notifications = _FakeNotificationService()
@@ -1890,6 +2569,24 @@ class ApplicationServiceTests(unittest.TestCase):
 
     def test_sync_service_auto_imdb_interval_defaults_to_three_hours(self) -> None:
         self.assertEqual(AppConfig().imdb_auto_sync_interval_hours, 3)
+        self.assertTrue(AppConfig().web_imdb_seasons_enabled)
+        self.assertFalse(AppConfig().web_hide_spoilers)
+
+    def test_config_loads_old_file_with_imdb_seasons_enabled(self) -> None:
+        path = Path(self.tmpdir.name) / "legacy-config.json"
+        path.write_text('{"client_id": "legacy"}', encoding="utf-8")
+        store = ConfigStore(path)
+
+        config = store.load()
+
+        self.assertEqual(config.client_id, "legacy")
+        self.assertTrue(config.web_imdb_seasons_enabled)
+        self.assertFalse(config.web_hide_spoilers)
+        config.web_imdb_seasons_enabled = False
+        config.web_hide_spoilers = True
+        store.save(config)
+        self.assertFalse(store.load().web_imdb_seasons_enabled)
+        self.assertTrue(store.load().web_hide_spoilers)
 
     def test_sync_service_auto_imdb_sync_runs_once_per_interval(self) -> None:
         config_store = ConfigStore(Path(self.tmpdir.name) / "config.json")
@@ -2299,7 +2996,11 @@ class ApplicationServiceTests(unittest.TestCase):
         )
         with self.db.session() as session:
             row = self.episode_repo.find_episode(session, 138748, 3, 4)
+            title = self.titles.get_title(session, 138748)
+            assert title is not None
+            state = self.user_states.ensure_state(session, title.id)
             self.assertEqual(row.trakt_details_status, "unknown")
+            self.assertIsNone(state.rating)
 
     def test_progress_dashboard_uses_stored_metadata_only_without_network_enrich(self) -> None:
         from trakt_tracker.persistence.repositories import ProgressRepository

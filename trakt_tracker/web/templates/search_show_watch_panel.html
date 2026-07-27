@@ -1,3 +1,4 @@
+{% set spoiler_profile = active_profile_slug|default('local', true)|urlencode %}
 {% if panel and panel.seasons %}
 <div
     class="search-watch-panel"
@@ -9,8 +10,30 @@
     data-search-watch-released-watched-count="{{ panel.released_watched_count }}"
     data-search-watch-trakt-rating="{% if panel.title_trakt_rating is not none %}{{ panel.title_trakt_rating|rating_with_votes(panel.title_trakt_votes) }}{% elif panel.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"
     data-search-watch-imdb-rating="{% if panel.title_imdb_rating is not none %}{{ panel.title_imdb_rating|rating_with_votes(panel.title_imdb_votes) }}{% elif panel.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"
+    data-season-layout="{{ panel.season_layout }}"
+    data-imdb-mapping-complete="{{ '1' if panel.imdb_mapping_complete else '0' }}"
+    data-imdb-mapping-pending="{{ '1' if panel.imdb_mapping_pending else '0' }}"
     {% if panel.default_episode_key %}data-default-episode-key="{{ panel.default_episode_key[0] }}-{{ panel.default_episode_key[1] }}"{% endif %}
 >
+    <div class="search-watch-layout-options">
+        <label class="title-matrix-option">
+            <input
+                type="checkbox"
+                data-search-watch-imdb-seasons-toggle
+                {% if panel.season_layout == 'imdb' %}checked{% endif %}
+            >
+            <span>IMDb seasons</span>
+        </label>
+        {% if panel.season_layout == 'imdb' and not panel.imdb_mapping_complete %}
+        <span class="search-watch-layout-note">
+            {% if panel.imdb_mapping_pending %}
+            Completing IMDb mapping. Season actions are temporarily unavailable.
+            {% else %}
+            IMDb mapping is incomplete. Season actions are unavailable.
+            {% endif %}
+        </span>
+        {% endif %}
+    </div>
     <div class="search-watch-seasons" role="tablist" aria-label="Seasons">
         {% for season in panel.seasons %}
         <button
@@ -24,13 +47,13 @@
             tabindex="{{ '0' if season.is_default else '-1' }}"
         >
             {{ season.label }}
-            <span>{{ season.watched_count }}/{{ season.released_count }}</span>
+            <span>{{ season.released_watched_count }}/{{ season.released_count }}</span>
         </button>
         {% endfor %}
     </div>
     <div class="search-watch-bulk-actions">
         {% for season in panel.seasons %}
-        {% if season.released_count > season.watched_count %}
+        {% if season.bulk_allowed and season.action_released_count > season.action_released_watched_count %}
         <button
             type="button"
             class="search-watch-scope-button search-watch-season-action{% if not season.is_default %} is-hidden{% endif %}"
@@ -40,6 +63,7 @@
             data-title="{{ panel.title }}"
             data-scope="season"
             data-season="{{ season.season }}"
+            data-season-layout="{{ panel.season_layout }}"
             data-search-watch-season-action="{{ season.season }}"
             title="Mark all released episodes in {{ season.label }} watched"
             aria-label="Mark all released episodes in {{ season.label }} watched"
@@ -48,7 +72,7 @@
             <span>{{ season.label }}</span>
         </button>
         {% endif %}
-        {% if season.watched_count > 0 %}
+        {% if season.bulk_allowed and season.action_watched_count > 0 %}
         <button
             type="button"
             class="search-watch-scope-button is-danger search-watch-season-action{% if not season.is_default %} is-hidden{% endif %}"
@@ -58,6 +82,7 @@
             data-title="{{ panel.title }}"
             data-scope="season"
             data-season="{{ season.season }}"
+            data-season-layout="{{ panel.season_layout }}"
             data-search-watch-season-action="{{ season.season }}"
             title="Remove watched history for {{ season.label }}"
             aria-label="Remove watched history for {{ season.label }}"
@@ -81,11 +106,28 @@
         {% if not season.is_default %}hidden{% endif %}
     >
         {% for episode in season.episodes %}
+        {% set spoiler_hidden = (
+            web_hide_spoilers|default(false)
+            and panel.watched_frontier_key
+            and episode.season > 0
+            and not episode.is_watched
+            and (
+                episode.season > panel.watched_frontier_key[0]
+                or (
+                    episode.season == panel.watched_frontier_key[0]
+                    and episode.number > panel.watched_frontier_key[1]
+                )
+            )
+        ) %}
         <article
             class="search-watch-episode-card{% if episode.is_watched %} is-watched{% endif %}{% if not episode.is_released %} is-unreleased{% endif %}"
             data-episode-key="{{ episode.season }}-{{ episode.number }}"
+            data-display-season="{{ season.season }}"
         >
-            <div class="search-watch-still-shell">
+            <div
+                class="search-watch-still-shell{% if spoiler_hidden %} is-spoiler-protected{% endif %}"
+                {% if spoiler_hidden %}data-spoiler-key="{{ spoiler_profile }}:{{ panel.trakt_id }}:{{ episode.season }}:{{ episode.number }}"{% endif %}
+            >
                 <a
                     class="search-watch-still"
                     href="https://trakt.tv/shows/{{ panel.slug or panel.trakt_id }}/seasons/{{ episode.season }}/episodes/{{ episode.number }}"
@@ -100,6 +142,7 @@
                     src="{{ episode.still_url|episode_preview_url|cached_image_url }}"
                     alt="{{ episode.title }} still"
                     loading="lazy"
+                    {% if spoiler_hidden %}data-spoiler-image{% endif %}
                 >
                 {% elif episode.still_status == 'unknown' %}
                 <span>Loading</span>
@@ -115,8 +158,23 @@
                     </svg>
                 </span>
                 {% endif %}
-                <span class="search-watch-episode-label">S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}{% if episode.imdb_season is not none and episode.imdb_episode is not none and (episode.imdb_season != episode.season or episode.imdb_episode != episode.number) %} (S{{ "%02d"|format(episode.imdb_season) }}E{{ "%02d"|format(episode.imdb_episode) }}){% endif %}</span>
+                <span class="search-watch-episode-label">
+                    {% if panel.season_layout == 'imdb' and episode.imdb_season is not none and episode.imdb_episode is not none %}
+                        S{{ "%02d"|format(episode.imdb_season) }}E{{ "%02d"|format(episode.imdb_episode) }}
+                    {% else %}
+                        S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}
+                    {% endif %}
+                </span>
                 </a>
+                {% if spoiler_hidden %}
+                <button
+                    type="button"
+                    class="episode-spoiler-reveal"
+                    data-spoiler-reveal
+                    aria-label="Reveal spoiler image for {{ panel.title }} S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}"
+                    hidden
+                >Click to unblur</button>
+                {% endif %}
                 {% if episode.is_watched %}
                 <button
                     type="button"
@@ -155,6 +213,7 @@
                     data-scope="episode"
                     data-season="{{ episode.season }}"
                     data-episode="{{ episode.number }}"
+                    data-season-layout="trakt"
                     data-episode-key="{{ episode.season }}-{{ episode.number }}"
                     {% if not episode.is_released %}disabled{% endif %}
                 >

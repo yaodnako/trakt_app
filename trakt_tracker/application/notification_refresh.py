@@ -40,8 +40,16 @@ class NotificationRefreshWorkflow:
         entries = client.get_calendar(start_date, days=self._CALENDAR_SPAN_DAYS)
         sent: list[dict] = []
         with self._db.session() as session:
-            active_items = self._progress_repo.list_in_progress(session, view=ProgressView.ACTIVE)
-            paused_items = self._progress_repo.list_in_progress(session, view=ProgressView.PAUSED)
+            active_items = self._progress_repo.list_in_progress(
+                session,
+                view=ProgressView.ACTIVE,
+                limit=None,
+            )
+            paused_items = self._progress_repo.list_in_progress(
+                session,
+                view=ProgressView.PAUSED,
+                limit=None,
+            )
             current_next_episodes = {
                 item.trakt_id: item.next_episode
                 for item in [*active_items, *paused_items]
@@ -189,7 +197,11 @@ class NotificationRefreshWorkflow:
         with self._db.session() as session:
             current_episodes = {
                 int(item.next_episode.trakt_id): item.next_episode
-                for item in self._progress_repo.list_in_progress(session, view=ProgressView.ACTIVE)
+                for item in self._progress_repo.list_in_progress(
+                    session,
+                    view=ProgressView.ACTIVE,
+                    limit=None,
+                )
                 if item.next_episode is not None
             }
             for row in self._notification_repo.list_unseen(session):

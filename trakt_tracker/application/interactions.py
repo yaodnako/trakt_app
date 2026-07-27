@@ -43,11 +43,6 @@ class InteractionService:
         episode = progress.next_episode
         if episode is None:
             raise RuntimeError("No next episode to mark watched")
-        self._notifications.mark_episode_seen(
-            show_trakt_id=progress.trakt_id,
-            show_title=progress.title,
-            episode=episode,
-        )
         self.add_history_item(
             HistoryItemInput(
                 title_type="show",
@@ -57,6 +52,11 @@ class InteractionService:
                 episode=episode.number,
                 title=progress.title,
             )
+        )
+        self._notifications.mark_episode_seen(
+            show_trakt_id=progress.trakt_id,
+            show_title=progress.title,
+            episode=episode,
         )
         return EpisodeActionResult(
             title=progress.title,

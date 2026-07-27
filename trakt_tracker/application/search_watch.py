@@ -7,6 +7,18 @@ from trakt_tracker.application.metadata_refresh_policy import ASSET_KIND_STILL, 
 from trakt_tracker.domain import EpisodeSummary, HistoryItemInput
 
 
+SEASON_LAYOUT_TRAKT = "trakt"
+SEASON_LAYOUT_IMDB = "imdb"
+SEASON_LAYOUTS = {SEASON_LAYOUT_TRAKT, SEASON_LAYOUT_IMDB}
+
+
+def normalize_season_layout(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in SEASON_LAYOUTS:
+        raise ValueError("Unsupported season layout.")
+    return normalized
+
+
 @dataclass(slots=True)
 class SearchWatchEpisode:
     season: int
@@ -32,6 +44,10 @@ class SearchWatchSeason:
     label: str
     episodes: list[SearchWatchEpisode] = field(default_factory=list)
     is_default: bool = False
+    bulk_allowed: bool = True
+    bulk_released_count: int | None = None
+    bulk_released_watched_count: int | None = None
+    bulk_watched_count: int | None = None
 
     @property
     def watched_count(self) -> int:
@@ -40,6 +56,24 @@ class SearchWatchSeason:
     @property
     def released_count(self) -> int:
         return sum(1 for episode in self.episodes if episode.is_released)
+
+    @property
+    def released_watched_count(self) -> int:
+        return sum(1 for episode in self.episodes if episode.is_released and episode.is_watched)
+
+    @property
+    def action_released_count(self) -> int:
+        return self.released_count if self.bulk_released_count is None else self.bulk_released_count
+
+    @property
+    def action_released_watched_count(self) -> int:
+        if self.bulk_released_watched_count is None:
+            return self.released_watched_count
+        return self.bulk_released_watched_count
+
+    @property
+    def action_watched_count(self) -> int:
+        return self.watched_count if self.bulk_watched_count is None else self.bulk_watched_count
 
 
 @dataclass(slots=True)
@@ -55,6 +89,10 @@ class SearchShowWatchPanel:
     title_ratings_status: str = "unknown"
     seasons: list[SearchWatchSeason] = field(default_factory=list)
     default_episode_key: tuple[int, int] | None = None
+    watched_frontier_key: tuple[int, int] | None = None
+    season_layout: str = SEASON_LAYOUT_TRAKT
+    imdb_mapping_complete: bool = True
+    imdb_mapping_pending: bool = False
 
     @property
     def watched_count(self) -> int:
@@ -62,16 +100,20 @@ class SearchShowWatchPanel:
 
     @property
     def released_count(self) -> int:
-        return sum(season.released_count for season in self.seasons if season.season >= 1)
+        return sum(
+            1
+            for season in self.seasons
+            for episode in season.episodes
+            if episode.season >= 1 and episode.is_released
+        )
 
     @property
     def released_watched_count(self) -> int:
         return sum(
             1
             for season in self.seasons
-            if season.season >= 1
             for episode in season.episodes
-            if episode.is_released and episode.is_watched
+            if episode.season >= 1 and episode.is_released and episode.is_watched
         )
 
 
@@ -85,24 +127,63 @@ class SearchWatchService:
         self._history_service = history_service
         self._episode_metadata = episode_metadata
 
-    def load_show_panel(self, trakt_id: int, default_season: int | None = None) -> SearchShowWatchPanel:
+    def load_show_panel(
+        self,
+        trakt_id: int,
+        default_season: int | None = None,
+        *,
+        season_layout: str = SEASON_LAYOUT_TRAKT,
+    ) -> SearchShowWatchPanel:
+        normalized_layout = normalize_season_layout(season_layout)
         with self._db.session() as session:
             title_row = self._titles.get_title(session, trakt_id)
             episode_rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
             watched_keys = self._history.watched_episode_keys(session, trakt_id)
             rated_map = self._history.latest_show_episode_ratings(session, trakt_id)
         default_episode_key = self._default_episode_key(episode_rows, watched_keys)
-        default_season_number = default_episode_key[0] if default_episode_key is not None else self._default_season_number(episode_rows)
+        watched_frontier_key = max((key for key in watched_keys if key[0] > 0), default=None)
+        imdb_mapping_complete = self._imdb_mapping_complete(episode_rows)
+        imdb_mapping_pending = (
+            normalized_layout == SEASON_LAYOUT_IMDB
+            and not imdb_mapping_complete
+            and self._imdb_mapping_pending(trakt_id)
+        )
+        grouped_rows: dict[int, list[dict]] = {}
+        for row in episode_rows:
+            if row.get("season") is None or row.get("number") is None:
+                continue
+            display_season = int(row["season"])
+            if normalized_layout == SEASON_LAYOUT_IMDB and row.get("imdb_season") is not None:
+                display_season = int(row["imdb_season"])
+            grouped_rows.setdefault(display_season, []).append(row)
+        default_season_number = self._display_season_for_key(
+            episode_rows,
+            default_episode_key,
+            season_layout=normalized_layout,
+        )
+        if default_season_number is None:
+            default_season_number = self._default_season_number(episode_rows)
         if default_season is not None:
-            season_numbers = {int(row["season"]) for row in episode_rows if row.get("season") is not None}
-            if default_season in season_numbers:
+            if default_season in grouped_rows:
                 default_season_number = default_season
         seasons: list[SearchWatchSeason] = []
-        for season_number in sorted({int(row["season"]) for row in episode_rows if row.get("season") is not None}):
+        for season_number in sorted(grouped_rows):
+            rows = sorted(
+                grouped_rows[season_number],
+                key=lambda row: self._display_episode_sort_key(row, season_layout=normalized_layout),
+            )
             episodes = [
                 self._episode_from_row(row, watched_keys, rated_map)
-                for row in episode_rows
-                if int(row.get("season") or 0) == season_number
+                for row in rows
+            ]
+            bulk_episodes = [
+                episode
+                for row, episode in zip(rows, episodes, strict=True)
+                if normalized_layout == SEASON_LAYOUT_TRAKT
+                or (
+                    row.get("imdb_season") == season_number
+                    and row.get("imdb_episode") is not None
+                )
             ]
             seasons.append(
                 SearchWatchSeason(
@@ -110,6 +191,15 @@ class SearchWatchService:
                     label=f"S{season_number}",
                     episodes=episodes,
                     is_default=season_number == default_season_number,
+                    bulk_allowed=(
+                        normalized_layout == SEASON_LAYOUT_TRAKT
+                        or (imdb_mapping_complete and season_number > 0)
+                    ),
+                    bulk_released_count=sum(1 for episode in bulk_episodes if episode.is_released),
+                    bulk_released_watched_count=sum(
+                        1 for episode in bulk_episodes if episode.is_released and episode.is_watched
+                    ),
+                    bulk_watched_count=sum(1 for episode in bulk_episodes if episode.is_watched),
                 )
             )
         return SearchShowWatchPanel(
@@ -124,6 +214,10 @@ class SearchWatchService:
             title_ratings_status=(title_row.ratings_status if title_row is not None else "unknown"),
             seasons=seasons,
             default_episode_key=default_episode_key,
+            watched_frontier_key=watched_frontier_key,
+            season_layout=normalized_layout,
+            imdb_mapping_complete=imdb_mapping_complete,
+            imdb_mapping_pending=imdb_mapping_pending,
         )
 
     def hydrate_show_episodes(self, trakt_id: int) -> bool:
@@ -158,6 +252,11 @@ class SearchWatchService:
             requested_parts=(ASSET_KIND_STILL,),
         )
 
+    def repair_imdb_seasons(self, trakt_id: int) -> int:
+        if self._episode_metadata is None:
+            return 0
+        return int(self._episode_metadata.repair_episode_imdb_ratings(int(trakt_id)) or 0)
+
     def mark_watch(
         self,
         *,
@@ -168,6 +267,7 @@ class SearchWatchService:
         watched_at: datetime | None,
         season: int | None = None,
         episode: int | None = None,
+        season_layout: str = SEASON_LAYOUT_TRAKT,
     ) -> int:
         normalized_type = "show" if title_type == "show" else "movie"
         if normalized_type == "movie":
@@ -180,7 +280,14 @@ class SearchWatchService:
                 )
             )
             return 1
-        selected = self._select_show_episodes(trakt_id, scope=scope, season=season, episode=episode)
+        selected = self._select_show_episodes(
+            trakt_id,
+            scope=scope,
+            season=season,
+            episode=episode,
+            season_layout=season_layout,
+            exclude_watched=scope == "season",
+        )
         if not selected:
             raise RuntimeError("No released episodes matched this action.")
         self._history_service.add_history_items(
@@ -212,12 +319,32 @@ class SearchWatchService:
         trakt_id: int,
         scope: str,
         season: int | None = None,
+        season_layout: str = SEASON_LAYOUT_TRAKT,
     ) -> dict:
+        normalized_layout = normalize_season_layout(season_layout)
+        if title_type == "show" and scope == "season" and normalized_layout == SEASON_LAYOUT_IMDB:
+            selected = self._select_show_episodes(
+                trakt_id,
+                scope=scope,
+                season=season,
+                episode=None,
+                season_layout=normalized_layout,
+                released_only=False,
+            )
+            return self._history_service.remove_watch_scope(
+                title_type=title_type,
+                trakt_id=trakt_id,
+                scope=scope,
+                season=season,
+                episode_keys={(item.season, item.number) for item in selected},
+                season_layout=normalized_layout,
+            )
         return self._history_service.remove_watch_scope(
             title_type=title_type,
             trakt_id=trakt_id,
             scope=scope,
             season=season,
+            season_layout=normalized_layout,
         )
 
     def restore_episode(self, **restore) -> None:
@@ -240,18 +367,33 @@ class SearchWatchService:
         scope: str,
         season: int | None,
         episode: int | None,
+        season_layout: str,
+        exclude_watched: bool = False,
+        released_only: bool = True,
     ) -> list[EpisodeSummary]:
+        normalized_layout = normalize_season_layout(season_layout)
         rows = self._load_episode_summaries(trakt_id)
+        if scope == "season" and normalized_layout == SEASON_LAYOUT_IMDB:
+            self._assert_imdb_bulk_ready(rows)
+        watched_keys: set[tuple[int, int]] = set()
+        if exclude_watched:
+            with self._db.session() as session:
+                watched_keys = self._history.watched_episode_keys(session, trakt_id)
         result: list[EpisodeSummary] = []
         for item in rows:
-            if not self._is_released(item.first_aired):
+            if released_only and not self._is_released(item.first_aired):
                 continue
             if scope == "title":
                 if item.season >= 1:
                     result.append(item)
                 continue
             if scope == "season":
-                if season is not None and item.season == season:
+                matches_season = (
+                    item.imdb_season == season and item.imdb_episode is not None
+                    if normalized_layout == SEASON_LAYOUT_IMDB
+                    else item.season == season
+                )
+                if matches_season and (item.season, item.number) not in watched_keys:
                     result.append(item)
                 continue
             if scope == "episode" and season is not None and episode is not None:
@@ -274,11 +416,72 @@ class SearchWatchService:
                 season=int(row["season"]),
                 number=int(row["number"]),
                 title=str(row.get("title") or ""),
+                imdb_id=str(row.get("imdb_id") or ""),
+                imdb_rating=row.get("imdb_rating"),
+                imdb_votes=row.get("imdb_votes"),
+                imdb_season=row.get("imdb_season"),
+                imdb_episode=row.get("imdb_episode"),
+                imdb_status=str(row.get("imdb_match_status") or "unknown"),
                 first_aired=row.get("first_aired"),
             )
             for row in rows
             if row.get("season") is not None and row.get("number") is not None
         ]
+
+    def _imdb_mapping_pending(self, trakt_id: int) -> bool:
+        if self._episode_metadata is None:
+            return False
+        checker = getattr(self._episode_metadata, "needs_episode_imdb_reconciliation", None)
+        return bool(checker and checker(int(trakt_id)))
+
+    @classmethod
+    def _imdb_mapping_complete(cls, rows: list[dict]) -> bool:
+        return all(
+            row.get("imdb_season") is not None and row.get("imdb_episode") is not None
+            for row in rows
+            if row.get("season") is not None
+            and int(row["season"]) >= 1
+            and cls._is_released(row.get("first_aired"))
+        )
+
+    @classmethod
+    def _assert_imdb_bulk_ready(cls, rows: list[EpisodeSummary]) -> None:
+        if all(
+            item.imdb_season is not None and item.imdb_episode is not None
+            for item in rows
+            if item.season >= 1 and cls._is_released(item.first_aired)
+        ):
+            return
+        raise RuntimeError("IMDb season mapping is incomplete. Try again after metadata refresh.")
+
+    @staticmethod
+    def _display_episode_sort_key(row: dict, *, season_layout: str) -> tuple[int, int, int]:
+        if (
+            season_layout == SEASON_LAYOUT_IMDB
+            and row.get("imdb_season") is not None
+            and row.get("imdb_episode") is not None
+        ):
+            return (int(row["imdb_episode"]), int(row.get("season") or 0), int(row.get("number") or 0))
+        return (int(row.get("number") or 0), int(row.get("season") or 0), int(row.get("number") or 0))
+
+    @staticmethod
+    def _display_season_for_key(
+        rows: list[dict],
+        key: tuple[int, int] | None,
+        *,
+        season_layout: str,
+    ) -> int | None:
+        if key is None:
+            return None
+        for row in rows:
+            if row.get("season") is None or row.get("number") is None:
+                continue
+            if (int(row["season"]), int(row["number"])) != key:
+                continue
+            if season_layout == SEASON_LAYOUT_IMDB and row.get("imdb_season") is not None:
+                return int(row["imdb_season"])
+            return int(row["season"])
+        return None
 
     @classmethod
     def _episode_from_row(

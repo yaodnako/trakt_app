@@ -30,8 +30,16 @@ class _ProgressImport:
         self.calls = 0
         self.defer_assets = False
 
-    def sync_progress(self, *, dropped_only: bool, force_full_assets: bool, defer_assets: bool = False) -> None:
+    def sync_progress(
+        self,
+        *,
+        dropped_only: bool,
+        force_refresh: bool = False,
+        force_full_assets: bool,
+        defer_assets: bool = False,
+    ) -> None:
         assert dropped_only is False
+        assert force_refresh is True
         assert force_full_assets is False
         self.calls += 1
         self.defer_assets = defer_assets

@@ -4,7 +4,7 @@ import asyncio
 import mimetypes
 import shutil
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from sqlalchemy import func, select
 
@@ -38,6 +38,19 @@ _PENDING_IMAGE_GIF = bytes.fromhex(
 
 
 def register_system_routes(app, *, render, template_filters) -> None:
+    def safe_return_path(value: str, *, default: str = "/settings") -> str:
+        candidate = str(value or "").strip()
+        if any(character in candidate for character in ("\r", "\n", "\\")):
+            return default
+        parsed = urlsplit(candidate)
+        if parsed.scheme or parsed.netloc or not parsed.path.startswith("/") or parsed.path.startswith("//"):
+            return default
+        return parsed.path + (f"?{parsed.query}" if parsed.query else "")
+
+    def with_flash(path: str, message: str) -> str:
+        separator = "&" if "?" in path else "?"
+        return f"{path}{separator}flash={quote(message)}"
+
     def setup_task_key(services: ServiceContainer) -> str:
         return f"initial_setup:{services.auth.config.active_slug or 'bootstrap'}"
 
@@ -48,7 +61,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
         runtime = getattr(request.app.state, "runtime", None)
         if runtime is None:
             return request.app.state.services
-        services = runtime.activate_profile(slug)
+        services = runtime.services if runtime.active_slug == slug else runtime.activate_profile(slug)
         request.app.state.services = services
         template_filters.utc_offset = services.auth.config.utc_offset
         return services
@@ -197,14 +210,24 @@ def register_system_routes(app, *, render, template_filters) -> None:
         return FileResponse(sound_path, media_type=media_type or "audio/mpeg")
 
     @app.get("/settings", response_class=HTMLResponse)
-    async def settings_page(request: Request, flash: str = "") -> HTMLResponse:
+    async def settings_page(request: Request, flash: str = "", next: str = "") -> HTMLResponse:
         services: ServiceContainer = request.app.state.services
         config = services.auth.config
         bg_tasks = request.app.state.bg_tasks
-        profiles = [
-            {"slug": slug, "active": slug == config.active_slug, "authorized": services.auth.has_token(slug)}
-            for slug in config.known_profile_slugs
-        ] if hasattr(services.auth, "has_token") else []
+        setup_complete = read_setup_state(services.database).get("state") == "complete"
+        profiles = []
+        if hasattr(services.auth, "has_token"):
+            for slug in config.known_profile_slugs:
+                active = slug == config.active_slug
+                authorized = services.auth.has_token(slug)
+                profiles.append(
+                    {
+                        "slug": slug,
+                        "active": active,
+                        "authorized": authorized,
+                        "reauthorization_required": active and setup_complete and not authorized,
+                    }
+                )
         return render(
             request,
             "settings.html",
@@ -213,6 +236,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
                 "flash": flash,
                 "config": config,
                 "profiles": profiles,
+                "reconnect_return_to": safe_return_path(next),
                 "credentials_source": trakt_credentials_source(config),
                 "trakt_configured": services.auth.is_configured(),
                 "tmdb_configured": bool(resolved_tmdb_api_key(config) or resolved_tmdb_read_access_token(config)),
@@ -314,6 +338,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
         config.notifications_enabled = parse_bool_flag(str(form.get("notifications_enabled", "")))
         config.debug_mode = parse_bool_flag(str(form.get("debug_mode", "")))
         config.open_in_embedded_player = parse_bool_flag(str(form.get("open_in_embedded_player", "")))
+        config.web_hide_spoilers = parse_bool_flag(str(form.get("web_hide_spoilers", "")))
         config.web_portal_start_with_windows = parse_bool_flag(str(form.get("web_portal_start_with_windows", "")))
         try:
             set_web_tray_autostart(config.web_portal_start_with_windows)
@@ -329,13 +354,12 @@ def register_system_routes(app, *, render, template_filters) -> None:
     async def settings_trakt_authorize(request: Request) -> RedirectResponse:
         services: ServiceContainer = request.app.state.services
         form = await request.form()
-        return_to = str(form.get("return_to", "/settings") or "/settings")
-        if return_to not in {"/setup", "/settings"}:
-            return_to = "/settings"
+        return_to = safe_return_path(str(form.get("return_to", "/settings") or "/settings"))
         try:
             slug = await asyncio.to_thread(services.auth.authorize)
         except Exception as exc:
             flash = f"Trakt authorization failed: {exc}"
+            return_to = f"/settings?next={quote(return_to)}"
         else:
             services = activate_services(request, slug)
             state = read_setup_state(services.database) if hasattr(services, "database") else {"state": "complete"}
@@ -343,8 +367,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
                 start_initial_setup(request, services)
                 return_to = "/setup"
             flash = f"Trakt authorized as {slug}."
-        separator = "&" if "?" in return_to else "?"
-        return RedirectResponse(url=f"{return_to}{separator}flash={quote(flash)}", status_code=303)
+        return RedirectResponse(url=with_flash(return_to, flash), status_code=303)
 
     @app.post("/settings/provider-defaults")
     async def settings_provider_defaults(request: Request) -> RedirectResponse:
@@ -631,7 +654,6 @@ def register_system_routes(app, *, render, template_filters) -> None:
     @app.get("/notifications/poll")
     async def notifications_poll(request: Request) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
-        bg_tasks = request.app.state.bg_tasks
         if not services.auth.is_authorized():
             return JSONResponse({"items": [], "activity_seq": None})
         try:
@@ -639,13 +661,6 @@ def register_system_routes(app, *, render, template_filters) -> None:
         except Exception:
             items = []
         activity_seq = services.notifications.record_activity(items) if items else None
-        if items:
-            bg_tasks.start(
-                "progress_sync",
-                source="Progress sync (notification)",
-                operations=services.operations,
-                fn=lambda: services.progress.sync_progress(dropped_only=False),
-            )
         return JSONResponse({"items": items, "activity_seq": activity_seq})
 
     @app.get("/notifications/activity")

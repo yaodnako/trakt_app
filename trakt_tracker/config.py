@@ -36,6 +36,7 @@ class AppConfig:
     kinopoisk_domain_tail: str = "net"
     kinopoisk_domain_options: str = "net,ru"
     open_in_embedded_player: bool = False
+    web_hide_spoilers: bool = False
     hide_upcoming_in_progress: bool = False
     show_paused_in_progress: bool = False
     show_dropped_in_progress: bool = False
@@ -43,6 +44,7 @@ class AppConfig:
     web_progress_sort_direction: str = "desc"
     web_progress_min_year: int | None = None
     web_progress_year_filter_enabled: bool = False
+    web_imdb_seasons_enabled: bool = True
     omdb_api_key: str = ""
     cache_ttl_hours: int = 24
     explore_imdb_scan_page_limit: int = 10

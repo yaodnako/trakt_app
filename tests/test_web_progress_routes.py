@@ -45,6 +45,7 @@ class _FakeProgressService:
         sort_mode="episode_release",
         descending=True,
         dropped_only=None,
+        limit=50,
     ):
         view_value = getattr(view, "value", view)
         if dropped_only is not None:
@@ -105,6 +106,7 @@ class _FakeProgressService:
         sort_mode="episode_release",
         descending=True,
         dropped_only=None,
+        force_refresh=False,
         force_full_assets=False,
     ):
         self.sync_calls.append(
@@ -113,6 +115,7 @@ class _FakeProgressService:
                 "view": getattr(view, "value", view),
                 "sort_mode": getattr(sort_mode, "value", sort_mode),
                 "descending": descending,
+                "force_refresh": force_refresh,
                 "force_full_assets": force_full_assets,
             }
         )
@@ -123,12 +126,16 @@ class _FakeInteractionService:
     def __init__(self) -> None:
         self.pause_calls: list[dict] = []
         self.drop_calls: list[dict] = []
+        self.watch_calls: list[dict] = []
 
     def set_progress_paused(self, trakt_id: int, *, paused: bool, progress=None) -> None:
         self.pause_calls.append({"trakt_id": trakt_id, "paused": paused, "progress": progress})
 
     def set_progress_dropped(self, trakt_id: int, *, dropped: bool) -> None:
         self.drop_calls.append({"trakt_id": trakt_id, "dropped": dropped})
+
+    def mark_progress_episode_watched(self, progress, *, watched_at) -> None:
+        self.watch_calls.append({"trakt_id": progress.trakt_id, "watched_at": watched_at})
 
 
 class _FakeEnrichQueueService:
@@ -255,6 +262,8 @@ class ProgressRouteTests(unittest.TestCase):
         self.interactions = _FakeInteractionService()
         self.queue = _FakeEnrichQueueService()
         self.unseen_episode_ids: set[int] = set()
+        self.watchlist_calls: list[dict] = []
+        self.watchlist_keys = {("show", 1)}
         self.app.state.services = SimpleNamespace(
             progress=self.progress,
             enrich_queue=self.queue,
@@ -268,11 +277,21 @@ class ProgressRouteTests(unittest.TestCase):
                     web_progress_sort_direction="desc",
                     web_progress_min_year=None,
                     web_progress_year_filter_enabled=False,
+                    web_hide_spoilers=False,
+                    active_slug="test-user",
                 ),
             ),
             interactions=self.interactions,
+            catalog=SimpleNamespace(
+                watchlist_keys=lambda *, title_type=None: {
+                    key for key in self.watchlist_keys if title_type is None or key[0] == title_type
+                },
+                set_watchlisted=lambda title_type, trakt_id, *, watchlisted: self.watchlist_calls.append(
+                    {"title_type": title_type, "trakt_id": trakt_id, "watchlisted": watchlisted}
+                ),
+            ),
             play=SimpleNamespace(),
-            operations=SimpleNamespace(),
+            operations=SimpleNamespace(publish=lambda *args: None),
         )
         self.app.state.bg_tasks = _FakeBackgroundTaskManager()
 
@@ -286,6 +305,8 @@ class ProgressRouteTests(unittest.TestCase):
                 "notification_sound_url": "",
                 "debug_mode": False,
                 "debug_initial_seq": 0,
+                "active_profile_slug": self.app.state.services.auth.config.active_slug,
+                "web_hide_spoilers": self.app.state.services.auth.config.web_hide_spoilers,
             }
             base_context.update(context)
             return self.templates.TemplateResponse(request, template_name, base_context, status_code=status_code)
@@ -294,7 +315,13 @@ class ProgressRouteTests(unittest.TestCase):
             return RedirectResponse(url=f"/progress?{progress_query_string(**kwargs)}", status_code=303)
 
         self.app.state.render_fragment = lambda request, template_name, context: self.templates.get_template(template_name).render(
-            {"request": request, "current_path": request.url.path, **context}
+            {
+                "request": request,
+                "current_path": request.url.path,
+                "active_profile_slug": self.app.state.services.auth.config.active_slug,
+                "web_hide_spoilers": self.app.state.services.auth.config.web_hide_spoilers,
+                **context,
+            }
         )
         register_progress_routes(self.app, render=render, progress_redirect=progress_redirect)
         self.client = TestClient(self.app)
@@ -336,6 +363,58 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertNotIn("scheduleWatchPanelRefreshIfPending", html)
         self.assertIn("refreshWatchPanel", watch_script)
 
+    def test_progress_spoilers_blur_only_real_next_episode_stills(self) -> None:
+        config = self.app.state.services.auth.config
+        config.web_hide_spoilers = True
+        first = self.progress.items[0]
+        second = self.progress.items[1]
+        first.next_episode.still_url = "https://still.example/severance.jpg"
+        second.poster_url = "https://poster.example/andor.jpg"
+
+        protected = self.client.get("/progress").text
+
+        self.assertIn('data-spoiler-key="test-user:1:2:3"', protected)
+        self.assertEqual(protected.count("Click to unblur"), 1)
+        self.assertNotIn('data-spoiler-key="test-user:2:1:4"', protected)
+
+        config.web_hide_spoilers = False
+        unprotected = self.client.get("/progress").text
+        self.assertNotIn("data-spoiler-key", unprotected)
+
+    def test_progress_episode_watch_removes_watchlisted_show(self) -> None:
+        response = self.client.post("/progress/1/watch", data={}, follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(len(self.interactions.watch_calls), 1)
+        self.assertEqual(
+            self.watchlist_calls,
+            [{"title_type": "show", "trakt_id": 1, "watchlisted": False}],
+        )
+
+    def test_progress_toolbar_uses_compact_state_and_sort_controls(self) -> None:
+        response = self.client.get("/progress")
+
+        self.assertEqual(response.status_code, 200)
+        toolbar_start = response.text.index('<div class="progress-toolbar">')
+        toolbar_end = response.text.index("</section>", toolbar_start)
+        toolbar = response.text[toolbar_start:toolbar_end]
+        self.assertIn("static/pause.svg", toolbar)
+        self.assertIn("<span>Paused</span>", toolbar)
+        self.assertIn("static/drop_red.svg", toolbar)
+        self.assertIn("<span>Dropped</span>", toolbar)
+        self.assertNotIn("Show Paused", toolbar)
+        self.assertNotIn("Show Dropped", toolbar)
+        self.assertIn('data-progress-sort-mode="episode_release"', toolbar)
+
+        css = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "style.css").read_text(encoding="utf-8")
+        self.assertNotIn("field-sizing: content;", css)
+        self.assertIn('select[data-progress-sort-mode="episode_release"] {\n    width: 136px;', css)
+        self.assertIn("width: 58px;\n    min-width: 58px;", css)
+        self.assertIn("gap: 3px;", css)
+        self.assertIn(".progress-filter-icon-pause {\n    width: 12px;", css)
+        self.assertIn(".progress-filter-icon-drop {\n    width: 17.142857px;", css)
+        self.assertIn("margin-inline: -2.571429px;", css)
+
     def test_progress_filters_normalize_to_dropped_and_forward_sort_state(self) -> None:
         self.progress.items = [
             ProgressSnapshot(trakt_id=1, title="Active", completed=1, aired=2, percent_completed=50.0),
@@ -363,7 +442,7 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Dropped", response.text)
         self.assertNotIn(">Active<", response.text)
-        self.assertNotIn(">Paused<", response.text)
+        self.assertNotIn('data-progress-card-key="progress:2"', response.text)
         self.assertIn('data-show-paused="0"', response.text)
         self.assertIn('data-show-dropped="1"', response.text)
         self.assertIn('class="progress-card is-dropped"', response.text)
@@ -455,6 +534,38 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertLess(response.text.index("Andor"), response.text.index("Severance"))
         self.assertIn("progress-new-badge", response.text)
+
+    def test_progress_new_partition_is_applied_before_page_limit(self) -> None:
+        released_at = datetime.now(tz=UTC) - timedelta(days=1)
+        self.progress.items = [
+            ProgressSnapshot(
+                trakt_id=1000 + offset,
+                title=f"Show {offset:02d}",
+                completed=1,
+                aired=2,
+                percent_completed=50.0,
+                next_episode=EpisodeSummary(
+                    trakt_id=2000 + offset,
+                    season=1,
+                    number=2,
+                    title="Next",
+                    first_aired=released_at,
+                ),
+            )
+            for offset in range(51)
+        ]
+        self.unseen_episode_ids = {2050}
+
+        response = self.client.get("/progress")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertEqual(html.count('data-progress-card-key="progress:'), 50)
+        self.assertLess(
+            html.index('data-progress-card-key="progress:1050"'),
+            html.index('data-progress-card-key="progress:1000"'),
+        )
+        self.assertNotIn('data-progress-card-key="progress:1049"', html)
 
     def test_progress_refresh_returns_only_requested_cards(self) -> None:
         response = self.client.post(

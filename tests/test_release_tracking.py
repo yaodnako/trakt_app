@@ -186,6 +186,44 @@ def test_progress_badge_excludes_paused_and_dropped_titles() -> None:
         assert service.progress_waiting_count() == 1
         db.close()
 
+def test_progress_badge_counts_all_active_titles_beyond_ui_limit() -> None:
+    with TemporaryDirectory() as directory:
+        db = Database(Path(directory) / "test.sqlite3")
+        db.create_schema()
+        progress_repo = ProgressRepository()
+        released_at = datetime.now(tz=UTC) - timedelta(hours=1)
+        with db.session() as session:
+            for trakt_id in range(1, 56):
+                progress_repo.upsert_progress(
+                    session,
+                    ProgressSnapshot(
+                        trakt_id=trakt_id,
+                        title=f"Show {trakt_id}",
+                        completed=1,
+                        aired=2,
+                        percent_completed=50,
+                        next_episode=EpisodeSummary(
+                            trakt_id=1000 + trakt_id,
+                            season=1,
+                            number=2,
+                            title="Next",
+                            first_aired=released_at,
+                        ),
+                    ),
+                )
+        service = ReleaseTrackingService(
+            db,
+            SimpleNamespace(),
+            SimpleNamespace(load=lambda: AppConfig()),
+            ReleaseTrackingRepository(),
+            progress_repo,
+            _Sender(),
+        )
+        try:
+            assert service.progress_waiting_count() == 55
+        finally:
+            db.close()
+
 
 def test_release_notification_source_requires_unacknowledged_item_past_delay() -> None:
     with TemporaryDirectory() as directory:

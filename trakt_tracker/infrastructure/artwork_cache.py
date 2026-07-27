@@ -132,15 +132,15 @@ def _fetch_and_cache_image_uncached(cache: BinaryCache, target_url: str, timeout
     candidates = _candidate_image_urls(target_url)
     if _is_tmdb_image_url(target_url):
         for fetch_url in candidates:
-            fetched_by_curl = _fetch_image_with_curl(fetch_url, timeout)
-            if fetched_by_curl is not None:
-                fetched, content_type = fetched_by_curl
-                if _valid_image_payload(fetched, content_type):
-                    cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(fetch_url, content_type))
-                    return fetched, content_type
             fetched_by_fragmented_tls = _fetch_image_with_fragmented_tls(fetch_url, timeout, headers)
             if fetched_by_fragmented_tls is not None:
                 fetched, content_type = fetched_by_fragmented_tls
+                if _valid_image_payload(fetched, content_type):
+                    cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(fetch_url, content_type))
+                    return fetched, content_type
+            fetched_by_curl = _fetch_image_with_curl(fetch_url, timeout)
+            if fetched_by_curl is not None:
+                fetched, content_type = fetched_by_curl
                 if _valid_image_payload(fetched, content_type):
                     cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(fetch_url, content_type))
                     return fetched, content_type

@@ -175,6 +175,7 @@ class HistoryService:
             "episode": int(episode),
             "watched_at": normalized_watched_at.astimezone(UTC).isoformat(),
             "watched_at_known": restore_watched_at_known,
+            "can_restore": restore_watched_at_known,
         }
 
     def remove_watch_scope(
@@ -184,24 +185,36 @@ class HistoryService:
         trakt_id: int,
         scope: str,
         season: int | None = None,
+        episode_keys: set[tuple[int, int]] | None = None,
+        season_layout: str = "trakt",
     ) -> dict:
         normalized_type = "show" if title_type == "show" else "movie"
         if normalized_type == "movie":
             scope = "title"
             season = None
+            episode_keys = None
         elif scope not in {"season", "title"}:
             raise RuntimeError("Unsupported watched-history scope.")
         if scope == "season" and season is None:
             raise RuntimeError("Missing season identity.")
+        if episode_keys is not None and (normalized_type != "show" or scope != "season"):
+            raise RuntimeError("Episode-key scope is only supported for show seasons.")
 
         client = self._auth.get_client()
         with self._db.session() as session:
-            rows = self._history.watches_for_scope(
-                session,
-                title_type=normalized_type,
-                trakt_id=trakt_id,
-                season=season if scope == "season" else None,
-            )
+            if episode_keys is not None:
+                rows = self._history.watches_for_episode_keys(
+                    session,
+                    show_trakt_id=trakt_id,
+                    episode_keys=episode_keys,
+                )
+            else:
+                rows = self._history.watches_for_scope(
+                    session,
+                    title_type=normalized_type,
+                    trakt_id=trakt_id,
+                    season=season if scope == "season" else None,
+                )
             if not rows:
                 raise RuntimeError("This title is not marked watched.")
 
@@ -247,12 +260,19 @@ class HistoryService:
                 )
 
             client.remove_history_items(remote_items)
-            removed = self._history.remove_watches_for_scope(
-                session,
-                title_type=normalized_type,
-                trakt_id=trakt_id,
-                season=season if scope == "season" else None,
-            )
+            if episode_keys is not None:
+                removed = self._history.remove_watches_for_episode_keys(
+                    session,
+                    show_trakt_id=trakt_id,
+                    episode_keys=episode_keys,
+                )
+            else:
+                removed = self._history.remove_watches_for_scope(
+                    session,
+                    title_type=normalized_type,
+                    trakt_id=trakt_id,
+                    season=season if scope == "season" else None,
+                )
             title = self._titles.get_title(session, trakt_id)
             if title is not None:
                 state = self._user_states.ensure_state(session, title.id)
@@ -282,13 +302,17 @@ class HistoryService:
             "title": removed[0].title,
             "scope": scope,
             "season": season,
+            "season_layout": season_layout,
             "still_watched": still_watched,
             "items": [self._watch_restore_item(row) for row in removed],
+            "can_restore": all(bool(row.watched_at_known) for row in removed),
         }
 
     def restore_watch_scope(self, *, items: list[dict]) -> None:
         if not items:
             raise RuntimeError("Missing watched-history restore data.")
+        if any(not bool(item.get("watched_at_known", True)) for item in items):
+            raise RuntimeError("Cannot restore a Trakt watch with an unknown date.")
         client = self._auth.get_client()
         with self._db.session() as session:
             remote_items: list[HistoryItemInput] = []
@@ -324,7 +348,6 @@ class HistoryService:
                 title_type = "show" if item.get("title_type") == "show" else "movie"
                 parent_trakt_id = int(item["trakt_id"])
                 watched_at = item["watched_at"]
-                watched_at_known = bool(item.get("watched_at_known", True))
                 season_number = int(item["season"]) if item.get("season") is not None else None
                 episode_number = int(item["episode"]) if item.get("episode") is not None else None
                 remote_trakt_id = parent_trakt_id
@@ -334,7 +357,7 @@ class HistoryService:
                     HistoryItemInput(
                         title_type=title_type,
                         trakt_id=remote_trakt_id,
-                        watched_at=watched_at if watched_at_known else UNDATED_HISTORY_AT,
+                        watched_at=watched_at,
                         season=season_number,
                         episode=episode_number,
                         title=str(item.get("title") or ""),
@@ -404,54 +427,18 @@ class HistoryService:
         watched_at: datetime,
         watched_at_known: bool,
     ) -> None:
-        if watched_at_known:
-            self.add_history_item(
-                HistoryItemInput(
-                    title_type="show",
-                    trakt_id=show_trakt_id,
-                    watched_at=watched_at,
-                    season=season,
-                    episode=episode,
-                    title=title,
-                )
-            )
-            return
-
-        client = self._auth.get_client()
-        with self._db.session() as session:
-            episode_row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
-            if episode_row is None or not episode_row.episode_trakt_id:
-                raise RuntimeError("Episode metadata was not found for the selected season/episode")
-            client.add_history_items(
-                [
-                    HistoryItemInput(
-                        title_type="show",
-                        trakt_id=int(episode_row.episode_trakt_id),
-                        watched_at=UNDATED_HISTORY_AT,
-                        season=season,
-                        episode=episode,
-                        title=title,
-                    )
-                ]
-            )
-            title_row = self._titles.get_title(session, show_trakt_id)
-            if title_row is not None:
-                state = self._user_states.ensure_state(session, title_row.id)
-                state.in_history = True
-                state.tracked = True
-            self._history.add_event(
-                session,
-                trakt_history_id=None,
-                title_trakt_id=show_trakt_id,
-                title=title,
+        if not watched_at_known:
+            raise RuntimeError("Cannot restore a Trakt watch with an unknown date.")
+        self.add_history_item(
+            HistoryItemInput(
                 title_type="show",
-                action="watched",
-                watched_at=UNDATED_HISTORY_AT,
-                watched_at_known=False,
+                trakt_id=show_trakt_id,
+                watched_at=watched_at,
                 season=season,
                 episode=episode,
-                source="local",
+                title=title,
             )
+        )
 
     def set_rating(self, item: RatingInput, title: str = "") -> None:
         client = self._auth.get_client()
@@ -483,8 +470,9 @@ class HistoryService:
                         title=title or f"{item.title_type.capitalize()} {item.trakt_id}",
                     ),
                 )
-            state = self._user_states.ensure_state(session, model.id)
-            state.rating = item.rating
+            if item.season is None and item.episode is None:
+                state = self._user_states.ensure_state(session, model.id)
+                state.rating = item.rating
             self._history.add_event(
                 session,
                 trakt_history_id=None,

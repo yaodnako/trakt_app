@@ -12,6 +12,7 @@
     let watchLoadController = null;
     let watchRefreshController = null;
     let watchRefreshTimer = 0;
+    let mappingRefreshAttempts = 0;
 
     function cancelWatchPanelRequests() {
         watchLoadController?.abort();
@@ -51,6 +52,14 @@
         if (watchRefreshTimer) window.clearTimeout(watchRefreshTimer);
         const selectedSeason = watchBody?.querySelector(".search-watch-episode-grid:not(.is-hidden)");
         const panelPending = watchBody?.querySelector("[data-watch-panel-pending='1']");
+        const mappingPending = watchBody?.querySelector("[data-search-watch-panel]")?.dataset.imdbMappingPending === "1";
+        if (mappingPending && mappingRefreshAttempts < 8) {
+            watchRefreshTimer = window.setTimeout(() => {
+                mappingRefreshAttempts += 1;
+                loadWatchPanel("", {preserve: true});
+            }, 900);
+            return;
+        }
         if (!panelPending && !selectedSeason?.querySelector(".search-watch-still[data-still-pending='1']")) return;
         watchRefreshTimer = window.setTimeout(() => refreshWatchPanel(requestUrl, token), 900);
     }
@@ -78,6 +87,8 @@
     async function loadWatchPanel(panelUrl = "", {preserve = false, focusDefault = false} = {}) {
         const requestUrl = panelUrl || activePanelUrl;
         if (!requestUrl || !watchBody) return;
+        if (watchRefreshTimer) window.clearTimeout(watchRefreshTimer);
+        watchRefreshTimer = 0;
         const token = watchRefreshToken;
         const state = preserve ? window.traktShowWatchPanel?.captureState(watchBody) : null;
         if (!preserve) watchBody.innerHTML = '<div class="title-matrix-loading-shell"><div class="title-matrix-loading-bar is-wide"></div></div>';
@@ -110,6 +121,7 @@
         activeTrigger = trigger;
         activePanelUrl = trigger.dataset.watchPanelUrl || "";
         watchRefreshToken += 1;
+        mappingRefreshAttempts = 0;
         cancelWatchPanelRequests();
         if (watchTitle) watchTitle.textContent = trigger.dataset.title || "Episodes";
         window.traktShowWatchPanel?.configureTitleRatings(watchOverlay, null);
@@ -126,6 +138,7 @@
             scope: target.dataset.scope || "episode",
             season: target.dataset.season || "",
             episode: target.dataset.episode || "",
+            season_layout: target.dataset.seasonLayout || "trakt",
             remove_from_watchlist: target.dataset.removeFromWatchlist === "true",
         };
     }
@@ -243,6 +256,13 @@
             event.preventDefault();
             submitWatch(dateMode.dataset.historyWatchDateMode || "none");
         }
+    });
+
+    document.addEventListener("trakt:imdb-seasons-preference-changed", () => {
+        if (!watchBody?.querySelector("[data-search-watch-panel]") || watchOverlay?.hidden) return;
+        mappingRefreshAttempts = 0;
+        cancelWatchPanelRequests();
+        loadWatchPanel("", {preserve: true});
     });
 
     window.addEventListener("keydown", (event) => {

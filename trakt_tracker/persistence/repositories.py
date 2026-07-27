@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import unicodedata
 from typing import cast
 
-from sqlalchemy import and_, delete, desc, exists, func, or_, select, tuple_
+from sqlalchemy import and_, delete, desc, exists, func, or_, select, tuple_, update
 from sqlalchemy.orm import Session
 
 from trakt_tracker.application.enrich_state import (
@@ -278,6 +278,10 @@ class UserStateRepository:
         )
         return {trakt_id: rating for trakt_id, rating in session.execute(stmt) if rating is not None}
 
+    def clear_ratings(self, session: Session) -> None:
+        session.execute(update(UserTitleState).values(rating=None))
+        session.flush()
+
     def set_archived(self, session: Session, trakt_id: int, archived: bool) -> None:
         title = self._progress_title(session, trakt_id)
         if title is None:
@@ -539,6 +543,8 @@ class HistoryRepository:
                 existing.rating = rating
                 existing.source = source
                 session.flush()
+                if action == "watched":
+                    return self._delete_other_watched_duplicates(session, existing)
                 return existing
         if trakt_history_id is None and source == "local" and action == "watched":
             existing_local = self.find_recent_local_watch(
@@ -555,9 +561,8 @@ class HistoryRepository:
                 existing_local.watched_at = watched_at
                 existing_local.watched_at_known = watched_at_known
                 existing_local.rating = rating
-                self._delete_other_watched_duplicates(session, existing_local)
                 session.flush()
-                return existing_local
+                return self._delete_other_watched_duplicates(session, existing_local)
         event = HistoryEvent(
             trakt_history_id=trakt_history_id,
             title_trakt_id=title_trakt_id,
@@ -574,21 +579,29 @@ class HistoryRepository:
         session.add(event)
         session.flush()
         if action == "watched":
-            self._delete_other_watched_duplicates(session, event)
+            return self._delete_other_watched_duplicates(session, event)
         return event
 
-    def _delete_other_watched_duplicates(self, session: Session, keep_event: HistoryEvent) -> None:
-        duplicates = session.scalars(
+    def _delete_other_watched_duplicates(self, session: Session, keep_event: HistoryEvent) -> HistoryEvent:
+        candidates = session.scalars(
             select(HistoryEvent)
             .where(HistoryEvent.action == "watched")
             .where(HistoryEvent.title_type == keep_event.title_type)
             .where(HistoryEvent.title_trakt_id == keep_event.title_trakt_id)
             .where(HistoryEvent.season == keep_event.season)
             .where(HistoryEvent.episode == keep_event.episode)
-            .where(HistoryEvent.id != keep_event.id)
+            .order_by(
+                desc(HistoryEvent.watched_at_known),
+                desc(HistoryEvent.watched_at),
+                desc(HistoryEvent.trakt_history_id),
+                desc(HistoryEvent.id),
+            )
         ).all()
-        for duplicate in duplicates:
+        canonical = candidates[0]
+        for duplicate in candidates[1:]:
             session.delete(duplicate)
+        session.flush()
+        return canonical
 
     def collapse_duplicate_watches(self, session: Session) -> None:
         rows = session.scalars(
@@ -844,6 +857,51 @@ class HistoryRepository:
         session.flush()
         return rows
 
+    def watches_for_episode_keys(
+        self,
+        session: Session,
+        *,
+        show_trakt_id: int,
+        episode_keys: set[tuple[int, int]],
+    ) -> list[HistoryEvent]:
+        normalized_keys = {
+            (int(season), int(episode))
+            for season, episode in episode_keys
+        }
+        if not normalized_keys:
+            return []
+        return list(
+            session.scalars(
+                select(HistoryEvent)
+                .where(HistoryEvent.action == "watched")
+                .where(HistoryEvent.title_type == "show")
+                .where(HistoryEvent.title_trakt_id == show_trakt_id)
+                .where(tuple_(HistoryEvent.season, HistoryEvent.episode).in_(normalized_keys))
+                .order_by(
+                    desc(HistoryEvent.watched_at_known),
+                    desc(HistoryEvent.watched_at),
+                    desc(HistoryEvent.id),
+                )
+            )
+        )
+
+    def remove_watches_for_episode_keys(
+        self,
+        session: Session,
+        *,
+        show_trakt_id: int,
+        episode_keys: set[tuple[int, int]],
+    ) -> list[HistoryEvent]:
+        rows = self.watches_for_episode_keys(
+            session,
+            show_trakt_id=show_trakt_id,
+            episode_keys=episode_keys,
+        )
+        for row in rows:
+            session.delete(row)
+        session.flush()
+        return rows
+
     def remove_episode_watch(
         self,
         session: Session,
@@ -919,8 +977,14 @@ class HistoryRepository:
             stmt = stmt.where(HistoryEvent.title_type == title_type)
         return [title.strip() for title in session.scalars(stmt) if title and title.strip()]
 
-    def delete_trakt_rated(self, session: Session) -> None:
-        session.execute(delete(HistoryEvent).where(HistoryEvent.source == "trakt", HistoryEvent.action == "rated"))
+    def clear_ratings(self, session: Session) -> None:
+        session.execute(delete(HistoryEvent).where(HistoryEvent.action == "rated"))
+        session.execute(
+            update(HistoryEvent)
+            .where(HistoryEvent.action == "watched")
+            .values(rating=None)
+        )
+        session.flush()
 
     def known_trakt_history_ids(self, session: Session) -> set[int]:
         stmt = select(HistoryEvent.trakt_history_id).where(HistoryEvent.trakt_history_id.is_not(None))
@@ -1073,6 +1137,7 @@ class ProgressRepository:
         sort_mode: ProgressSortMode | str = ProgressSortMode.EPISODE_RELEASE,
         descending: bool = True,
         dropped_only: bool | None = None,
+        limit: int | None = 50,
     ) -> list[ProgressSnapshot]:
         normalized_view = self.normalize_view(view, dropped_only=dropped_only)
         normalized_sort = self.normalize_sort_mode(sort_mode)
@@ -1103,7 +1168,9 @@ class ProgressRepository:
             primary_order,
             stable_title.asc(),
             WatchProgress.show_trakt_id.asc(),
-        ).limit(50)
+        )
+        if limit is not None:
+            stmt = stmt.limit(max(0, int(limit)))
         rows = list(session.execute(stmt))
         result: list[ProgressSnapshot] = []
         for row, title, next_episode_row, state in rows:

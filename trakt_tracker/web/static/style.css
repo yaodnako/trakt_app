@@ -634,10 +634,18 @@ select {
 }
 
 .progress-sort-field select {
-    width: auto;
-    min-width: 150px;
-    padding: 8px 32px 8px 12px;
+    width: 122px;
+    min-width: 0;
+    padding: 8px 20px 8px 9px;
     border-radius: 999px;
+}
+
+.progress-sort-field select[data-progress-sort-mode="episode_release"] {
+    width: 136px;
+}
+
+.progress-sort-field select[data-progress-sort-mode="release_year"] {
+    width: 120px;
 }
 
 .progress-sort-direction {
@@ -703,11 +711,40 @@ select {
 }
 
 .year-input {
-    width: 112px;
-    min-width: 112px;
-    padding: 10px 12px;
+    width: 58px;
+    min-width: 58px;
+    padding: 10px 4px;
     border-radius: 999px;
     text-align: center;
+    appearance: textfield;
+}
+
+.year-input::-webkit-inner-spin-button,
+.year-input::-webkit-outer-spin-button {
+    margin: 0;
+    appearance: none;
+}
+
+.progress-filter-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.progress-filter-icon {
+    flex: 0 0 auto;
+    object-fit: contain;
+}
+
+.progress-filter-icon-pause {
+    width: 12px;
+    height: 12px;
+}
+
+.progress-filter-icon-drop {
+    width: 17.142857px;
+    height: 17.142857px;
+    margin-inline: -2.571429px;
 }
 
 .toggle-chip {
@@ -2600,6 +2637,53 @@ tbody tr:hover {
     display: block;
 }
 
+.is-spoiler-protected {
+    overflow: hidden;
+}
+
+.is-spoiler-protected [data-spoiler-image] {
+    filter: blur(18px);
+    transform: scale(1.08);
+    transition: filter 160ms ease, transform 160ms ease;
+}
+
+.is-spoiler-protected.is-spoiler-revealed [data-spoiler-image] {
+    filter: none;
+    transform: none;
+}
+
+.episode-spoiler-reveal {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    border: 0;
+    border-radius: inherit;
+    background: rgba(17, 24, 39, 0.36);
+    color: #fff;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+.episode-spoiler-reveal[hidden] {
+    display: none;
+}
+
+.episode-spoiler-reveal:focus-visible {
+    outline: 3px solid rgba(255, 255, 255, 0.95);
+    outline-offset: -5px;
+}
+
+.is-spoiler-protected > .progress-episode-chip,
+.is-spoiler-protected > .progress-episode-ratings-chip,
+.is-spoiler-protected .search-watch-episode-label {
+    z-index: 5;
+    pointer-events: none;
+}
+
 .progress-episode-preview.is-empty {
     background:
         linear-gradient(180deg, rgba(13, 107, 97, 0.08), rgba(30, 27, 22, 0.03)),
@@ -3397,6 +3481,18 @@ tbody tr:hover {
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+}
+
+.search-watch-layout-options {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 20px;
+}
+
+.search-watch-layout-note {
+    color: var(--muted);
+    font-size: 0.76rem;
 }
 
 .search-watch-date-actions {

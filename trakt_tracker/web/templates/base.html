@@ -36,13 +36,17 @@
             </nav>{% endif %}
         </header>
 
-        {% if not setup_mode|default(false) and not configured %}
+        {% if not setup_mode|default(false) and not suppress_auth_banner|default(false) and not configured %}
         <section class="banner warning">
             Trakt credentials are not configured yet. Save them in Settings to connect the portal.
         </section>
-        {% elif not setup_mode|default(false) and not authorized %}
+        {% elif not setup_mode|default(false) and not suppress_auth_banner|default(false) and not authorized %}
         <section class="banner warning">
+            {% if reauthorization_required|default(false) %}
+            Trakt could not update your token automatically. Use Update Trakt token below.
+            {% else %}
             Trakt is configured but not authorized. Open Settings and choose Authorize with Trakt.
+            {% endif %}
         </section>
         {% endif %}
 

@@ -13,8 +13,13 @@ from trakt_tracker.application.metadata_refresh_policy import (
     TRIGGER_PAGE_CONTEXT,
     TRIGGER_VISIBLE_RATINGS_REFRESH,
 )
+from trakt_tracker.application.search_watch import (
+    SEASON_LAYOUT_IMDB,
+    SEASON_LAYOUT_TRAKT,
+    normalize_season_layout,
+)
 from trakt_tracker.application.services import ServiceContainer
-from trakt_tracker.config import timezone_from_utc_offset
+from trakt_tracker.config import ConfigStore, timezone_from_utc_offset
 from trakt_tracker.infrastructure.artwork_cache import tmdb_episode_preview_url
 from trakt_tracker.web.viewmodels import (
     DEFAULT_SEARCH_SORT_MODE,
@@ -727,6 +732,9 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                     "title_episode_ratings_matrix.html",
                     {
                         "matrix": matrix,
+                        "imdb_seasons_enabled": bool(
+                            getattr(services.auth.config, "web_imdb_seasons_enabled", True)
+                        ),
                     },
                 )
             )
@@ -739,10 +747,44 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                         "matrix": None,
                         "matrix_error_message": str(exc),
                         "matrix_trakt_id": trakt_id,
+                        "imdb_seasons_enabled": bool(
+                            getattr(services.auth.config, "web_imdb_seasons_enabled", True)
+                        ),
                     },
                 ),
                 status_code=500,
             )
+
+    @app.post("/ui/preferences/imdb-seasons")
+    async def save_imdb_seasons_preference(request: Request) -> JSONResponse:
+        services: ServiceContainer = request.app.state.services
+        previous = bool(getattr(services.auth.config, "web_imdb_seasons_enabled", True))
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"enabled"}
+            or not isinstance(payload.get("enabled"), bool)
+        ):
+            return JSONResponse(
+                {"ok": False, "enabled": previous, "message": "Expected {enabled: bool}."},
+                status_code=400,
+            )
+        enabled = bool(payload["enabled"])
+        services.auth.config.web_imdb_seasons_enabled = enabled
+        runtime = getattr(request.app.state, "runtime", None)
+        config_store = runtime.config_store if runtime is not None else ConfigStore()
+        try:
+            await asyncio.to_thread(config_store.save, services.auth.config)
+        except Exception as exc:
+            services.auth.config.web_imdb_seasons_enabled = previous
+            return JSONResponse(
+                {"ok": False, "enabled": previous, "message": str(exc)},
+                status_code=500,
+            )
+        return JSONResponse({"ok": True, "enabled": enabled})
 
     @app.get("/search/show/{trakt_id}/watch-panel", response_class=HTMLResponse)
     async def search_show_watch_panel(
@@ -753,10 +795,24 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
     ) -> HTMLResponse:
         services: ServiceContainer = request.app.state.services
         try:
+            season_layout = (
+                SEASON_LAYOUT_IMDB
+                if bool(getattr(services.auth.config, "web_imdb_seasons_enabled", True))
+                else SEASON_LAYOUT_TRAKT
+            )
             if season is None:
-                panel = await asyncio.to_thread(services.search_watch.load_show_panel, trakt_id)
+                panel = await asyncio.to_thread(
+                    services.search_watch.load_show_panel,
+                    trakt_id,
+                    season_layout=season_layout,
+                )
             else:
-                panel = await asyncio.to_thread(services.search_watch.load_show_panel, trakt_id, season)
+                panel = await asyncio.to_thread(
+                    services.search_watch.load_show_panel,
+                    trakt_id,
+                    season,
+                    season_layout=season_layout,
+                )
             selected_season = _default_season_number(panel)
             if not getattr(panel, "seasons", []):
                 services.enrich_queue.submit(
@@ -765,6 +821,15 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
             elif selected_season is not None:
                 _enqueue_missing_season_stills(services, panel, selected_season)
             _enqueue_default_season_artwork(services, panel)
+            if bool(getattr(panel, "imdb_mapping_pending", False)):
+                bg_tasks = getattr(request.app.state, "bg_tasks", None)
+                if bg_tasks is not None:
+                    bg_tasks.start(
+                        f"imdb_watch_panel_{trakt_id}",
+                        source="IMDb season mapping",
+                        operations=services.operations,
+                        fn=lambda: services.search_watch.repair_imdb_seasons(trakt_id),
+                    )
             return HTMLResponse(
                 render_fragment(
                     request,
@@ -809,6 +874,9 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
         episode = _optional_int(payload.get("episode"))
         title = str(payload.get("title", "") or "").strip()
         try:
+            season_layout = normalize_season_layout(
+                str(payload.get("season_layout", SEASON_LAYOUT_TRAKT) or "")
+            )
             watched_at = _parse_search_watched_at(
                 payload,
                 utc_offset=services.auth.config.utc_offset,
@@ -822,13 +890,20 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                 season=season,
                 episode=episode,
                 watched_at=watched_at,
+                season_layout=season_layout,
             )
             if scope == "title" and getattr(services, "release_tracking", None) is not None:
                 tracked_keys = await asyncio.to_thread(services.release_tracking.local_keys)
                 if (title_type, trakt_id) in tracked_keys:
                     await asyncio.to_thread(services.release_tracking.set_tracked, title_type, trakt_id, tracked=False)
             removed_from_watchlist = False
-            if scope == "title" and bool(payload.get("remove_from_watchlist")):
+            should_remove_from_watchlist = scope == "title" and bool(payload.get("remove_from_watchlist"))
+            if title_type == "show":
+                watchlist_keys = await asyncio.to_thread(services.catalog.watchlist_keys, title_type="show")
+                should_remove_from_watchlist = (
+                    should_remove_from_watchlist or ("show", trakt_id) in watchlist_keys
+                )
+            if should_remove_from_watchlist:
                 await asyncio.to_thread(services.catalog.set_watchlisted, title_type, trakt_id, watchlisted=False)
                 removed_from_watchlist = True
         except Exception as exc:
@@ -874,6 +949,9 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
         if trakt_id <= 0:
             return JSONResponse({"ok": False, "message": "Missing title identity."}, status_code=400)
         try:
+            season_layout = normalize_season_layout(
+                str(payload.get("season_layout", SEASON_LAYOUT_TRAKT) or "")
+            )
             if scope == "episode":
                 if title_type != "show" or season is None or season < 0 or episode is None or episode <= 0:
                     raise ValueError("Missing episode identity.")
@@ -892,6 +970,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                     trakt_id=trakt_id,
                     scope=scope,
                     season=season,
+                    season_layout=season_layout,
                 )
             else:
                 raise ValueError("Unsupported watched-history scope.")
@@ -910,7 +989,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
         if scope == "episode":
             detail = f"show {trakt_id} S{season:02d}E{episode:02d}"
         elif scope == "season":
-            detail = f"show {trakt_id} S{season:02d}"
+            detail = f"show {trakt_id} {season_layout.upper()} S{season:02d}"
         else:
             detail = f"{title_type} {trakt_id}"
         services.operations.publish("Search action", f"Removed watched history: {detail}")
@@ -929,6 +1008,8 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
         try:
             payload = await request.json()
             restore = dict(payload.get("restore") or {})
+            if restore.get("can_restore") is False:
+                raise ValueError("A watch with an unknown date cannot be restored through Trakt.")
             if restore.get("kind") == "scope":
                 items = []
                 for raw_item in list(restore.get("items") or []):
@@ -936,6 +1017,8 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                     item["trakt_id"] = int(item.get("trakt_id") or 0)
                     item["watched_at"] = datetime.fromisoformat(str(item.get("watched_at") or ""))
                     item["watched_at_known"] = bool(item.get("watched_at_known", True))
+                    if not item["watched_at_known"]:
+                        raise ValueError("A watch with an unknown date cannot be restored through Trakt.")
                     if item["trakt_id"] <= 0:
                         raise ValueError("Missing title identity.")
                     items.append(item)
@@ -948,6 +1031,8 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                 restore["episode"] = int(restore.get("episode") or 0)
                 restore["watched_at"] = datetime.fromisoformat(str(restore.get("watched_at") or ""))
                 restore["watched_at_known"] = bool(restore.get("watched_at_known", True))
+                if not restore["watched_at_known"]:
+                    raise ValueError("A watch with an unknown date cannot be restored through Trakt.")
                 if restore["trakt_id"] <= 0 or restore["episode"] <= 0:
                     raise ValueError("Missing episode identity.")
                 await asyncio.to_thread(services.search_watch.restore_episode, **restore)

@@ -7,6 +7,7 @@
             scope: target.dataset.scope || "episode",
             season: target.dataset.season || "",
             episode: target.dataset.episode || "",
+            season_layout: target.dataset.seasonLayout || "trakt",
         };
     }
 
@@ -29,10 +30,7 @@
         toast.className = "web-flash web-flash-action";
         const message = document.createElement("span");
         message.textContent = "Watch removed";
-        const undo = document.createElement("button");
-        undo.type = "button";
-        undo.className = "web-flash-action-button";
-        undo.textContent = "Undo";
+        const canRestore = restore && restore.can_restore !== false;
         let closed = false;
         const close = () => {
             if (closed) return;
@@ -40,21 +38,28 @@
             toast.classList.add("is-leaving");
             window.setTimeout(() => toast.remove(), 320);
         };
-        undo.addEventListener("click", async () => {
-            undo.disabled = true;
-            try {
-                await postJson("/search/restore-watch", {restore});
-                close();
-                window.pushFlashToast?.("Watch restored.", 3200);
-                await onUndo?.();
-            } catch (error) {
-                undo.disabled = false;
-                window.pushFlashToast?.(error.message || "Could not restore the watch.", 5200);
-            }
-        });
-        toast.append(message, undo);
+        toast.append(message);
+        if (canRestore) {
+            const undo = document.createElement("button");
+            undo.type = "button";
+            undo.className = "web-flash-action-button";
+            undo.textContent = "Undo";
+            undo.addEventListener("click", async () => {
+                undo.disabled = true;
+                try {
+                    await postJson("/search/restore-watch", {restore});
+                    close();
+                    window.pushFlashToast?.("Watch restored.", 3200);
+                    await onUndo?.();
+                } catch (error) {
+                    undo.disabled = false;
+                    window.pushFlashToast?.(error.message || "Could not restore the watch.", 5200);
+                }
+            });
+            toast.append(undo);
+        }
         stack.appendChild(toast);
-        window.setTimeout(close, 8000);
+        window.setTimeout(close, canRestore ? 8000 : 3200);
     }
 
     async function confirmUnwatch(payload) {
@@ -68,8 +73,11 @@
             }) || false;
         }
         if (payload.scope === "season") {
+            const seasonLabel = payload.season_layout === "imdb"
+                ? `IMDb S${payload.season}`
+                : `S${payload.season}`;
             return window.traktConfirm?.({
-                title: `Remove watches from S${payload.season}?`,
+                title: `Remove watches from ${seasonLabel}?`,
                 message: `All watches from this season of ${title} will be removed from History.`,
                 confirmLabel: "Remove season",
             }) || false;
@@ -118,23 +126,89 @@
 
     function captureState(body) {
         const active = body?.querySelector("[data-search-watch-season-tab].is-active");
-        const focused = document.activeElement?.closest?.("[data-episode-key]");
+        const focusedElement = document.activeElement;
+        const focused = focusedElement?.closest?.("[data-episode-key]");
+        const focusedSeasonAction = focusedElement?.closest?.("[data-search-watch-season-action]");
+        const focusRole = focusedElement?.closest?.("[data-search-watch-imdb-seasons-toggle]")
+            ? "layout-toggle"
+            : focusedElement?.closest?.("[data-search-watch-season-tab]")
+                ? "season-tab"
+                : focusedSeasonAction
+                    ? (focusedSeasonAction.hasAttribute("data-search-unwatch-action") ? "season-unwatch" : "season-watch")
+                    : "";
+        const activePanel = body?.querySelector("[data-search-watch-season-panel]:not(.is-hidden)");
+        const bodyRect = body?.getBoundingClientRect?.();
+        const cards = Array.from(activePanel?.querySelectorAll(".search-watch-episode-card[data-episode-key]") || []);
+        const anchor = cards.find((card) => !bodyRect || card.getBoundingClientRect().bottom >= bodyRect.top) || cards[0];
+        const anchorOffset = anchor && bodyRect
+            ? anchor.getBoundingClientRect().top - bodyRect.top
+            : 0;
+        const panel = body?.querySelector("[data-search-watch-panel]");
         return {
             season: active?.dataset.searchWatchSeasonTab || "",
+            seasonLayout: panel?.dataset.seasonLayout || "trakt",
+            imdbMappingComplete: panel?.dataset.imdbMappingComplete || "0",
+            imdbMappingPending: panel?.dataset.imdbMappingPending || "0",
             scrollTop: body?.scrollTop || 0,
             focusKey: focused?.dataset.episodeKey || "",
+            focusRole,
+            anchorKey: anchor?.dataset.episodeKey || panel?.dataset.defaultEpisodeKey || "",
+            anchorOffset,
         };
     }
 
     function restoreState(body, state) {
         if (!body || !state) return;
-        if (state.season) selectSeason(body, state.season);
-        body.scrollTop = state.scrollTop;
+        const panel = body.querySelector("[data-search-watch-panel]");
+        const sameLayout = (panel?.dataset.seasonLayout || "trakt") === (state.seasonLayout || "trakt");
+        const sameGrouping = sameLayout
+            && (panel?.dataset.imdbMappingComplete || "0") === (state.imdbMappingComplete || "0")
+            && (panel?.dataset.imdbMappingPending || "0") === (state.imdbMappingPending || "0");
+        let season = sameGrouping ? state.season : "";
+        if (
+            season
+            && !Array.from(body.querySelectorAll("[data-search-watch-season-tab]"))
+                .some((tab) => tab.dataset.searchWatchSeasonTab === season)
+        ) {
+            season = "";
+        }
+        if (!season) {
+            const anchorKey = state.focusKey || state.anchorKey || panel?.dataset.defaultEpisodeKey || "";
+            const anchor = Array.from(body.querySelectorAll(".search-watch-episode-card[data-episode-key]"))
+                .find((node) => node.dataset.episodeKey === anchorKey);
+            season = anchor?.dataset.displaySeason
+                || anchor?.closest("[data-search-watch-season-panel]")?.dataset.searchWatchSeasonPanel
+                || "";
+        }
+        if (season) selectSeason(body, season);
+        const anchorKey = state.focusKey || state.anchorKey || "";
+        const restoredAnchor = Array.from(body.querySelectorAll(".search-watch-episode-card[data-episode-key]"))
+            .find((node) => node.dataset.episodeKey === anchorKey);
+        if (!sameGrouping && restoredAnchor) {
+            const bodyRect = body.getBoundingClientRect();
+            const targetOffset = restoredAnchor.getBoundingClientRect().top - bodyRect.top;
+            body.scrollTop = Math.max(0, body.scrollTop + targetOffset - Number(state.anchorOffset || 0));
+        } else {
+            body.scrollTop = state.scrollTop;
+        }
         if (state.focusKey) {
             const target = Array.from(body.querySelectorAll("button[data-episode-key], a[data-episode-key]"))
                 .find((node) => node.dataset.episodeKey === state.focusKey);
             target?.focus?.({preventScroll: true});
+        } else if (state.focusRole === "layout-toggle") {
+            body.querySelector("[data-search-watch-imdb-seasons-toggle]")?.focus?.({preventScroll: true});
+        } else if (state.focusRole === "season-tab") {
+            body.querySelector("[data-search-watch-season-tab].is-active")?.focus?.({preventScroll: true});
+        } else if (state.focusRole === "season-watch" || state.focusRole === "season-unwatch") {
+            const selector = state.focusRole === "season-unwatch"
+                ? "[data-search-watch-season-action][data-search-unwatch-action]:not(.is-hidden)"
+                : "[data-search-watch-season-action][data-search-watch-action]:not(.is-hidden)";
+            body.querySelector(selector)?.focus?.({preventScroll: true});
         }
+    }
+
+    async function saveImdbSeasonsPreference(enabled) {
+        return postJson("/ui/preferences/imdb-seasons", {enabled: Boolean(enabled)});
     }
 
     function selectSeason(body, season) {
@@ -256,6 +330,26 @@
         target.focus();
     });
 
+    document.addEventListener("change", async (event) => {
+        const toggle = event.target.closest("[data-search-watch-imdb-seasons-toggle]");
+        if (!(toggle instanceof HTMLInputElement)) return;
+        const enabled = Boolean(toggle.checked);
+        toggle.disabled = true;
+        try {
+            const result = await saveImdbSeasonsPreference(enabled);
+            document.dispatchEvent(new CustomEvent("trakt:imdb-seasons-preference-changed", {
+                detail: {enabled: Boolean(result.enabled), source: "watch-panel"},
+            }));
+        } catch (error) {
+            toggle.checked = !enabled;
+            window.pushFlashToast?.(error.message || "Could not save IMDb seasons.", 5200);
+        } finally {
+            if (toggle.isConnected) {
+                toggle.disabled = false;
+            }
+        }
+    });
+
     window.traktShowWatchPanel = {
         captureState,
         configurePlayAction,
@@ -266,7 +360,9 @@
         patchArtwork,
         payloadFromElement,
         restoreState,
+        saveImdbSeasonsPreference,
         selectSeason,
         unwatch,
     };
+    window.traktSaveImdbSeasonsPreference = saveImdbSeasonsPreference;
 })();

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import threading
 import webbrowser
 from dataclasses import dataclass
@@ -8,6 +9,19 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 
 AUTH_BASE_URL = "https://trakt.tv/oauth/authorize"
+
+
+class OAuthCallbackUnavailable(RuntimeError):
+    pass
+
+
+class _ExclusiveHTTPServer(HTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 @dataclass(slots=True)
@@ -73,7 +87,12 @@ class OAuthCallbackServer:
             def log_message(self, *_args) -> None:
                 return
 
-        self._server = HTTPServer((self._host, self._port), Handler)
+        try:
+            self._server = _ExclusiveHTTPServer((self._host, self._port), Handler)
+        except OSError as exc:
+            raise OAuthCallbackUnavailable(
+                f"OAuth callback port {self._port} is already in use by another local application"
+            ) from exc
         self._thread = threading.Thread(
             target=self._server.serve_forever,
             kwargs={"poll_interval": 0.1},

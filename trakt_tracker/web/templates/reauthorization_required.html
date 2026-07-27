@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel setup-panel" role="alert" aria-labelledby="trakt-token-update-title">
+    <div class="setup-copy">
+        <h2 id="trakt-token-update-title">Update your Trakt token</h2>
+        <p>Trakt could not renew the session automatically. Your local data is safe; authorize Trakt again to continue.</p>
+    </div>
+    <form method="post" action="/settings/trakt-authorize" class="settings-auth-form">
+        <input type="hidden" name="return_to" value="{{ reconnect_return_to }}">
+        <button type="submit" class="button">Update Trakt token</button>
+    </form>
+</section>
+{% endblock %}

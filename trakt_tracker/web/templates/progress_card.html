@@ -1,4 +1,5 @@
 {% set progress_item_is_paused = progress_item.is_paused|default(false) %}
+{% set spoiler_profile = active_profile_slug|default('local', true)|urlencode %}
 <article
     class="progress-card{% if progress_is_new %} is-released{% endif %}{% if progress_item.is_dropped %} is-dropped{% elif progress_item_is_paused %} is-paused{% endif %}"
     data-progress-card-key="progress:{{ progress_item.trakt_id }}"
@@ -155,8 +156,16 @@
                 </div>
                 {% set preview_url = progress_item.next_episode.still_url or progress_item.poster_url %}
                 {% set preview_is_poster_fallback = (not progress_item.next_episode.still_url) and progress_item.poster_url %}
+                {% set preview_is_spoiler = (
+                    web_hide_spoilers|default(false)
+                    and progress_item.completed > 0
+                    and progress_item.next_episode.still_url
+                ) %}
                 {% set episode_chip = progress_item|progress_episode_rating_chip %}
-                <div class="progress-episode-preview-shell">
+                <div
+                    class="progress-episode-preview-shell{% if preview_is_spoiler %} is-spoiler-protected{% endif %}"
+                    {% if preview_is_spoiler %}data-spoiler-key="{{ spoiler_profile }}:{{ progress_item.trakt_id }}:{{ progress_item.next_episode.season }}:{{ progress_item.next_episode.number }}"{% endif %}
+                >
                     <a
                         href="{{ trakt_episode_url or trakt_title_url }}"
                         class="progress-episode-preview{% if not preview_url %} is-empty{% endif %}{% if preview_is_poster_fallback %} is-poster-fallback{% endif %}"
@@ -168,7 +177,7 @@
                             <div class="progress-episode-preview-backdrop" style="background-image: url('{{ preview_url|cached_image_url }}');"></div>
                             <img class="progress-episode-preview-poster" src="{{ preview_url|cached_image_url }}" alt="{{ progress_item.next_episode.title }} poster" loading="lazy">
                             {% else %}
-                            <img src="{{ preview_url|cached_image_url }}" alt="{{ progress_item.next_episode.title }} still" loading="lazy">
+                            <img src="{{ preview_url|cached_image_url }}" alt="{{ progress_item.next_episode.title }} still" loading="lazy" {% if preview_is_spoiler %}data-spoiler-image{% endif %}>
                             {% endif %}
                         {% elif progress_item.next_episode.still_status == 'checked_no_data' or progress_item.next_episode.still_status == 'retryable_failure' %}
                         <span>No preview</span>
@@ -176,6 +185,15 @@
                         <span>Loading</span>
                         {% endif %}
                     </a>
+                    {% if preview_is_spoiler %}
+                    <button
+                        type="button"
+                        class="episode-spoiler-reveal"
+                        data-spoiler-reveal
+                        aria-label="Reveal spoiler image for {{ progress_item.title }} S{{ "%02d"|format(progress_item.next_episode.season) }}E{{ "%02d"|format(progress_item.next_episode.number) }}"
+                        hidden
+                    >Click to unblur</button>
+                    {% endif %}
                     <div class="progress-episode-chip">{{ progress_item.next_episode.season|episode_label(progress_item.next_episode.number, progress_item.next_episode.imdb_season, progress_item.next_episode.imdb_episode) }}</div>
                     {% if episode_chip %}
                     <div class="poster-chip progress-episode-ratings-chip">

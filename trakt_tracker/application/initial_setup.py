@@ -26,6 +26,7 @@ def run_initial_setup(services: ServiceContainer) -> dict:
             _write_running(services, stage, completed, "Synchronizing show progress.")
             services.progress.sync_progress(
                 dropped_only=False,
+                force_refresh=True,
                 force_full_assets=False,
                 defer_assets=True,
             )

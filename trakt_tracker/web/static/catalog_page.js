@@ -12,6 +12,8 @@
     let activePanelUrl = "";
     let pendingAction = null;
     let watchRefreshToken = 0;
+    let mappingRefreshTimer = 0;
+    let mappingRefreshAttempts = 0;
 
     function openOverlay(node) {
         if (!node) {
@@ -90,11 +92,26 @@
         }
     }
 
+    function scheduleMappingRefresh(token) {
+        if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
+        mappingRefreshTimer = 0;
+        const panel = watchBody?.querySelector("[data-search-watch-panel]");
+        if (panel?.dataset.imdbMappingPending !== "1" || mappingRefreshAttempts >= 8) return;
+        mappingRefreshTimer = window.setTimeout(() => {
+            mappingRefreshTimer = 0;
+            if (token !== watchRefreshToken || watchOverlay?.hidden) return;
+            mappingRefreshAttempts += 1;
+            loadWatchPanel("", {preserve: true});
+        }, 900);
+    }
+
     async function loadWatchPanel(panelUrl, {preserve = false, focusDefault = false} = {}) {
         const requestUrl = panelUrl || activePanelUrl;
         if (!requestUrl || !watchBody) {
             return;
         }
+        if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
+        mappingRefreshTimer = 0;
         const token = watchRefreshToken;
         const state = preserve ? window.traktShowWatchPanel?.captureState(watchBody) : null;
         if (!preserve) renderWatchLoading();
@@ -110,7 +127,10 @@
             if (state) window.traktShowWatchPanel?.restoreState(watchBody, state);
             else if (focusDefault) window.traktShowWatchPanel?.focusDefaultEpisode(watchBody);
             window.traktShowWatchPanel?.configureScopeActions(watchOverlay, activeTrigger, watchBody);
-            refreshWatchPanel(requestUrl, token);
+            scheduleMappingRefresh(token);
+            if (watchBody.querySelector("[data-search-watch-panel]")?.dataset.imdbMappingPending !== "1") {
+                refreshWatchPanel(requestUrl, token);
+            }
         } catch (_error) {
             if (token === watchRefreshToken) {
                 watchBody.innerHTML = `<div class="title-matrix-empty-state"><p>Could not load episodes.</p></div>`;
@@ -122,6 +142,8 @@
         activeTrigger = trigger;
         activePanelUrl = trigger.dataset.watchPanelUrl || "";
         watchRefreshToken += 1;
+        mappingRefreshAttempts = 0;
+        if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
         if (watchTitle) {
             watchTitle.textContent = trigger.dataset.title || "Episodes";
         }
@@ -137,7 +159,7 @@
     function catalogCardForAction(action) {
         if (!action) return null;
         if (action.closest?.(".search-result-card")) return action.closest(".search-result-card");
-        const traktId = action.dataset.traktId || "";
+        const traktId = String(action.dataset?.traktId || action.trakt_id || "");
         return Array.from(document.querySelectorAll(".search-result-card")).find((card) => (
             card.querySelector(".search-watch-title-button")?.dataset.traktId === traktId
         )) || null;
@@ -206,6 +228,7 @@
             scope: target.dataset.scope || "title",
             season: target.dataset.season || "",
             episode: target.dataset.episode || "",
+            season_layout: target.dataset.seasonLayout || "trakt",
             remove_from_watchlist: target.dataset.removeFromWatchlist === "true",
         };
     }
@@ -248,8 +271,12 @@
             }
             const completedAction = pendingAction;
             if (result.removed_from_watchlist && completedAction) {
-                const watchedButton = document.querySelector(`[data-search-watch-action][data-trakt-id="${completedAction.trakt_id}"]`);
-                watchedButton?.closest(".search-result-card")?.remove();
+                const card = catalogCardForAction(completedAction);
+                const watchlistButton = card?.querySelector("[data-watchlist-toggle]");
+                setWatchlistButtonState(watchlistButton, false);
+                if (document.querySelector("#catalog-results-region")?.dataset.catalogPageKind === "watchlist") {
+                    card?.remove();
+                }
             }
             closeOverlay(dateOverlay);
             pendingAction = null;
@@ -279,6 +306,21 @@
         }
     }
 
+    function setWatchlistButtonState(button, watchlisted) {
+        if (!button) return;
+        button.dataset.watchlisted = watchlisted ? "true" : "false";
+        button.classList.toggle("is-active", watchlisted);
+        button.setAttribute("aria-pressed", watchlisted ? "true" : "false");
+        button.title = watchlisted ? "Remove from watchlist" : "Add to watchlist";
+        button.setAttribute("aria-label", watchlisted ? "Remove from watchlist" : "Add to watchlist");
+        const icon = button.querySelector(".icon-glyph-bookmark");
+        if (icon) {
+            icon.src = watchlisted ? icon.dataset.filledSrc : icon.dataset.unfilledSrc;
+            icon.classList.toggle("is-filled", watchlisted);
+            icon.classList.toggle("is-unfilled", !watchlisted);
+        }
+    }
+
     async function toggleWatchlist(button) {
         const nextState = button.dataset.watchlisted !== "true";
         button.disabled = true;
@@ -297,17 +339,7 @@
             if (!response.ok || !result.ok) {
                 throw new Error(result.message || "Watchlist action failed.");
             }
-            button.dataset.watchlisted = result.watchlisted ? "true" : "false";
-            button.classList.toggle("is-active", Boolean(result.watchlisted));
-            button.setAttribute("aria-pressed", result.watchlisted ? "true" : "false");
-            button.title = result.watchlisted ? "Remove from watchlist" : "Add to watchlist";
-            button.setAttribute("aria-label", result.watchlisted ? "Remove from watchlist" : "Add to watchlist");
-            const icon = button.querySelector(".icon-glyph-bookmark");
-            if (icon) {
-                icon.src = result.watchlisted ? icon.dataset.filledSrc : icon.dataset.unfilledSrc;
-                icon.classList.toggle("is-filled", Boolean(result.watchlisted));
-                icon.classList.toggle("is-unfilled", !result.watchlisted);
-            }
+            setWatchlistButtonState(button, Boolean(result.watchlisted));
             if (!result.watchlisted && document.querySelector("#catalog-results-region")?.dataset.catalogPageKind === "watchlist") {
                 button.closest(".search-result-card")?.remove();
             }
@@ -442,6 +474,14 @@
         }
     });
 
+    document.addEventListener("trakt:imdb-seasons-preference-changed", () => {
+        if (!watchBody?.querySelector("[data-search-watch-panel]") || watchOverlay?.hidden) return;
+        mappingRefreshAttempts = 0;
+        if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
+        mappingRefreshTimer = 0;
+        loadWatchPanel("", {preserve: true});
+    });
+
     window.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") {
             return;
@@ -486,10 +526,17 @@
         setActiveNavigation(target.pathname);
         try {
             const response = await fetch(target.toString(), {
-                headers: {"Accept": "text/html"},
+                headers: {"Accept": "text/html", "X-Trakt-Partial": "catalog"},
                 cache: "no-store",
                 signal: controller.signal,
             });
+            if (response.status === 401) {
+                const payload = await response.json();
+                if (payload.code === "trakt_reauth_required") {
+                    window.showTraktReconnectPrompt?.(payload);
+                    return;
+                }
+            }
             if (!response.ok) throw new Error(`Catalog request failed: ${response.status}`);
             const html = await response.text();
             const parsed = new DOMParser().parseFromString(html, "text/html");

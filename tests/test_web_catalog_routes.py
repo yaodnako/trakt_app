@@ -93,6 +93,7 @@ class _FakeEpisodeRatingsMatrixService:
 
 class _FakeSearchWatchService:
     def __init__(self) -> None:
+        self.load_calls: list[dict] = []
         self.mark_calls: list[dict] = []
         self.enrich_still_calls: list[tuple[int, int]] = []
         self.return_still_after_enrich = False
@@ -100,8 +101,23 @@ class _FakeSearchWatchService:
         self.restore_calls: list[dict] = []
         self.unmark_scope_calls: list[dict] = []
         self.restore_scope_calls: list[list[dict]] = []
+        self.mapping_pending = False
+        self.repair_calls: list[int] = []
 
-    def load_show_panel(self, trakt_id: int, default_season: int | None = None) -> SearchShowWatchPanel:
+    def load_show_panel(
+        self,
+        trakt_id: int,
+        default_season: int | None = None,
+        *,
+        season_layout: str = "trakt",
+    ) -> SearchShowWatchPanel:
+        self.load_calls.append(
+            {
+                "trakt_id": trakt_id,
+                "default_season": default_season,
+                "season_layout": season_layout,
+            }
+        )
         return SearchShowWatchPanel(
             trakt_id=trakt_id,
             title="The Capture",
@@ -116,6 +132,7 @@ class _FakeSearchWatchService:
                 SearchWatchSeason(
                     season=0,
                     label="S0",
+                    bulk_allowed=season_layout == "trakt",
                     episodes=[
                         SearchWatchEpisode(
                             season=0,
@@ -129,6 +146,7 @@ class _FakeSearchWatchService:
                     season=1,
                     label="S1",
                     is_default=True,
+                    bulk_allowed=not (season_layout == "imdb" and self.mapping_pending),
                     episodes=[
                         SearchWatchEpisode(
                             season=1,
@@ -165,6 +183,9 @@ class _FakeSearchWatchService:
                     ],
                 ),
             ],
+            season_layout=season_layout,
+            imdb_mapping_complete=not self.mapping_pending,
+            imdb_mapping_pending=self.mapping_pending,
         )
 
     def mark_watch(self, **kwargs) -> int:
@@ -215,6 +236,10 @@ class _FakeSearchWatchService:
     def enrich_missing_stills(self, trakt_id: int, season: int) -> bool:
         self.enrich_still_calls.append((trakt_id, season))
         return True
+
+    def repair_imdb_seasons(self, trakt_id: int) -> int:
+        self.repair_calls.append(trakt_id)
+        return 1
 
 
 class CatalogRouteTests(unittest.TestCase):
@@ -408,8 +433,21 @@ class CatalogRouteTests(unittest.TestCase):
                 refresh=lambda: list(self.release_items),
                 refresh_anticipated_list_counts=lambda _items: None,
             ),
-            auth=SimpleNamespace(config=SimpleNamespace(utc_offset="+03:00", explore_imdb_scan_page_limit=10)),
+            auth=SimpleNamespace(
+                config=SimpleNamespace(
+                    utc_offset="+03:00",
+                    explore_imdb_scan_page_limit=10,
+                    web_imdb_seasons_enabled=True,
+                    web_hide_spoilers=False,
+                    active_slug="test-user",
+                )
+            ),
         )
+        self.saved_imdb_seasons: list[bool] = []
+        self.config_store = SimpleNamespace(
+            save=lambda config: self.saved_imdb_seasons.append(bool(config.web_imdb_seasons_enabled))
+        )
+        self.app.state.runtime = SimpleNamespace(config_store=self.config_store)
         self.app.state.bg_tasks = SimpleNamespace(
             start=lambda *args, **kwargs: self.bg_task_calls.append((args, kwargs)) or True
         )
@@ -424,12 +462,19 @@ class CatalogRouteTests(unittest.TestCase):
                 "notification_sound_url": "",
                 "debug_mode": False,
                 "debug_initial_seq": 0,
+                "active_profile_slug": self.app.state.services.auth.config.active_slug,
+                "web_hide_spoilers": self.app.state.services.auth.config.web_hide_spoilers,
             }
             base_context.update(context)
             return self.templates.TemplateResponse(request, template_name, base_context, status_code=status_code)
 
         def render_fragment(request: Request, template_name: str, context: dict) -> str:
-            fragment_context = {"request": request, "current_path": request.url.path}
+            fragment_context = {
+                "request": request,
+                "current_path": request.url.path,
+                "active_profile_slug": self.app.state.services.auth.config.active_slug,
+                "web_hide_spoilers": self.app.state.services.auth.config.web_hide_spoilers,
+            }
             fragment_context.update(context)
             return self.templates.get_template(template_name).render(fragment_context)
 
@@ -463,6 +508,39 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn('data-title-imdb-rating="8.4 (3400)"', html)
         self.assertNotIn("title-matrix-imdb-coordinate", html)
         self.assertNotIn('data-my-rating-toggle', html)
+
+    def test_imdb_seasons_preference_is_shared_and_strict(self) -> None:
+        response = self.client.post("/ui/preferences/imdb-seasons", json={"enabled": False})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True, "enabled": False})
+        self.assertEqual(self.saved_imdb_seasons, [False])
+        self.assertFalse(self.app.state.services.auth.config.web_imdb_seasons_enabled)
+
+        matrix = self.client.get("/titles/show/138748/episode-ratings-matrix")
+        self.assertNotIn("data-imdb-seasons-toggle checked", matrix.text)
+        self.assertIn('data-matrix-layout-panel="imdb" hidden', matrix.text)
+        self.assertIn('data-matrix-layout-panel="trakt"', matrix.text)
+
+        panel = self.client.get("/search/show/3/watch-panel")
+        self.assertEqual(panel.status_code, 200)
+        self.assertEqual(self.search_watch.load_calls[-1]["season_layout"], "trakt")
+        self.assertIn('data-season-layout="trakt"', panel.text)
+
+        invalid = self.client.post("/ui/preferences/imdb-seasons", json={"enabled": 1})
+        extra = self.client.post("/ui/preferences/imdb-seasons", json={"enabled": True, "extra": False})
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(extra.status_code, 400)
+        self.assertFalse(self.app.state.services.auth.config.web_imdb_seasons_enabled)
+
+    def test_imdb_seasons_preference_rolls_back_when_save_fails(self) -> None:
+        self.app.state.runtime.config_store.save = lambda _config: (_ for _ in ()).throw(OSError("disk full"))
+
+        response = self.client.post("/ui/preferences/imdb-seasons", json={"enabled": False})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(response.json()["enabled"])
+        self.assertTrue(self.app.state.services.auth.config.web_imdb_seasons_enabled)
 
     def test_show_matrix_fragment_route_accepts_trakt_provider_refresh_missing(self) -> None:
         response = self.client.get("/titles/show/138748/episode-ratings-matrix?provider=trakt&refresh_missing=1")
@@ -524,6 +602,8 @@ class CatalogRouteTests(unittest.TestCase):
         response = self.client.get("/search?q=test&type=all&sort=IMDb+votes")
         self.assertEqual(response.status_code, 200)
         html = response.text
+        self.assertIn('<select name="type" data-catalog-auto-submit>', html)
+        self.assertIn('<select name="sort" data-catalog-auto-submit>', html)
         self.assertIn("Loading", html)
         self.assertIn("n/a", html)
         self.assertLess(html.index("Movie B"), html.index("Movie A"))
@@ -707,6 +787,7 @@ class CatalogRouteTests(unittest.TestCase):
             "release_tracking.html",
             "settings.html",
             "setup.html",
+            "reauthorization_required.html",
             "history_show_watch_overlay.html",
         ):
             self.assertNotIn("<script>", (templates / name).read_text(encoding="utf-8"), name)
@@ -715,11 +796,17 @@ class CatalogRouteTests(unittest.TestCase):
 
     def test_partial_catalog_navigation_replaces_active_navigation(self) -> None:
         script = (STATIC_DIR / "catalog_page.js").read_text(encoding="utf-8")
+        ui_script = (STATIC_DIR / "ui_core.js").read_text(encoding="utf-8")
 
         self.assertIn("setActiveNavigation(target.pathname)", script)
+        self.assertIn('"X-Trakt-Partial": "catalog"', script)
+        self.assertIn("window.showTraktReconnectPrompt?.(payload)", script)
         self.assertIn('const incomingNav = parsed.querySelector(".nav")', script)
         self.assertIn('const currentNav = document.querySelector(".nav")', script)
         self.assertIn("currentNav.replaceWith(incomingNav)", script)
+        self.assertIn('headers.set("X-Trakt-Fetch", "1")', ui_script)
+        self.assertIn("showTraktReconnectPrompt(payload)", ui_script)
+        self.assertIn('form.action = "/settings/trakt-authorize"', ui_script)
 
     def test_watchlist_page_renders_saved_titles_and_active_navigation(self) -> None:
         response = self.client.get("/watchlist")
@@ -939,6 +1026,15 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn(".panel,\n.banner {\n    backdrop-filter: blur(14px);", css)
         self.assertNotIn(".panel,\n.banner,\n.result-card {\n    backdrop-filter", css)
 
+    def test_pending_cached_images_retry_frequently_without_shortening_the_window(self) -> None:
+        script = (STATIC_DIR / "ui_core.js").read_text(encoding="utf-8")
+
+        self.assertIn("const CACHED_IMAGE_RETRY_LIMIT = 30;", script)
+        self.assertIn("const CACHED_IMAGE_RETRY_DELAY_MS = 750;", script)
+        self.assertEqual(script.count("attempts >= CACHED_IMAGE_RETRY_LIMIT"), 2)
+        self.assertEqual(script.count("}, CACHED_IMAGE_RETRY_DELAY_MS);"), 2)
+        self.assertNotIn("Math.min(5000, 600 * (attempts + 1))", script)
+
     def test_search_show_watch_panel_fragment_renders_default_season_cards(self) -> None:
         response = self.client.get("/search/show/3/watch-panel")
         self.assertEqual(response.status_code, 200)
@@ -949,11 +1045,21 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn('data-search-watch-season-tab="0"', html)
         self.assertIn('data-search-watch-season-panel="1"', html)
         self.assertIn("Pilot", html)
-        self.assertIn("S01E01 (S02E01)", html)
+        self.assertIn('data-season-layout="imdb"', html)
+        self.assertIn("data-search-watch-imdb-seasons-toggle", html)
+        episode_labels = [
+            " ".join(part.split("</span>", 1)[0].split())
+            for part in html.split('<span class="search-watch-episode-label">')[1:]
+        ]
+        self.assertIn("S02E01", episode_labels)
+        self.assertIn("S01E02", episode_labels)
+        self.assertTrue(all("IMDb" not in label and "Trakt" not in label for label in episode_labels))
+        self.assertTrue(all("Unmapped" not in label for label in episode_labels))
         self.assertIn("No preview", html)
         self.assertIn('data-still-pending="1"', html)
-        self.assertIn('title="Mark all released episodes in S0 watched"', html)
+        self.assertNotIn('title="Mark all released episodes in S0 watched"', html)
         self.assertIn('title="Remove watched history for S1"', html)
+        self.assertIn('data-season-layout="imdb"', html)
         self.assertIn('class="search-watch-episode-card is-watched"', html)
         self.assertIn('class="search-watch-seen-overlay"', html)
         self.assertIn(
@@ -991,6 +1097,64 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("episode-ratings-matrix", panel_script)
         self.assertIn("syncTitleMatrixTitleRatings", ui_script)
 
+    def test_watch_panel_spoilers_require_history_and_only_blur_after_frontier(self) -> None:
+        self.app.state.services.auth.config.web_hide_spoilers = True
+        no_frontier = self.client.get("/search/show/3/watch-panel")
+        self.assertNotIn("data-spoiler-key", no_frontier.text)
+
+        original_load = self.search_watch.load_show_panel
+
+        def load_with_frontier(*args, **kwargs):
+            panel = original_load(*args, **kwargs)
+            panel.watched_frontier_key = (1, 2)
+            special = next(season for season in panel.seasons if season.season == 0).episodes[0]
+            special.still_url = "https://still.example/special.jpg"
+            season_one = next(season for season in panel.seasons if season.season == 1)
+            season_one.episodes[0].is_watched = False
+            season_one.episodes.append(
+                SearchWatchEpisode(
+                    season=1,
+                    number=3,
+                    title="After Frontier",
+                    still_url="https://still.example/after.jpg",
+                )
+            )
+            panel.seasons.append(
+                SearchWatchSeason(
+                    season=2,
+                    label="S2",
+                    episodes=[
+                        SearchWatchEpisode(
+                            season=2,
+                            number=1,
+                            title="Later Season",
+                            still_url="https://still.example/later.jpg",
+                        )
+                    ],
+                )
+            )
+            return panel
+
+        self.search_watch.load_show_panel = load_with_frontier
+        try:
+            protected = self.client.get("/search/show/3/watch-panel").text
+            self.assertIn('data-spoiler-key="test-user:3:1:3"', protected)
+            self.assertIn('data-spoiler-key="test-user:3:2:1"', protected)
+            self.assertNotIn('data-spoiler-key="test-user:3:1:1"', protected)
+            self.assertNotIn('data-spoiler-key="test-user:3:0:1"', protected)
+            self.assertEqual(protected.count("Click to unblur"), 2)
+
+            self.app.state.services.auth.config.web_hide_spoilers = False
+            unprotected = self.client.get("/search/show/3/watch-panel").text
+            self.assertNotIn("data-spoiler-key", unprotected)
+        finally:
+            self.search_watch.load_show_panel = original_load
+
+        ui_script = (STATIC_DIR / "ui_core.js").read_text(encoding="utf-8")
+        self.assertIn("window.sessionStorage", ui_script)
+        self.assertIn('new MutationObserver((records) => {', ui_script)
+        self.assertIn('event.target.closest("[data-spoiler-reveal]")', ui_script)
+
     def test_watch_panel_title_ratings_precede_header_actions_and_matrix_stacks_above_panel(self) -> None:
         template_paths = (
             PROJECT_ROOT / "trakt_tracker" / "web" / "templates" / "search_v2.html",
@@ -1020,6 +1184,13 @@ class CatalogRouteTests(unittest.TestCase):
 
         self.assertIn('await loadWatchPanel("", {preserve: true});', template)
 
+    def test_catalog_watchlist_removal_resolves_show_card_from_panel_action(self) -> None:
+        script = (STATIC_DIR / "catalog_page.js").read_text(encoding="utf-8")
+
+        self.assertIn("action.dataset?.traktId || action.trakt_id", script)
+        self.assertIn("const card = catalogCardForAction(completedAction);", script)
+        self.assertIn("setWatchlistButtonState(watchlistButton, false);", script)
+
     def test_search_unwatch_returns_restore_payload(self) -> None:
         response = self.client.post(
             "/search/unwatch",
@@ -1039,9 +1210,59 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             self.search_watch.unmark_scope_calls,
-            [{"title_type": "movie", "trakt_id": 1, "scope": "title", "season": None}],
+            [
+                {
+                    "title_type": "movie",
+                    "trakt_id": 1,
+                    "scope": "title",
+                    "season": None,
+                    "season_layout": "trakt",
+                }
+            ],
         )
         self.assertFalse(response.json()["still_watched"])
+
+    def test_search_season_actions_forward_imdb_layout(self) -> None:
+        watched = self.client.post(
+            "/search/watch",
+            json={
+                "title_type": "show",
+                "trakt_id": 3,
+                "title": "The Capture",
+                "scope": "season",
+                "season": 2,
+                "season_layout": "imdb",
+                "date_mode": "now",
+            },
+        )
+        unwatched = self.client.post(
+            "/search/unwatch",
+            json={
+                "title_type": "show",
+                "trakt_id": 3,
+                "scope": "season",
+                "season": 2,
+                "season_layout": "imdb",
+            },
+        )
+
+        self.assertEqual(watched.status_code, 200)
+        self.assertEqual(self.search_watch.mark_calls[-1]["season_layout"], "imdb")
+        self.assertEqual(unwatched.status_code, 200)
+        self.assertEqual(self.search_watch.unmark_scope_calls[-1]["season_layout"], "imdb")
+
+        invalid = self.client.post(
+            "/search/watch",
+            json={
+                "title_type": "show",
+                "trakt_id": 3,
+                "scope": "season",
+                "season": 2,
+                "season_layout": "client-episodes",
+                "date_mode": "now",
+            },
+        )
+        self.assertEqual(invalid.status_code, 400)
 
     def test_search_restore_watch_accepts_scope_payload(self) -> None:
         response = self.client.post(
@@ -1070,7 +1291,7 @@ class CatalogRouteTests(unittest.TestCase):
             datetime(2026, 7, 1, 12, tzinfo=UTC),
         )
 
-    def test_search_restore_watch_preserves_restore_metadata(self) -> None:
+    def test_search_restore_watch_rejects_unknown_date(self) -> None:
         response = self.client.post(
             "/search/restore-watch",
             json={
@@ -1085,9 +1306,10 @@ class CatalogRouteTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(self.search_watch.restore_calls[0]["watched_at_known"])
-        self.assertEqual(self.search_watch.restore_calls[0]["watched_at"], datetime(2026, 7, 1, 12, tzinfo=UTC))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.search_watch.restore_calls, [])
+        script = (STATIC_DIR / "show_watch_panel.js").read_text(encoding="utf-8")
+        self.assertIn("restore.can_restore !== false", script)
 
     def test_search_show_watch_panel_returns_stills_from_completed_enrichment(self) -> None:
         self.search_watch.return_still_after_enrich = True
@@ -1105,6 +1327,23 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Pilot", response.text)
         self.assertEqual(len(self.image_tasks), 1)
+
+    def test_search_show_watch_panel_queues_incomplete_imdb_mapping(self) -> None:
+        self.search_watch.mapping_pending = True
+
+        response = self.client.get("/search/show/3/watch-panel")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-imdb-mapping-pending="1"', response.text)
+        self.assertIn("Completing IMDb mapping", response.text)
+        mapping_tasks = [
+            kwargs
+            for args, kwargs in self.bg_task_calls
+            if args and args[0] == "imdb_watch_panel_3"
+        ]
+        self.assertEqual(len(mapping_tasks), 1)
+        mapping_tasks[0]["fn"]()
+        self.assertEqual(self.search_watch.repair_calls, [3])
 
     def test_search_watch_post_rejects_undated_movie(self) -> None:
         response = self.client.post(
@@ -1139,6 +1378,7 @@ class CatalogRouteTests(unittest.TestCase):
         call = self.search_watch.mark_calls[-1]
         self.assertEqual(call["season"], 1)
         self.assertEqual(call["episode"], 1)
+        self.assertEqual(call["season_layout"], "trakt")
         self.assertEqual(call["watched_at"].astimezone(UTC).hour, 17)
         progress_tasks = [
             kwargs
@@ -1168,6 +1408,66 @@ class CatalogRouteTests(unittest.TestCase):
             self.watchlist_calls[-1],
             {"title_type": "movie", "trakt_id": 4, "watchlisted": False},
         )
+
+    def test_show_episode_watch_removes_watchlisted_title(self) -> None:
+        response = self.client.post(
+            "/search/watch",
+            json={
+                "title_type": "show",
+                "trakt_id": 3,
+                "title": "The Capture",
+                "scope": "episode",
+                "season": 1,
+                "episode": 1,
+                "date_mode": "now",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["removed_from_watchlist"])
+        self.assertEqual(
+            self.watchlist_calls,
+            [{"title_type": "show", "trakt_id": 3, "watchlisted": False}],
+        )
+
+    def test_show_season_watch_removes_watchlisted_title(self) -> None:
+        response = self.client.post(
+            "/search/watch",
+            json={
+                "title_type": "show",
+                "trakt_id": 3,
+                "title": "The Capture",
+                "scope": "season",
+                "season": 1,
+                "season_layout": "imdb",
+                "date_mode": "now",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["removed_from_watchlist"])
+        self.assertEqual(
+            self.watchlist_calls,
+            [{"title_type": "show", "trakt_id": 3, "watchlisted": False}],
+        )
+
+    def test_show_watch_does_not_write_watchlist_when_title_is_not_listed(self) -> None:
+        response = self.client.post(
+            "/search/watch",
+            json={
+                "title_type": "show",
+                "trakt_id": 30,
+                "title": "Not Listed",
+                "scope": "episode",
+                "season": 1,
+                "episode": 1,
+                "date_mode": "now",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["removed_from_watchlist"])
+        self.assertEqual(self.watchlist_calls, [])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from math import ceil
+from threading import Lock
 from typing import Any, Callable
 
 import httpx
@@ -32,6 +33,10 @@ class TraktError(RuntimeError):
     pass
 
 
+class TraktReauthorizationRequired(TraktError):
+    pass
+
+
 class TraktRateLimitError(TraktError):
     def __init__(self, message: str, *, retry_after_seconds: int | None = None) -> None:
         super().__init__(message)
@@ -47,6 +52,28 @@ class OAuthTokens:
     token_type: str
     scope: str = ""
 
+    @classmethod
+    def from_payload(cls, payload: Any) -> OAuthTokens:
+        if not isinstance(payload, dict):
+            raise TraktError("Trakt returned an invalid OAuth token response")
+        try:
+            access_token = str(payload["access_token"]).strip()
+            refresh_token = str(payload["refresh_token"]).strip()
+            created_at = int(payload["created_at"])
+            expires_in = int(payload["expires_in"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TraktError("Trakt returned an incomplete OAuth token response") from exc
+        if not access_token or not refresh_token:
+            raise TraktError("Trakt returned an incomplete OAuth token response")
+        return cls(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            created_at=created_at,
+            expires_in=expires_in,
+            token_type=str(payload.get("token_type") or "bearer"),
+            scope=str(payload.get("scope") or ""),
+        )
+
     def to_bundle(self) -> TokenBundle:
         return TokenBundle(
             access_token=self.access_token,
@@ -56,6 +83,41 @@ class OAuthTokens:
             token_type=self.token_type,
             scope=self.scope,
         )
+
+
+@dataclass(slots=True)
+class OAuthDeviceAuthorization:
+    device_code: str
+    user_code: str
+    verification_url: str
+    expires_in: int
+    interval: int
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> OAuthDeviceAuthorization:
+        if not isinstance(payload, dict):
+            raise TraktError("Trakt returned an invalid device authorization response")
+        try:
+            device_code = str(payload["device_code"]).strip()
+            user_code = str(payload["user_code"]).strip()
+            verification_url = str(payload["verification_url"]).strip()
+            expires_in = int(payload["expires_in"])
+            interval = int(payload["interval"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TraktError("Trakt returned an incomplete device authorization response") from exc
+        if not device_code or not user_code or not verification_url:
+            raise TraktError("Trakt returned an incomplete device authorization response")
+        return cls(
+            device_code=device_code,
+            user_code=user_code,
+            verification_url=verification_url,
+            expires_in=max(1, expires_in),
+            interval=max(1, interval),
+        )
+
+    @property
+    def activation_url(self) -> str:
+        return f"{self.verification_url.rstrip('/')}/{self.user_code}"
 
 
 class TraktClient:
@@ -72,6 +134,7 @@ class TraktClient:
         rate_limit_sleep: Callable[[float], None] = time.sleep,
         rate_limit_jitter: Callable[[], float] = random.random,
         rate_limit_wait_budget_seconds: float = 300.0,
+        token_refresh_leeway_seconds: float = 300.0,
     ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
@@ -79,6 +142,11 @@ class TraktClient:
         self._client = httpx.Client(timeout=timeout)
         self._token: TokenBundle | None = None
         self._token_refresh_callback: Callable[[TokenBundle], None] | None = None
+        self._reauthorization_callback: Callable[[], None] | None = None
+        self._token_refresh_lock = Lock()
+        self._pending_token_persistence: TokenBundle | None = None
+        self._reauthorization_required = False
+        self._token_refresh_leeway_seconds = max(0.0, float(token_refresh_leeway_seconds))
         self._cache = ProviderCache(cache_provider)
         self._cache_ttl_hours = cache_ttl_hours
         self._cache_namespace = cache_namespace
@@ -88,13 +156,21 @@ class TraktClient:
 
     def set_tokens(self, token: TokenBundle | None) -> None:
         self._token = token
+        self._pending_token_persistence = None
+        if token is not None:
+            self._reauthorization_required = False
 
     def close(self) -> None:
         """Release the persistent HTTP connection pool owned by this client."""
+        self._retry_pending_token_persistence()
         self._client.close()
 
     def set_token_refresh_callback(self, callback: Callable[[TokenBundle], None] | None) -> None:
         self._token_refresh_callback = callback
+        self._retry_pending_token_persistence()
+
+    def set_reauthorization_callback(self, callback: Callable[[], None] | None) -> None:
+        self._reauthorization_callback = callback
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -108,7 +184,64 @@ class TraktClient:
             "grant_type": "authorization_code",
         }
         data = self._request("POST", "/oauth/token", auth_required=False, json=payload)
-        return OAuthTokens(**data)
+        return OAuthTokens.from_payload(data)
+
+    def start_device_authorization(self) -> OAuthDeviceAuthorization:
+        data = self._request(
+            "POST",
+            "/oauth/device/code",
+            auth_required=False,
+            use_cache=False,
+            json={"client_id": self.client_id},
+        )
+        return OAuthDeviceAuthorization.from_payload(data)
+
+    def wait_for_device_authorization(
+        self,
+        authorization: OAuthDeviceAuthorization,
+    ) -> OAuthTokens:
+        deadline = time.monotonic() + authorization.expires_in
+        interval = authorization.interval
+        payload = {
+            "code": authorization.device_code,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "trakt-api-key": self.client_id,
+            "trakt-api-version": "2",
+        }
+        while time.monotonic() < deadline:
+            self._rate_limit_sleep(float(interval))
+            try:
+                response = self._client.post(
+                    f"{API_URL}/oauth/device/token",
+                    headers=headers,
+                    json=payload,
+                )
+            except httpx.TransportError:
+                continue
+            if response.status_code == 200:
+                return OAuthTokens.from_payload(response.json())
+            if response.status_code == 400:
+                continue
+            if response.status_code == 429:
+                retry_after = self._retry_after_seconds(response.headers.get("Retry-After"))
+                interval = max(interval + 1, retry_after or 0)
+                continue
+            if response.status_code == 404:
+                raise TraktError("Trakt device authorization code is invalid. Start again.")
+            if response.status_code == 409:
+                raise TraktError("Trakt device authorization code was already used. Start again.")
+            if response.status_code == 410:
+                raise TraktError("Trakt device authorization expired. Start again.")
+            if response.status_code == 418:
+                raise TraktError("Trakt authorization was denied.")
+            raise TraktError(
+                f"Trakt device authorization failed: {response.status_code} {response.text}"
+            )
+        raise TimeoutError("Timed out waiting for Trakt device authorization")
 
     def refresh_tokens(self) -> OAuthTokens:
         if not self._token:
@@ -121,7 +254,78 @@ class TraktClient:
             "grant_type": "refresh_token",
         }
         data = self._request("POST", "/oauth/token", auth_required=False, json=payload)
-        return OAuthTokens(**data)
+        return OAuthTokens.from_payload(data)
+
+    def refresh_access_token(self) -> TokenBundle:
+        token = self._token
+        if token is None:
+            if self._reauthorization_required:
+                raise TraktReauthorizationRequired("Trakt session expired. Reconnect required.")
+            raise TraktError("Refresh token is not configured")
+        return self._refresh_access_token(token)
+
+    def _ensure_authenticated_token(self) -> TokenBundle:
+        self._retry_pending_token_persistence()
+        token = self._token
+        if token is None:
+            if self._reauthorization_required:
+                raise TraktReauthorizationRequired("Trakt session expired. Reconnect required.")
+            raise TraktError("Authentication is required")
+        expires_at = float(token.created_at) + float(token.expires_in)
+        if expires_at <= time.time() + self._token_refresh_leeway_seconds:
+            return self._refresh_access_token(token)
+        return token
+
+    def _refresh_access_token(self, stale_token: TokenBundle) -> TokenBundle:
+        with self._token_refresh_lock:
+            current = self._token
+            if current is None:
+                if self._reauthorization_required:
+                    raise TraktReauthorizationRequired("Trakt session expired. Reconnect required.")
+                raise TraktError("Refresh token is not configured")
+            if (
+                current.access_token != stale_token.access_token
+                or current.refresh_token != stale_token.refresh_token
+            ):
+                self._retry_pending_token_persistence()
+                return current
+            try:
+                refreshed = self.refresh_tokens().to_bundle()
+            except TraktReauthorizationRequired:
+                self._mark_reauthorization_required()
+                raise
+            self._token = refreshed
+            self._pending_token_persistence = refreshed
+            self._retry_pending_token_persistence()
+            return refreshed
+
+    def _retry_pending_token_persistence(self) -> None:
+        bundle = self._pending_token_persistence
+        callback = self._token_refresh_callback
+        if bundle is None or callback is None:
+            return
+        try:
+            callback(bundle)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to persist refreshed Trakt token; keeping refreshed credentials in memory"
+            )
+            return
+        if self._pending_token_persistence is bundle:
+            self._pending_token_persistence = None
+
+    def _mark_reauthorization_required(self) -> None:
+        if self._reauthorization_required:
+            return
+        self._reauthorization_required = True
+        self._token = None
+        self._pending_token_persistence = None
+        logging.getLogger(__name__).warning("Trakt session expired; reconnect is required")
+        if self._reauthorization_callback is not None:
+            try:
+                self._reauthorization_callback()
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to invalidate expired Trakt credentials")
 
     def get_me(self) -> dict[str, Any]:
         return self._request("GET", "/users/settings", use_cache=False)
@@ -623,10 +827,10 @@ class TraktClient:
             "trakt-api-key": self.client_id,
             "trakt-api-version": "2",
         }
+        request_token: TokenBundle | None = None
         if auth_required:
-            if not self._token:
-                raise TraktError("Authentication is required")
-            headers["Authorization"] = f"Bearer {self._token.access_token}"
+            request_token = self._ensure_authenticated_token()
+            headers["Authorization"] = f"Bearer {request_token.access_token}"
         if method.upper() == "GET" and use_cache and not include_headers:
             cache_key = self._make_cache_key(method, path, kwargs.get("params"), auth_required)
             cached = self._cache.get_json(cache_key, self._cache_ttl_hours)
@@ -649,12 +853,8 @@ class TraktClient:
                     **kwargs,
                 )
             raise TraktError(str(exc)) from exc
-        if response.status_code == 401 and auth_required and _retry_on_401 and self._token is not None:
-            refreshed = self.refresh_tokens()
-            bundle = refreshed.to_bundle()
-            self.set_tokens(bundle)
-            if self._token_refresh_callback is not None:
-                self._token_refresh_callback(bundle)
+        if response.status_code == 401 and auth_required and _retry_on_401 and request_token is not None:
+            self._refresh_access_token(request_token)
             return self._request(
                 method,
                 path,
@@ -698,6 +898,16 @@ class TraktClient:
             if retry_after is not None:
                 detail = f"{detail}; retry after {retry_after} seconds"
             raise TraktRateLimitError(detail, retry_after_seconds=retry_after)
+        if response.status_code == 400 and path == "/oauth/token":
+            try:
+                oauth_error = response.json()
+            except ValueError:
+                oauth_error = {}
+            if isinstance(oauth_error, dict) and oauth_error.get("error") == "invalid_grant":
+                oauth_request = kwargs.get("json")
+                if isinstance(oauth_request, dict) and oauth_request.get("grant_type") == "refresh_token":
+                    raise TraktReauthorizationRequired("Trakt session expired. Reconnect required.")
+                raise TraktError("Trakt authorization was rejected. Start Reconnect again.")
         if response.status_code >= 400:
             raise TraktError(f"Trakt request failed: {response.status_code} {response.text}")
         if response.status_code == 204:

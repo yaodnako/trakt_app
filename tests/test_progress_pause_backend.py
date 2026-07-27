@@ -287,6 +287,26 @@ class ProgressPauseBackendTests(unittest.TestCase):
         self.assertEqual(rows[0].title_year, 2054)
         self.assertEqual(rows[-1].title_year, 2005)
 
+    def test_progress_repository_can_return_unlimited_rows_for_background_work(self) -> None:
+        for offset in range(55):
+            self._add_progress(
+                100 + offset,
+                title=f"Show {offset:02d}",
+                year=2000 + offset,
+            )
+
+        with self.db.session() as session:
+            rows = self.progress.list_in_progress(
+                session,
+                sort_mode=ProgressSortMode.RELEASE_YEAR,
+                descending=True,
+                limit=None,
+            )
+
+        self.assertEqual(len(rows), 55)
+        self.assertEqual(rows[0].title_year, 2054)
+        self.assertEqual(rows[-1].title_year, 2000)
+
     def test_hidden_sync_happens_before_policy_skip_and_keeps_paused_progress_synced(self) -> None:
         for trakt_id in range(1, 5):
             self._add_progress(

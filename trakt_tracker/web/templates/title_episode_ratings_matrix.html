@@ -68,6 +68,7 @@
 </div>
 {%- endmacro %}
 {% set matrix_error = matrix_error_message if matrix_error_message is defined else (matrix.error_message if matrix else "") %}
+{% set use_imdb_seasons = imdb_seasons_enabled if imdb_seasons_enabled is defined else true %}
 {% if matrix %}
 <div
     data-title-matrix-title-rating-data
@@ -77,7 +78,7 @@
 ></div>
 {% endif %}
 {% if matrix and matrix.has_episodes %}
-<div class="title-matrix-fragment is-hide-season-zero is-imdb-seasons" data-matrix-provider="{{ matrix.provider }}" data-matrix-imdb-subtitle="IMDb episode ratings by season" data-matrix-trakt-subtitle="Trakt episode ratings by season" data-matrix-my-subtitle="My episode ratings by season">
+<div class="title-matrix-fragment is-hide-season-zero{% if use_imdb_seasons %} is-imdb-seasons{% endif %}" data-matrix-provider="{{ matrix.provider }}" data-matrix-imdb-subtitle="IMDb episode ratings by season" data-matrix-trakt-subtitle="Trakt episode ratings by season" data-matrix-my-subtitle="My episode ratings by season">
     {% if matrix_error %}
     <div class="title-matrix-inline-note">
         Latest refresh hit an error. Showing cached episode data.
@@ -85,7 +86,7 @@
     {% endif %}
     <div class="title-matrix-options">
         <label class="title-matrix-option">
-            <input type="checkbox" data-imdb-seasons-toggle checked>
+            <input type="checkbox" data-imdb-seasons-toggle {% if use_imdb_seasons %}checked{% endif %}>
             <span>IMDb seasons</span>
         </label>
         <label class="title-matrix-option">
@@ -151,8 +152,8 @@
         </span>
         {% endfor %}
     </div>
-    {{ render_matrix_grid(matrix.imdb_seasons or matrix.seasons, matrix.imdb_rows or matrix.rows, "imdb", false) }}
-    {{ render_matrix_grid(matrix.seasons, matrix.rows, "trakt", true) }}
+    {{ render_matrix_grid(matrix.imdb_seasons or matrix.seasons, matrix.imdb_rows or matrix.rows, "imdb", not use_imdb_seasons) }}
+    {{ render_matrix_grid(matrix.seasons, matrix.rows, "trakt", use_imdb_seasons) }}
 </div>
 {% else %}
 <div class="title-matrix-empty-state">

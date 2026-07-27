@@ -37,6 +37,8 @@ from trakt_tracker.web.viewmodels import (
     EPISODE_RATINGS_READY_REFRESH_SECONDS,
 )
 
+_PROGRESS_PAGE_LIMIT = 50
+
 
 @dataclass(frozen=True, slots=True)
 class _ProgressPageState:
@@ -285,6 +287,7 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                 view=state.view,
                 sort_mode=state.sort_mode,
                 descending=state.descending,
+                force_refresh=True,
                 force_full_assets=False,
             ),
         )
@@ -345,6 +348,9 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
         episode = current.next_episode
         services.operations.publish("Progress action", f"Mark watched: {current.title} S{episode.season:02d}E{episode.number:02d}")
         services.interactions.mark_progress_episode_watched(current, watched_at=datetime.now())
+        watchlist_keys = services.catalog.watchlist_keys(title_type="show")
+        if ("show", current.trakt_id) in watchlist_keys:
+            services.catalog.set_watchlisted("show", current.trakt_id, watchlisted=False)
         services.progress.sync_progress(
             [current.trakt_id],
             view=state.view,
@@ -538,6 +544,7 @@ def _find_progress_item(services: ServiceContainer, trakt_id: int, *, state: _Pr
         view=state.view,
         sort_mode=state.sort_mode,
         descending=state.descending,
+        limit=None,
     )
     return next((item for item in items if item.trakt_id == trakt_id), None)
 
@@ -551,6 +558,7 @@ def _load_progress_items(
         view=state.view,
         sort_mode=state.sort_mode,
         descending=state.descending,
+        limit=None,
     )
     items = filter_progress_items(
         items,
@@ -573,6 +581,8 @@ def _load_progress_items(
         item for item in items
         if item not in new_items
     ]
+    new_items = new_items[:_PROGRESS_PAGE_LIMIT]
+    progress_items = progress_items[:max(0, _PROGRESS_PAGE_LIMIT - len(new_items))]
     return [*new_items, *progress_items], new_items, progress_items
 
 

@@ -26,7 +26,7 @@
         <div class="catalog-filter-controls">
         <label class="search-inline-field">
             <span>Type</span>
-            <select name="type">
+            <select name="type" data-catalog-auto-submit>
                 <option value="all" {% if search_type == 'all' %}selected{% endif %}>All</option>
                 <option value="movie" {% if search_type == 'movie' %}selected{% endif %}>Movies</option>
                 <option value="show" {% if search_type == 'show' %}selected{% endif %}>Shows</option>
@@ -34,7 +34,7 @@
         </label>
         <label class="search-inline-field">
             <span>Sort</span>
-            <select name="sort">
+            <select name="sort" data-catalog-auto-submit>
                 {% for item in sort_modes %}
                 <option value="{{ item }}" {% if sort_mode == item %}selected{% endif %}>{{ item }}</option>
                 {% endfor %}

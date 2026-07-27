@@ -107,7 +107,6 @@ class TrayNotificationPoller(QObject):
                 if not items:
                     return
                 self.notificationsReceived.emit(items)
-                active_services.progress.sync_progress(dropped_only=False)
 
             coordinator = getattr(self._runtime, "background_tasks", None)
             if coordinator is None:  # Compatibility path for lightweight embedded-runtime tests.

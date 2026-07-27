@@ -190,8 +190,17 @@ class WebSystemRouteTests(unittest.TestCase):
         script = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "settings_page.js").read_text(
             encoding="utf-8"
         )
+        routes = (PROJECT_ROOT / "trakt_tracker" / "web" / "routes_system.py").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('data-settings-save-bar', template)
+        self.assertIn('name="web_hide_spoilers"', template)
+        self.assertIn("Don't show spoilers", template)
+        self.assertIn(
+            'config.web_hide_spoilers = parse_bool_flag(str(form.get("web_hide_spoilers", "")))',
+            routes,
+        )
         self.assertIn('form method="post" action="/settings/full-sync"', template)
         self.assertIn('data-sync-task="full_sync"', template)
         self.assertNotIn('formaction="/settings/full-sync"', template)

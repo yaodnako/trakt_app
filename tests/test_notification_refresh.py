@@ -118,8 +118,10 @@ class _FakeProgressRepository:
     def __init__(self, next_episode: EpisodeSummary, *, paused: bool = False) -> None:
         self._next_episode = next_episode
         self._paused = paused
+        self.requested_limits: list[int | None | str] = []
 
     def list_in_progress(self, session, *, view="active", **kwargs) -> list[ProgressSnapshot]:
+        self.requested_limits.append(kwargs.get("limit", "missing"))
         normalized_view = getattr(view, "value", view)
         expected_view = "paused" if self._paused else "active"
         if normalized_view != expected_view:
@@ -243,6 +245,30 @@ class NotificationRefreshWorkflowTests(unittest.TestCase):
         self.assertEqual(sender.messages, [])
         self.assertEqual(len(notification_repo.seen), 1)
         self.assertIsNotNone(notification_repo.logs[(1, 70)].seen_at)
+
+    def test_notification_matching_requests_unlimited_progress_rows(self) -> None:
+        episode = EpisodeSummary(
+            trakt_id=70,
+            season=1,
+            number=2,
+            title="Current",
+            first_aired=datetime.now(tz=UTC) - timedelta(minutes=121),
+        )
+        entry = CalendarEntry(show_trakt_id=1, show_title="Tracked Show", episode=episode)
+        progress_repo = _FakeProgressRepository(episode)
+        workflow = NotificationRefreshWorkflow(
+            db=type("FakeDB", (), {"session": lambda self: nullcontext(object())})(),
+            auth_service=_FakeAuth(_FakeClient([entry])),
+            config_store=_FakeConfigStore(AppConfig(notification_release_delay_minutes=120)),
+            notification_repo=_FakeNotificationRepository(),
+            episode_repo=object(),
+            progress_repo=progress_repo,
+            sender=_FakeSender(),
+        )
+
+        workflow.poll_upcoming(send_native=False)
+
+        self.assertEqual(progress_repo.requested_limits, [None, None])
 
     def test_poll_upcoming_repeats_unseen_current_episode_after_calendar_window(self) -> None:
         released_at = datetime.now(tz=UTC) - timedelta(days=30)
