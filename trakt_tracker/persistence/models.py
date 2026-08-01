@@ -218,3 +218,126 @@ class SyncState(Base):
     key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     value: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TraktOutboxItem(Base):
+    __tablename__ = "trakt_outbox"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    operation_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    operation_type: Mapped[str] = mapped_column(String(32), index=True)
+    base_state_json: Mapped[str] = mapped_column(Text, default="null")
+    desired_state_json: Mapped[str] = mapped_column(Text, default="null")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    dependency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    origin: Mapped[str] = mapped_column(String(32), default="user")
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CatalogIdentityMap(Base):
+    """Provider identity crosswalk used by the reversible TMDb catalog preview."""
+
+    __tablename__ = "catalog_identity_map"
+    __table_args__ = (
+        UniqueConstraint("provider", "title_type", "provider_id", name="uq_catalog_identity_provider"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(16), index=True)
+    title_type: Mapped[str] = mapped_column(String(16), index=True)
+    provider_id: Mapped[int] = mapped_column(Integer, index=True)
+    trakt_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    imdb_id: Mapped[str] = mapped_column(String(32), default="")
+    status: Mapped[str] = mapped_column(String(24), default="unknown")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TmdbPreviewSnapshot(Base):
+    """Durable card snapshot for TMDb-only local actions."""
+
+    __tablename__ = "tmdb_preview_snapshots"
+    __table_args__ = (
+        UniqueConstraint("title_type", "tmdb_id", name="uq_tmdb_preview_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title_type: Mapped[str] = mapped_column(String(16), index=True)
+    tmdb_id: Mapped[int] = mapped_column(Integer, index=True)
+    trakt_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    imdb_id: Mapped[str] = mapped_column(String(32), default="")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    overview: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(64), default="")
+    poster_url: Mapped[str] = mapped_column(String(512), default="")
+    backdrop_url: Mapped[str] = mapped_column(String(512), default="")
+    tmdb_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tmdb_votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    popularity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TmdbPreviewIntent(Base):
+    """Local desired state for TMDb preview actions awaiting optional Trakt mapping."""
+
+    __tablename__ = "tmdb_preview_intents"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_type",
+            "title_type",
+            "tmdb_id",
+            "season",
+            "episode",
+            name="uq_tmdb_preview_intent",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    operation_type: Mapped[str] = mapped_column(String(32), index=True)
+    title_type: Mapped[str] = mapped_column(String(16), index=True)
+    tmdb_id: Mapped[int] = mapped_column(Integer, index=True)
+    season: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    base_state_json: Mapped[str] = mapped_column(Text, default="false")
+    desired_state_json: Mapped[str] = mapped_column(Text, default="false")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(24), default="local_only", index=True)
+    mapped_trakt_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TmdbPreviewReleaseState(Base):
+    """Notification/release projection for TMDb-only tracked titles."""
+
+    __tablename__ = "tmdb_preview_release_state"
+    __table_args__ = (
+        UniqueConstraint("title_type", "tmdb_id", name="uq_tmdb_preview_release"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title_type: Mapped[str] = mapped_column(String(16), index=True)
+    tmdb_id: Mapped[int] = mapped_column(Integer, index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    release_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    list_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    notify_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

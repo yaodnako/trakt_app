@@ -4,9 +4,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from trakt_tracker.config import AppConfig, ConfigStore
 from trakt_tracker.infrastructure.trakt.client import TraktReauthorizationRequired
+from trakt_tracker.persistence.models import TraktOutboxItem
+from trakt_tracker.persistence.trakt_outbox import OUTBOX_BLOCKED
 from trakt_tracker.profiles import mark_setup_complete, read_setup_state
 from trakt_tracker.web.app import create_app
 from trakt_tracker.web_tray import TrayNotificationPoller, WebPortalTrayWindow
@@ -59,7 +62,7 @@ def test_setup_gate_returns_redirect_401_and_409(tmp_path: Path) -> None:
     assert incomplete_json.status_code == 409
 
 
-def test_completed_profile_without_token_shows_direct_token_update(tmp_path: Path) -> None:
+def test_completed_profile_without_token_uses_local_portal_mode(tmp_path: Path) -> None:
     app, _store = _app(tmp_path)
     mark_setup_complete(app.state.services.database)
     app.state.services.auth.is_authorized = lambda: False
@@ -79,20 +82,13 @@ def test_completed_profile_without_token_shows_direct_token_update(tmp_path: Pat
     finally:
         app.state.runtime.close()
 
-    assert html.status_code == 401
-    assert "location" not in html.headers
-    assert "Update your Trakt token" in html.text
-    assert 'action="/settings/trakt-authorize"' in html.text
-    assert 'value="/search?q=Fullmetal+Alchemist&amp;type=show"' in html.text
-    assert api.status_code == 401
-    assert api.json()["code"] == "trakt_reauth_required"
-    assert api.json()["return_to"] == "/notifications/poll"
-    assert partial.status_code == 401
-    assert partial.json()["code"] == "trakt_reauth_required"
-    assert partial.json()["return_to"] == "/search?q=Fullmetal+Alchemist&type=show"
+    assert html.status_code == 200
+    assert "Trakt unavailable — local mode." in html.text
+    assert api.status_code == 200
+    assert partial.status_code == 200
 
 
-def test_request_that_loses_authorization_shows_token_update_instead_of_provider_error(tmp_path: Path) -> None:
+def test_request_that_loses_authorization_keeps_completed_local_response(tmp_path: Path) -> None:
     app, _store = _app(tmp_path)
     mark_setup_complete(app.state.services.database)
     authorized = {"value": True}
@@ -109,9 +105,8 @@ def test_request_that_loses_authorization_shows_token_update_instead_of_provider
     finally:
         app.state.runtime.close()
 
-    assert response.status_code == 401
-    assert "Update your Trakt token" in response.text
-    assert "session not found" not in response.text
+    assert response.status_code == 200
+    assert response.json() == {"provider_error": "session not found"}
 
 
 def test_reauthorization_exception_shows_token_update_instead_of_server_error(tmp_path: Path) -> None:
@@ -287,7 +282,7 @@ def test_successful_authorization_activates_profile_and_starts_setup(tmp_path: P
     assert started == ["initial_setup:new-viewer"]
 
 
-def test_disconnect_preserves_active_profile_and_redirects_to_setup(tmp_path: Path) -> None:
+def test_disconnect_preserves_active_profile_and_redirects_to_local_settings(tmp_path: Path) -> None:
     app, store = _app(tmp_path)
     disconnected: list[str] = []
     app.state.services.auth.disconnect = disconnected.append
@@ -303,15 +298,71 @@ def test_disconnect_preserves_active_profile_and_redirects_to_setup(tmp_path: Pa
         app.state.runtime.close()
 
     assert response.status_code == 303
-    assert response.headers["location"].startswith("/setup?flash=")
+    assert response.headers["location"].startswith("/settings?flash=")
     assert disconnected == ["alpha"]
     assert store.load().active_slug == "alpha"
 
 
+def test_local_mutation_status_retry_and_confirmed_blocked_discard(tmp_path: Path) -> None:
+    app, _store = _app(tmp_path)
+    mark_setup_complete(app.state.services.database)
+    app.state.services.auth.is_authorized = lambda: False
+    client = TestClient(app, base_url="http://127.0.0.1")
+    client.headers.update(_csrf_headers(client))
+    try:
+        mutation = client.post(
+            "/watchlist/toggle",
+            json={
+                "title_type": "movie",
+                "trakt_id": 77,
+                "watchlisted": True,
+                "title": "Arrival",
+                "released_at": "2016-11-11",
+            },
+        )
+        status = client.get("/trakt-sync/status")
+        retry = client.post("/trakt-sync/retry")
+
+        assert mutation.status_code == 200
+        assert mutation.json()["sync_state"] == "local"
+        assert mutation.json()["pending_count"] == 1
+        assert mutation.headers["X-Trakt-Sync-State"] == "local"
+        assert status.json()["mode"] == "local"
+        assert status.json()["pending"] == 1
+        assert retry.status_code == 200
+
+        with app.state.services.database.session() as session:
+            row = session.scalar(select(TraktOutboxItem))
+            assert row is not None
+            row.status = OUTBOX_BLOCKED
+            row.next_attempt_at = None
+            blocked_id = int(row.id)
+
+        rejected = client.post(
+            f"/trakt-sync/blocked/{blocked_id}/discard",
+            json={"confirm": False},
+        )
+        discarded = client.post(
+            f"/trakt-sync/blocked/{blocked_id}/discard",
+            json={"confirm": True},
+        )
+        settings = client.get("/settings")
+    finally:
+        app.state.runtime.close()
+
+    assert rejected.status_code == 400
+    assert discarded.status_code == 200
+    assert discarded.json()["total"] == 0
+    assert "Synchronization queue" in settings.text
+
+
 def test_tray_poller_refreshes_profile_before_polling() -> None:
-    calls: list[str] = []
+    calls: list[object] = []
     services = SimpleNamespace(
         auth=SimpleNamespace(is_authorized=lambda: calls.append("authorized") or False),
+        notifications=SimpleNamespace(
+            poll_upcoming=lambda **kwargs: calls.append(("poll", kwargs)) or []
+        ),
     )
     runtime = SimpleNamespace(
         active_slug="beta",
@@ -322,16 +373,20 @@ def test_tray_poller_refreshes_profile_before_polling() -> None:
 
     poller._run()
 
-    assert calls == ["refresh", "authorized"]
+    assert calls == [
+        "refresh",
+        "authorized",
+        ("poll", {"send_native": True, "refresh_remote": False}),
+    ]
 
 
 def test_tray_poller_does_not_duplicate_progress_sync_owned_by_notification_service() -> None:
-    calls: list[str] = []
+    calls: list[object] = []
     items = [{"show_title": "Show", "message": "S01E02", "source": "progress"}]
     services = SimpleNamespace(
         auth=SimpleNamespace(is_authorized=lambda: calls.append("authorized") or True),
         notifications=SimpleNamespace(
-            poll_upcoming=lambda send_native=True: calls.append("poll") or items
+            poll_upcoming=lambda **kwargs: calls.append(("poll", kwargs)) or items
         ),
         progress=SimpleNamespace(
             sync_progress=lambda dropped_only=False: calls.append("progress")
@@ -347,7 +402,12 @@ def test_tray_poller_does_not_duplicate_progress_sync_owned_by_notification_serv
 
     poller._run()
 
-    assert calls == ["refresh", "authorized", "poll", "emit"]
+    assert calls == [
+        "refresh",
+        "authorized",
+        ("poll", {"send_native": True, "refresh_remote": True}),
+        "emit",
+    ]
 
 
 def test_tray_notification_activity_is_recorded_before_sound() -> None:

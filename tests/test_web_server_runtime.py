@@ -95,3 +95,51 @@ def test_profile_operation_coordinator_serializes_sync_workflows() -> None:
     release_first.set()
     assert completed.wait(timeout=1)
     assert order == ["full", "repair"]
+
+
+def test_profile_operation_coordinator_coalesces_running_task_to_latest_rerun() -> None:
+    coordinator = ProfileOperationCoordinator()
+    operations = OperationLog()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    rerun_completed = threading.Event()
+    order: list[str] = []
+
+    def first_run() -> None:
+        order.append("first")
+        first_started.set()
+        release_first.wait(timeout=1)
+
+    def superseded_run() -> None:
+        order.append("superseded")
+
+    def latest_run() -> None:
+        order.append("latest")
+        rerun_completed.set()
+
+    try:
+        assert coordinator.start_coalesced(
+            "progress_refresh_after_watch_3",
+            source="Progress refresh after watch",
+            operations=operations,
+            fn=first_run,
+        )
+        assert first_started.wait(timeout=1)
+        assert coordinator.start_coalesced(
+            "progress_refresh_after_watch_3",
+            source="Progress refresh after watch",
+            operations=operations,
+            fn=superseded_run,
+        )
+        assert coordinator.start_coalesced(
+            "progress_refresh_after_watch_3",
+            source="Progress refresh after watch",
+            operations=operations,
+            fn=latest_run,
+        )
+        release_first.set()
+        assert rerun_completed.wait(timeout=1)
+        assert order == ["first", "latest"]
+    finally:
+        release_first.set()
+        coordinator.close(timeout=1)

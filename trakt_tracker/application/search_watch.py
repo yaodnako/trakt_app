@@ -7,6 +7,7 @@ from threading import Lock
 from trakt_tracker.application.episode_imdb_reconciliation import IMDB_MATCH_STATUS_ALTERNATE_PARENT
 from trakt_tracker.application.metadata_refresh_policy import ASSET_KIND_STILL, TRIGGER_PAGE_CONTEXT
 from trakt_tracker.domain import EpisodeSummary, HistoryItemInput
+from trakt_tracker.infrastructure.tmdb import TMDB_STILL_IMAGE_BASE
 
 
 SEASON_LAYOUT_TRAKT = "trakt"
@@ -121,7 +122,17 @@ class SearchShowWatchPanel:
 
 
 class SearchWatchService:
-    def __init__(self, db, auth_service, titles_repo, history_repo, episode_repo, history_service, episode_metadata=None) -> None:
+    def __init__(
+        self,
+        db,
+        auth_service,
+        titles_repo,
+        history_repo,
+        episode_repo,
+        history_service,
+        episode_metadata=None,
+        tmdb_factory=None,
+    ) -> None:
         self._db = db
         self._auth = auth_service
         self._titles = titles_repo
@@ -129,6 +140,7 @@ class SearchWatchService:
         self._episode_repo = episode_repo
         self._history_service = history_service
         self._episode_metadata = episode_metadata
+        self._tmdb_factory = tmdb_factory
         self._still_enrichment_locks_guard = Lock()
         self._still_enrichment_locks: dict[tuple[int, int], Lock] = {}
 
@@ -235,13 +247,89 @@ class SearchWatchService:
 
     def hydrate_show_episodes(self, trakt_id: int) -> bool:
         """Fetch a missing episode list outside of a panel HTTP request."""
-        client = self._auth.get_client()
-        episodes = client.get_show_episodes(trakt_id)
+        episodes: list[EpisodeSummary] = []
+        is_authorized = getattr(self._auth, "is_authorized", None)
+        if not callable(is_authorized) or bool(is_authorized()):
+            try:
+                client = self._auth.get_client()
+                episodes = client.get_show_episodes(trakt_id)
+            except Exception:
+                episodes = []
+        if not episodes:
+            episodes = self._load_tmdb_show_episodes(trakt_id)
+        if not episodes:
+            return False
         with self._db.session() as session:
             self._episode_repo.replace_show_episodes(session, trakt_id, episodes)
         if self._episode_metadata is not None:
             self._episode_metadata.repair_episode_imdb_ratings(trakt_id)
         return bool(episodes)
+
+    def _load_tmdb_show_episodes(self, trakt_id: int) -> list[EpisodeSummary]:
+        if self._tmdb_factory is None:
+            return []
+        with self._db.session() as session:
+            title = self._titles.get_title(session, int(trakt_id))
+            tmdb_id = int(getattr(title, "tmdb_id", 0) or 0)
+        if tmdb_id <= 0:
+            return []
+        try:
+            client = self._tmdb_factory(self._auth.config)
+            if not client.is_configured():
+                return []
+            details = client.get_catalog_details("show", tmdb_id) or {}
+            season_numbers = sorted(
+                {
+                    int(item.get("season_number"))
+                    for item in details.get("seasons", [])
+                    if isinstance(item, dict)
+                    and item.get("season_number") is not None
+                    and int(item.get("season_number")) >= 0
+                    and int(item.get("episode_count") or 0) > 0
+                }
+            )
+            episodes: list[EpisodeSummary] = []
+            for season_number in season_numbers:
+                payload = client.get_catalog_season(tmdb_id, season_number) or {}
+                for raw in payload.get("episodes", []) if isinstance(payload, dict) else []:
+                    if not isinstance(raw, dict):
+                        continue
+                    number = int(raw.get("episode_number") or 0)
+                    if number <= 0:
+                        continue
+                    raw_season = raw.get("season_number")
+                    episode_season = season_number if raw_season is None else int(raw_season)
+                    still_path = raw.get("still_path")
+                    episodes.append(
+                        EpisodeSummary(
+                            trakt_id=0,
+                            season=episode_season,
+                            number=number,
+                            title=str(raw.get("name") or f"Episode {number}"),
+                            still_url=(
+                                f"{TMDB_STILL_IMAGE_BASE}{still_path}"
+                                if isinstance(still_path, str) and still_path
+                                else ""
+                            ),
+                            first_aired=self._parse_tmdb_air_date(raw.get("air_date")),
+                            runtime=(int(raw["runtime"]) if raw.get("runtime") is not None else None),
+                            overview=str(raw.get("overview") or ""),
+                        )
+                    )
+            return episodes
+        except Exception:
+            return []
+
+    @staticmethod
+    def _parse_tmdb_air_date(value) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
     def enrich_missing_stills(self, trakt_id: int, season: int) -> bool:
         if self._episode_metadata is None:
@@ -425,10 +513,8 @@ class SearchWatchService:
         with self._db.session() as session:
             rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
         if not rows:
-            client = self._auth.get_client()
-            episodes = client.get_show_episodes(trakt_id)
+            self.hydrate_show_episodes(trakt_id)
             with self._db.session() as session:
-                self._episode_repo.replace_show_episodes(session, trakt_id, episodes)
                 rows = self._episode_repo.list_show_episode_metadata(session, trakt_id)
         return [
             EpisodeSummary(

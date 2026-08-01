@@ -12,8 +12,6 @@
         <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
         <input type="hidden" name="sort" value="{{ sort_mode }}">
         <input type="hidden" name="direction" value="{{ sort_direction }}">
-        <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-        <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
         <button type="submit" class="progress-seen-button" title="Mark notification seen" aria-label="Mark notification seen">
             <img src="{{ request.url_for('static', path='eye.svg') }}" alt="" aria-hidden="true">
         </button>
@@ -57,8 +55,12 @@
                 <div class="poster-badge poster-badge-left">{{ skipped_count }}</div>
                 {% endif %}
                 {% if progress_item.title_episode_avg_rating is not none %}
-                <div class="history-rating-badge">
-                    {{ progress_item.title_episode_avg_rating|round(1) }} ★
+                <div
+                    class="history-rating-badge user-rating-badge poster-average-rating-badge"
+                    style="--user-rating-color: {{ progress_item.title_episode_avg_rating|rating_bucket_color }};"
+                >
+                    <span class="user-rating-value">{{ progress_item.title_episode_avg_rating|round(1) }}</span>
+                    <span class="user-rating-star">&#9733;</span>
                 </div>
                 {% endif %}
             </a>
@@ -70,8 +72,6 @@
                     <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
                     <input type="hidden" name="sort" value="{{ sort_mode }}">
                     <input type="hidden" name="direction" value="{{ sort_direction }}">
-                    <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-                    <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
                     <button
                         type="submit"
                         class="progress-title-action-button pause-toggle{% if progress_item_is_paused %} resume{% endif %}"
@@ -109,8 +109,6 @@
                     <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
                     <input type="hidden" name="sort" value="{{ sort_mode }}">
                     <input type="hidden" name="direction" value="{{ sort_direction }}">
-                    <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-                    <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
                     <input type="hidden" name="is_dropped" value="{{ '1' if progress_item.is_dropped else '0' }}">
                     <button
                         type="submit"
@@ -224,7 +222,7 @@
             {% endif %}
                 <a
                     class="icon-button js-play-link"
-                    href="/progress/{{ progress_item.trakt_id }}/play?hide_upcoming={{ '1' if hide_upcoming else '0' }}&show_paused={{ '1' if show_paused else '0' }}&show_dropped={{ '1' if show_dropped else '0' }}&sort={{ sort_mode }}&direction={{ sort_direction }}&use_year_filter={{ '1' if use_year_filter else '0' }}&min_year={{ min_year or '' }}"
+                    href="/progress/{{ progress_item.trakt_id }}/play?hide_upcoming={{ '1' if hide_upcoming else '0' }}&show_paused={{ '1' if show_paused else '0' }}&show_dropped={{ '1' if show_dropped else '0' }}&sort={{ sort_mode }}&direction={{ sort_direction }}"
                     target="_blank"
                     rel="noreferrer"
                     title="Play"
@@ -240,8 +238,6 @@
                     data-play-show-dropped="{{ '1' if show_dropped else '0' }}"
                     data-play-sort="{{ sort_mode }}"
                     data-play-direction="{{ sort_direction }}"
-                    data-play-use-year-filter="{{ '1' if use_year_filter else '0' }}"
-                    data-play-min-year="{{ min_year or '' }}"
                     {% endif %}
                 >
                     <img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true">
@@ -252,8 +248,6 @@
                     <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
                     <input type="hidden" name="sort" value="{{ sort_mode }}">
                     <input type="hidden" name="direction" value="{{ sort_direction }}">
-                    <input type="hidden" name="min_year" value="{{ min_year or '' }}">
-                    <input type="hidden" name="use_year_filter" value="{{ '1' if use_year_filter else '0' }}">
                     <button type="submit" class="icon-button" title="Mark watched" {% if not progress_item.next_episode or progress_item.is_dropped %}disabled{% endif %}>
                         <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
                     </button>

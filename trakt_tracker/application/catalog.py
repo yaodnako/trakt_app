@@ -85,6 +85,7 @@ class CatalogService:
         tmdb_factory: Callable[[AppConfig], TMDbClient],
         imdb_client: IMDbDatasetClient,
         history_repo=None,
+        trakt_outbox=None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -94,6 +95,7 @@ class CatalogService:
         self._tmdb_factory = tmdb_factory
         self._imdb_client = imdb_client
         self._history_repo = history_repo
+        self._trakt_outbox = trakt_outbox
         self._explore_cache: dict[tuple, dict] = {}
         self._explore_cache_lock = Lock()
         self._explore_refresh_locks: dict[tuple, Lock] = {}
@@ -356,6 +358,19 @@ class CatalogService:
         with self._db.session() as session:
             for title in titles:
                 self._titles.upsert_title(session, title)
+        if self._trakt_outbox is not None:
+            by_key = {(item.title_type, int(item.trakt_id)): item for item in titles}
+            for payload, desired_member in self._trakt_outbox.membership_intents(operation_type="watchlist"):
+                key = (str(payload.get("title_type") or ""), int(payload.get("trakt_id") or 0))
+                if not desired_member:
+                    by_key.pop(key, None)
+                    continue
+                if key not in by_key:
+                    item = _deserialize_title_summary(payload.get("snapshot"))
+                    if item is not None:
+                        item.is_watchlisted = True
+                        by_key[key] = item
+            titles = list(by_key.values())
         self._save_watchlist_snapshot(
             {(title.title_type, int(title.trakt_id)) for title in titles},
             items=titles,
@@ -713,21 +728,69 @@ class CatalogService:
         with self._db.session() as session:
             return self._history_repo.watched_title_keys(session)
 
-    def set_watchlisted(self, title_type: str, trakt_id: int, *, watchlisted: bool) -> None:
-        self._auth.get_client().set_watchlist(title_type, trakt_id, watchlisted=watchlisted)
-        keys, available = self._load_watchlist_snapshot()
-        if not available:
-            self.refresh_watchlist_snapshot()
+    def set_watchlisted(
+        self,
+        title_type: str,
+        trakt_id: int,
+        *,
+        watchlisted: bool,
+        snapshot: dict | None = None,
+        dependency_key: str | None = None,
+        origin: str = "user",
+    ) -> None:
+        if self._trakt_outbox is None:
+            self._auth.get_client().set_watchlist(title_type, trakt_id, watchlisted=watchlisted)
+            keys, available = self._load_watchlist_snapshot()
+            if not available:
+                self.refresh_watchlist_snapshot()
+                return
+            key = (title_type, int(trakt_id))
+            if watchlisted:
+                keys.add(key)
+            else:
+                keys.discard(key)
+            self._save_watchlist_snapshot(keys)
             return
+
+        keys, available = self._load_watchlist_snapshot()
         key = (title_type, int(trakt_id))
+        base_member = key in keys if available else not watchlisted
+        _old_keys, _old_available, items = self._load_watchlist_snapshot_payload()
+        by_key = {(item.title_type, int(item.trakt_id)): item for item in items}
         if watchlisted:
             keys.add(key)
+            compact = self._compact_watchlist_summary(title_type, int(trakt_id), snapshot or {})
+            if compact is not None:
+                by_key[key] = compact
         else:
             keys.discard(key)
-        self._save_watchlist_snapshot(keys)
+            by_key.pop(key, None)
+        queued = False
+        with self._db.session() as session:
+            self._save_watchlist_snapshot_in_session(session, keys, items=list(by_key.values()))
+            operation_key = self._trakt_outbox.enqueue_membership(
+                session,
+                operation_type="watchlist",
+                title_type=title_type,
+                trakt_id=trakt_id,
+                base_member=base_member,
+                desired_member=watchlisted,
+                snapshot=_serialize_title_summary(by_key[key]) if key in by_key else dict(snapshot or {}),
+                dependency_key=dependency_key,
+                origin=origin,
+            )
+            queued = operation_key is not None
+        if queued:
+            self._trakt_outbox.wake()
 
     def _fetch_watchlist_titles(self) -> list[TitleSummary]:
-        return self._auth.get_client().get_watchlist()
+        fetch = self._auth.get_client().get_watchlist
+        try:
+            return fetch(authoritative=True)
+        except TypeError as exc:
+            if "authoritative" not in str(exc):
+                raise
+            return fetch()
 
     def _load_watchlist_snapshot(self) -> tuple[set[tuple[str, int]], bool]:
         keys, available, _items = self._load_watchlist_snapshot_payload()
@@ -770,6 +833,10 @@ class CatalogService:
         if items is None:
             _old_keys, _available, existing_items = self._load_watchlist_snapshot_payload()
             items = [item for item in existing_items if (item.title_type, int(item.trakt_id)) in keys]
+        with self._db.session() as session:
+            self._save_watchlist_snapshot_in_session(session, keys, items=items)
+
+    def _save_watchlist_snapshot_in_session(self, session, keys, *, items: list[TitleSummary]) -> None:
         payload = json.dumps(
             {
                 "keys": [list(key) for key in sorted(keys)],
@@ -778,8 +845,43 @@ class CatalogService:
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        self._sync_state.set_value(session, _WATCHLIST_SNAPSHOT_STATE_KEY, payload)
+
+    def _compact_watchlist_summary(
+        self,
+        title_type: str,
+        trakt_id: int,
+        snapshot: dict,
+    ) -> TitleSummary | None:
+        released_at = _parse_optional_datetime(snapshot.get("released_at"))
+        title = str(snapshot.get("title") or "").strip()
+        try:
+            list_count = int(snapshot["list_count"]) if snapshot.get("list_count") not in {None, ""} else None
+        except (TypeError, ValueError):
+            list_count = None
         with self._db.session() as session:
-            self._sync_state.set_value(session, _WATCHLIST_SNAPSHOT_STATE_KEY, payload)
+            stored = self._titles.get_title(session, trakt_id)
+            if stored is not None:
+                summary = self._summary_from_title_row(stored, is_watchlisted=True)
+                if title:
+                    summary.title = title
+                if released_at is not None:
+                    summary.released_at = released_at
+                if list_count is not None:
+                    summary.explore_metric_kind = "lists"
+                    summary.explore_metric_count = list_count
+                return summary
+        if not title:
+            title = f"{'Show' if title_type == 'show' else 'Movie'} {trakt_id}"
+        return TitleSummary(
+            trakt_id=trakt_id,
+            title_type="show" if title_type == "show" else "movie",
+            title=title,
+            released_at=released_at,
+            explore_metric_kind="lists" if list_count is not None else "",
+            explore_metric_count=list_count,
+            is_watchlisted=True,
+        )
 
     @staticmethod
     def _summary_from_title_row(row, *, is_watchlisted: bool = False) -> TitleSummary:
@@ -1177,6 +1279,9 @@ class CatalogService:
     def set_search_sort_mode(self, mode: str) -> None:
         with self._db.session() as session:
             self._sync_state.set_value(session, "search_sort_mode", mode)
+
+    def remember_search_query(self, query: str) -> None:
+        self._remember_search_query(query)
 
     def _remember_search_query(self, query: str) -> None:
         query = query.strip()

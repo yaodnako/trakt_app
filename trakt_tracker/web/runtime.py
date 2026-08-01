@@ -5,7 +5,7 @@ from typing import Callable
 
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.services import ServiceContainer, build_services
-from trakt_tracker.config import ConfigStore
+from trakt_tracker.config import ConfigStore, get_app_data_dir, trakt_cache_provider
 from trakt_tracker.persistence.database import Database
 from trakt_tracker.profiles import mark_setup_complete, prepare_active_profile, register_active_profile
 
@@ -24,6 +24,7 @@ class ProfileOperationCoordinator:
         "imdb_",
         "search_enrichment",
         "tray_notification_poll",
+        "trakt_outbox",
     )
 
     def __init__(self) -> None:
@@ -42,6 +43,30 @@ class ProfileOperationCoordinator:
                 operations.publish(source, f"{source}: already running or queued.")
                 return False
             entry = (key, source, operations, fn)
+            if self._is_profile_write(key) and self._has_running_profile_write_locked():
+                self._pending.append(entry)
+                operations.publish(source, f"{source}: queued behind the active profile workflow.")
+                return True
+            self._running.add(key)
+        self._launch(entry)
+        return True
+
+    def start_coalesced(self, key: str, *, source: str, operations, fn: Callable[[], None]) -> bool:
+        entry = (key, source, operations, fn)
+        with self._lock:
+            if self._closed:
+                operations.publish(source, f"{source}: coordinator is shutting down.")
+                return False
+            for index, pending in enumerate(self._pending):
+                if pending[0] != key:
+                    continue
+                self._pending[index] = entry
+                operations.publish(source, f"{source}: updated queued work.")
+                return True
+            if key in self._running:
+                self._pending.append(entry)
+                operations.publish(source, f"{source}: queued one coalesced rerun.")
+                return True
             if self._is_profile_write(key) and self._has_running_profile_write_locked():
                 self._pending.append(entry)
                 operations.publish(source, f"{source}: queued behind the active profile workflow.")
@@ -195,10 +220,27 @@ class PortalRuntime:
         migration = prepare_active_profile(self.config_store)
         database = Database(migration.database_path)
         try:
-            database.create_schema()
+            config = self.config_store.load()
+            trakt_cache = get_app_data_dir() / "cache" / trakt_cache_provider(config.active_slug)
+            database.create_schema(pre_migration_cache=trakt_cache)
             if migration.copied_legacy_database:
                 mark_setup_complete(database, "Existing profile migrated and ready.")
             services = build_services(self.config_store, database)
+            def wake_outbox(active_services=services) -> None:
+                def drain_due() -> None:
+                    for _attempt in range(5):
+                        result = active_services.trakt_sync.drain(limit=20)
+                        if result.processed == 0 or result.delivered == 0:
+                            break
+
+                self.background_tasks.start_coalesced(
+                    "trakt_outbox_sync",
+                    source="Trakt sync queue",
+                    operations=active_services.operations,
+                    fn=drain_due,
+                )
+
+            services.trakt_sync.set_wake_callback(wake_outbox)
         except Exception:
             database.close()
             raise

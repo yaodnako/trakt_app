@@ -36,17 +36,25 @@
             </nav>{% endif %}
         </header>
 
-        {% if not setup_mode|default(false) and not suppress_auth_banner|default(false) and not configured %}
-        <section class="banner warning">
-            Trakt credentials are not configured yet. Save them in Settings to connect the portal.
-        </section>
-        {% elif not setup_mode|default(false) and not suppress_auth_banner|default(false) and not authorized %}
-        <section class="banner warning">
-            {% if reauthorization_required|default(false) %}
-            Trakt could not update your token automatically. Use Update Trakt token below.
-            {% else %}
-            Trakt is configured but not authorized. Open Settings and choose Authorize with Trakt.
-            {% endif %}
+        {% if not setup_mode|default(false) and not suppress_auth_banner|default(false) %}
+        {% set sync_status = trakt_sync_status|default({}) %}
+        {% set trakt_waiting = sync_status.get('pending', 0) + sync_status.get('blocked', 0) %}
+        <section
+            id="trakt-sync-banner"
+            class="banner warning"
+            data-trakt-sync-banner
+            data-pending-count="{{ trakt_waiting }}"
+            {% if sync_status.get('mode') == 'synced' %}hidden{% endif %}
+        >
+            <span data-trakt-sync-message>
+                {% if sync_status.get('mode') == 'attention' %}
+                Trakt sync needs attention — local mode. {{ trakt_waiting }} changes waiting to sync.
+                {% elif sync_status.get('mode') == 'syncing' %}
+                Trakt synchronization in progress. {{ trakt_waiting }} changes waiting to sync.
+                {% else %}
+                Trakt unavailable — local mode. {{ trakt_waiting }} changes waiting to sync.
+                {% endif %}
+            </span>
         </section>
         {% endif %}
 

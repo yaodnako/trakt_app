@@ -9,6 +9,11 @@ if (-not $SkipTests) {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+
+    node --test tests/test_ui_core_title_matrix_state.cjs tests/test_show_watch_panel_state.cjs
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 
 python -m ruff check trakt_tracker tests

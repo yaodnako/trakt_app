@@ -37,6 +37,10 @@ pythonw -m trakt_tracker.web_tray
 
 The first interactive launch opens the portal after the embedded server is ready. Later launches open the existing instance instead of starting another server. Use `--autostart` to start without opening a browser and `--quit` to stop the running instance.
 
+After a profile completes its first setup, it remains usable when Trakt or OAuth is unavailable. Trakt mutations commit locally and stay in that profile's durable SQLite sync queue until confirmed; Settings shows queue state and retry controls. TMDb, IMDb, Kinopoisk, and artwork work remain independent.
+
+Settings can optionally enable `TMDb preview`. That reversible mode changes only Search, Explore, and Releases; local TMDb card/episode actions survive restarts and are exported through the existing Trakt outbox after an identity mapping appears. History, Progress, and the existing Watchlist remain Trakt/local, and the preview cache/state has its own confirmed reset action.
+
 Helper scripts:
 
 - `run_trakt_tracker_web.bat`
@@ -50,7 +54,9 @@ python -m pip install -e ".[dev]"
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify.ps1
 ```
 
-The command runs `pytest`, Ruff and Pyright. To run only static checks, pass `-SkipTests`.
+Node.js 20 or newer must be available on `PATH` for the frontend regression tests.
+
+The command runs `pytest`, the Node frontend regression tests, Ruff, and Pyright. To run only static checks, pass `-SkipTests`.
 
 ## Build
 

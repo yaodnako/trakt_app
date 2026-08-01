@@ -1,12 +1,17 @@
 {% extends "base.html" %}
+{% set tmdb_preview = catalog_provider_mode|default('trakt') == 'tmdb_preview' %}
 
-{% macro release_card(item, is_released) %}
+{% macro release_card(item, is_released, is_notification_matured=false) %}
 {% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ (item.slug or item.trakt_id) %}
-<article class="result-card search-result-card release-tracking-card{% if is_released and not item.release_acknowledged %} is-unacknowledged{% endif %}" data-release-card>
+{% set tmdb_item = tmdb_preview and item.tmdb_id is defined and item.tmdb_id %}
+{% set mapped_to_trakt = not tmdb_item or item.trakt_id %}
+{% set provider_id = item.trakt_id if item.trakt_id else item.tmdb_id %}
+{% set title_url = item.source_url if tmdb_item else trakt_title_url %}
+<article class="result-card search-result-card release-tracking-card{% if is_released and not item.release_acknowledged %} is-unacknowledged{% endif %}{% if is_released and is_notification_matured and not item.release_acknowledged %} is-notification-due{% endif %}" data-release-card data-notification-matured="{{ 'true' if is_notification_matured else 'false' }}"{% if tmdb_item %} data-tmdb-card data-tmdb-id="{{ item.tmdb_id }}" data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id or '' }}"{% endif %}>
     <div class="search-result-side">
         <div class="search-result-title-stack">
             <h3 class="search-result-title{% if item.title|length > 18 %} is-long{% endif %}{% if item.title|length > 28 %} is-xlong{% endif %}">
-                <a href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">{{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}</a>
+                <a href="{{ title_url }}" target="_blank" rel="noreferrer">{{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}</a>
                 {% if item.title_type == 'movie' %}<img class="search-result-type-icon" src="{{ request.url_for('static', path='film.svg') }}" alt="Movie" title="Movie">{% endif %}
             </h3>
         </div>
@@ -15,9 +20,14 @@
             <button
                 type="button"
                 class="progress-poster search-result-poster search-watch-poster-trigger"
+                {% if tmdb_item and not mapped_to_trakt %}
+                data-tmdb-watch-panel
+                data-tmdb-id="{{ item.tmdb_id }}"
+                {% else %}
                 data-release-show-watch-trigger
                 data-watch-panel-url="/search/show/{{ item.trakt_id }}/watch-panel"
                 data-trakt-id="{{ item.trakt_id }}"
+                {% endif %}
                 data-title="{{ item.title }}"
                 aria-label="Open episode watch panel for {{ item.title }}"
             >
@@ -25,20 +35,31 @@
                 {% else %}<div class="poster-fallback">No poster</div>{% endif %}
             </button>
             {% else %}
-            <a class="progress-poster search-result-poster" href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">
+            <a class="progress-poster search-result-poster" href="{{ title_url }}" target="_blank" rel="noreferrer">
                 {% if item.poster_url %}<img src="{{ item.poster_url|cached_image_url }}" alt="{{ item.title }} poster" loading="lazy" decoding="async" fetchpriority="low">
                 {% else %}<div class="poster-fallback">No poster</div>{% endif %}
             </a>
             {% endif %}
-            <button type="button" class="icon-button search-card-action search-watchlist-button is-active" data-release-toggle data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id }}" title="Stop release tracking" aria-label="Stop tracking {{ item.title }}">
+            <button type="button" class="icon-button search-card-action search-watchlist-button is-active"{% if tmdb_item %} data-tmdb-release-toggle data-tmdb-tracked="true" data-tmdb-id="{{ item.tmdb_id }}"{% else %} data-release-toggle data-trakt-id="{{ item.trakt_id }}"{% endif %} data-title-type="{{ item.title_type }}" data-title="{{ item.title }}" data-released-at="{{ item.released_at.isoformat() if item.released_at else '' }}" title="Stop release tracking" aria-label="Stop tracking {{ item.title }}">
                 <img class="release-bell-icon" src="{{ request.url_for('static', path='notification_on.svg') }}" alt="" aria-hidden="true">
             </button>
             {% if is_released %}
-            <a class="icon-button search-card-action search-play-button" href="/search/{{ item.title_type }}/{{ item.trakt_id }}/play?title={{ item.title|urlencode }}" title="Play" aria-label="Play {{ item.title }}" target="_blank" rel="noreferrer"><img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true"></a>
-            <button type="button" class="icon-button search-card-action search-watch-title-button" data-release-watched data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id }}" data-title="{{ item.title }}" title="Mark watched" aria-label="Mark {{ item.title }} watched"><img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"></button>
-            <button type="button" class="icon-button search-card-action release-acknowledge-button{% if item.release_acknowledged %} is-active{% endif %}" data-release-acknowledge data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id }}" data-acknowledged="{{ 'true' if item.release_acknowledged else 'false' }}" title="{{ 'Resume notifications' if item.release_acknowledged else 'Acknowledge release' }}" aria-label="Acknowledge release for {{ item.title }}"><img src="{{ request.url_for('static', path='eye.svg') }}" alt="" aria-hidden="true"></button>
+            <a class="icon-button search-card-action search-play-button" href="/search/{{ item.title_type }}/{{ provider_id }}/play?title={{ item.title|urlencode }}" title="Play" aria-label="Play {{ item.title }}" target="_blank" rel="noreferrer"><img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true"></a>
+            <button
+                type="button"
+                class="icon-button search-card-action search-watch-title-button"
+                {% if tmdb_item and item.title_type == 'movie' %}
+                data-tmdb-watch-toggle data-tmdb-watched="{{ 'true' if item.is_in_history else 'false' }}" data-tmdb-id="{{ item.tmdb_id }}"
+                {% elif tmdb_item and not mapped_to_trakt %}
+                data-tmdb-watch-panel data-tmdb-id="{{ item.tmdb_id }}"
+                {% else %}
+                data-release-watched data-trakt-id="{{ item.trakt_id }}"
+                {% endif %}
+                data-title-type="{{ item.title_type }}" data-title="{{ item.title }}" title="Mark watched" aria-label="Mark {{ item.title }} watched"
+            ><img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"></button>
+            <button type="button" class="icon-button search-card-action release-acknowledge-button{% if item.release_acknowledged %} is-active{% endif %}"{% if tmdb_item %} data-tmdb-release-acknowledge data-tmdb-acknowledged="{{ 'true' if item.release_acknowledged else 'false' }}" data-tmdb-id="{{ item.tmdb_id }}"{% else %} data-release-acknowledge data-trakt-id="{{ item.trakt_id }}" data-acknowledged="{{ 'true' if item.release_acknowledged else 'false' }}"{% endif %} data-title-type="{{ item.title_type }}" title="{{ 'Resume notifications' if item.release_acknowledged else 'Acknowledge release' }}" aria-label="Acknowledge release for {{ item.title }}"><img src="{{ request.url_for('static', path='eye.svg') }}" alt="" aria-hidden="true"></button>
             {% endif %}
-            {% if item.title_type == 'show' %}
+            {% if item.title_type == 'show' and not tmdb_item %}
             <button
                 type="button"
                 class="poster-chip progress-title-chip search-title-ratings-chip anticipated-release-chip title-matrix-trigger"
@@ -52,8 +73,17 @@
             <div class="poster-chip progress-title-chip search-title-ratings-chip anticipated-release-chip" aria-label="Release timing, list count, and title ratings">
             {% endif %}
                 <span>{{ (item.released_at|dt) if is_released else (item.released_at|release_distance) }}</span>
+                {% if not tmdb_item %}
                 <span class="anticipated-list-count"><img src="{{ request.url_for('static', path='bookmark.svg') }}" alt="" aria-hidden="true"> {{ item.explore_metric_count|compact_votes if item.explore_metric_count is not none else '—' }}</span>
+                {% endif %}
                 {% if is_released %}
+                {% if tmdb_item %}
+                <span class="poster-chip-part anticipated-rating-part"><span>TMDb {{ item.tmdb_rating|round(1) if item.tmdb_rating is not none else 'n/a' }}{% if item.tmdb_votes is not none %} ({{ item.tmdb_votes|compact_votes }}){% endif %}</span></span>
+                <span class="poster-chip-part anticipated-rating-part">
+                    <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="imdb">
+                    <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
+                </span>
+                {% else %}
                 <span class="poster-chip-part anticipated-rating-part">
                     <img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt">
                     <span>{% if item.trakt_rating is not none %}{{ item.trakt_rating|rating_with_votes(item.trakt_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
@@ -63,7 +93,8 @@
                     <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
                 </span>
                 {% endif %}
-            {% if item.title_type == 'show' %}
+                {% endif %}
+            {% if item.title_type == 'show' and not tmdb_item %}
             </button>
             {% else %}
             </div>
@@ -80,15 +111,15 @@
 {% block content %}
 {% if error_message %}<section class="banner error">{{ error_message }}</section>{% endif %}
 
-<section class="release-tracking-section">
+<section class="release-tracking-section" data-catalog-provider="{{ 'tmdb_preview' if tmdb_preview else 'trakt' }}">
     <div class="section-head"><h2>Released</h2><p>{{ released|length }} title{% if released|length != 1 %}s{% endif %}</p></div>
-    {% if released %}<div class="search-results-grid">{% for item in released %}{{ release_card(item, true) }}{% endfor %}</div>
+    {% if released %}<div class="search-results-grid">{% for item in released %}{{ release_card(item, true, ((item.title_type ~ ':tmdb:' ~ item.tmdb_id) if tmdb_preview else (item.title_type ~ ':' ~ item.trakt_id)) in notification_matured_keys) }}{% endfor %}</div>
     {% elif not error_message %}<div class="empty-state"><p>No tracked titles have been released yet.</p></div>{% endif %}
 </section>
 
 <section class="release-tracking-section">
     <div class="section-head"><h2>Awaiting release</h2><p>{{ upcoming|length }} title{% if upcoming|length != 1 %}s{% endif %}</p></div>
-    {% if upcoming %}<div class="search-results-grid">{% for item in upcoming %}{{ release_card(item, false) }}{% endfor %}</div>
+    {% if upcoming %}<div class="search-results-grid">{% for item in upcoming %}{{ release_card(item, false, false) }}{% endfor %}</div>
     {% elif not error_message %}<div class="empty-state"><p>No upcoming tracked releases.</p></div>{% endif %}
 </section>
 
@@ -106,8 +137,14 @@
                     <span class="poster-chip-part"><img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt"><span data-search-watch-trakt-rating></span></span>
                     <span class="poster-chip-part"><img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="IMDb"><span data-search-watch-imdb-rating></span></span>
                 </button>
+                <button type="button" class="search-watch-scope-button search-watch-header-scope" data-search-watch-action data-search-watch-season-action data-search-watch-header-season-mark data-title-type="show" data-scope="season" hidden>
+                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"><span data-search-watch-header-season-label></span>
+                </button>
                 <button type="button" class="search-watch-scope-button search-watch-header-scope" data-search-watch-action data-search-watch-header-mark data-title-type="show" data-scope="title" hidden>
                     <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"><span>All</span>
+                </button>
+                <button type="button" class="search-watch-scope-button is-danger search-watch-header-scope" data-search-unwatch-action data-search-watch-season-action data-search-watch-header-season-unwatch data-title-type="show" data-scope="season" hidden>
+                    <span class="search-watch-action-glyphs" aria-hidden="true"><img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt=""><img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt=""></span><span data-search-watch-header-season-label></span>
                 </button>
                 <button type="button" class="search-watch-scope-button is-danger search-watch-header-scope" data-search-unwatch-action data-search-watch-header-unwatch data-title-type="show" data-scope="title" hidden>
                     <span class="search-watch-action-glyphs" aria-hidden="true"><img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt=""><img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt=""></span><span>All</span>
@@ -143,4 +180,5 @@
 </div>
 
 <script src="{{ request.url_for('static', path='release_tracking_page.js') }}?v={{ static_js_version }}"></script>
+{% if tmdb_preview %}<script src="{{ request.url_for('static', path='tmdb_preview.js') }}?v={{ static_js_version }}"></script>{% endif %}
 {% endblock %}

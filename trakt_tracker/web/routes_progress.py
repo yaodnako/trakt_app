@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -23,6 +24,7 @@ from trakt_tracker.application.metadata_refresh_policy import (
 from trakt_tracker.application.services import ServiceContainer
 from trakt_tracker.config import ConfigStore
 from trakt_tracker.domain import RatingInput
+from trakt_tracker.web.watch_follow_up import schedule_watch_follow_up
 from trakt_tracker.web.viewmodels import (
     DEFAULT_PROGRESS_SORT_DIRECTION,
     DEFAULT_PROGRESS_SORT_MODE,
@@ -30,7 +32,6 @@ from trakt_tracker.web.viewmodels import (
     normalize_progress_sort_direction,
     normalize_progress_sort_mode,
     parse_bool_flag,
-    parse_progress_year,
     PROGRESS_SORT_OPTIONS,
     ratings_refresh_due,
     TITLE_RATINGS_READY_REFRESH_SECONDS,
@@ -45,8 +46,6 @@ class _ProgressPageState:
     hide_upcoming: bool
     show_paused: bool
     show_dropped: bool
-    min_year: int | None
-    use_year_filter: bool
     sort_mode: str
     sort_direction: str
 
@@ -67,8 +66,6 @@ class _ProgressPageState:
             "hide_upcoming": self.hide_upcoming,
             "show_paused": self.show_paused,
             "show_dropped": self.show_dropped,
-            "min_year": self.min_year,
-            "use_year_filter": self.use_year_filter,
             "sort_mode": self.sort_mode,
             "sort_direction": self.sort_direction,
         }
@@ -83,8 +80,6 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
         show_dropped: str = "",
         sort: str = "",
         direction: str = "",
-        min_year: str = "",
-        use_year_filter: str = "",
         flash: str = "",
         rate_trakt_id: int | None = None,
         rate_season: int | None = None,
@@ -98,8 +93,6 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             hide_upcoming=hide_upcoming,
             show_paused=show_paused,
             show_dropped=show_dropped,
-            min_year=min_year,
-            use_year_filter=use_year_filter,
             sort_mode=sort,
             sort_direction=direction,
         )
@@ -118,12 +111,6 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             config_changed = True
         if getattr(config, "web_progress_sort_direction", DEFAULT_PROGRESS_SORT_DIRECTION) != state.sort_direction:
             config.web_progress_sort_direction = state.sort_direction
-            config_changed = True
-        if config.web_progress_min_year != state.min_year:
-            config.web_progress_min_year = state.min_year
-            config_changed = True
-        if config.web_progress_year_filter_enabled != state.use_year_filter:
-            config.web_progress_year_filter_enabled = state.use_year_filter
             config_changed = True
         if config_changed:
             ConfigStore().save(config)
@@ -160,8 +147,6 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             hide_upcoming=str(payload.get("hide_upcoming", "")),
             show_paused=str(payload.get("show_paused", "")),
             show_dropped=str(payload.get("show_dropped", "")),
-            min_year=str(payload.get("min_year", "")),
-            use_year_filter=str(payload.get("use_year_filter", "")),
             sort_mode=str(payload.get("sort", "")),
             sort_direction=str(payload.get("direction", "")),
         )
@@ -305,8 +290,6 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
         show_dropped: str = "",
         sort: str = "",
         direction: str = "",
-        min_year: str = "",
-        use_year_filter: str = "",
     ) -> RedirectResponse:
         services: ServiceContainer = request.app.state.services
         state = _parse_progress_query_state(
@@ -314,8 +297,6 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             hide_upcoming=hide_upcoming,
             show_paused=show_paused,
             show_dropped=show_dropped,
-            min_year=min_year,
-            use_year_filter=use_year_filter,
             sort_mode=sort,
             sort_direction=direction,
         )
@@ -347,16 +328,26 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
             )
         episode = current.next_episode
         services.operations.publish("Progress action", f"Mark watched: {current.title} S{episode.season:02d}E{episode.number:02d}")
-        services.interactions.mark_progress_episode_watched(current, watched_at=datetime.now())
-        watchlist_keys = services.catalog.watchlist_keys(title_type="show")
-        if ("show", current.trakt_id) in watchlist_keys:
-            services.catalog.set_watchlisted("show", current.trakt_id, watchlisted=False)
-        services.progress.sync_progress(
-            [current.trakt_id],
-            view=state.view,
-            sort_mode=state.sort_mode,
-            descending=state.descending,
-        )
+        try:
+            await asyncio.to_thread(
+                services.interactions.mark_progress_episode_watched,
+                current,
+                watched_at=datetime.now(),
+            )
+        except Exception as exc:
+            services.operations.publish("Progress action", f"Mark watched failed: {exc}")
+            return progress_redirect(
+                **state.context(),
+                flash=f"Watch failed: {exc}",
+            )
+        try:
+            schedule_watch_follow_up(
+                request.app,
+                title_type="show",
+                trakt_id=current.trakt_id,
+            )
+        except Exception as exc:
+            services.operations.publish("Progress warning", f"Watch follow-up scheduling failed: {exc}")
         return progress_redirect(
             **state.context(),
             flash=f"Marked {current.title} {episode.season:02d}x{episode.number:02d} watched.",
@@ -420,12 +411,13 @@ def register_progress_routes(app, *, render, progress_redirect) -> None:
                 flash = f"Rating failed: {exc}"
         else:
             flash = "Skipped rating."
-        services.progress.sync_progress(
-            [trakt_id],
-            view=state.view,
-            sort_mode=state.sort_mode,
-            descending=state.descending,
-        )
+        if getattr(services, "trakt_sync", None) is None:
+            services.progress.sync_progress(
+                [trakt_id],
+                view=state.view,
+                sort_mode=state.sort_mode,
+                descending=state.descending,
+            )
         return progress_redirect(
             **state.context(),
             flash=flash,
@@ -477,20 +469,13 @@ def _parse_progress_query_state(
     hide_upcoming: str,
     show_paused: str,
     show_dropped: str,
-    min_year: str,
-    use_year_filter: str,
     sort_mode: str,
     sort_direction: str,
 ) -> _ProgressPageState:
-    min_year_value = parse_progress_year(min_year)
-    if min_year_value is None:
-        min_year_value = config.web_progress_min_year
     return _make_progress_state(
         hide_upcoming=parse_bool_flag(hide_upcoming, config.hide_upcoming_in_progress),
         show_paused=parse_bool_flag(show_paused, getattr(config, "show_paused_in_progress", False)),
         show_dropped=parse_bool_flag(show_dropped, config.show_dropped_in_progress),
-        min_year=min_year_value,
-        use_year_filter=parse_bool_flag(use_year_filter, config.web_progress_year_filter_enabled),
         sort_mode=normalize_progress_sort_mode(
             sort_mode,
             getattr(config, "web_progress_sort_mode", DEFAULT_PROGRESS_SORT_MODE),
@@ -507,8 +492,6 @@ def _parse_progress_form_state(form) -> _ProgressPageState:
         hide_upcoming=parse_bool_flag(str(form.get("hide_upcoming", ""))),
         show_paused=parse_bool_flag(str(form.get("show_paused", ""))),
         show_dropped=parse_bool_flag(str(form.get("show_dropped", ""))),
-        min_year=parse_progress_year(str(form.get("min_year", ""))),
-        use_year_filter=parse_bool_flag(str(form.get("use_year_filter", ""))),
         sort_mode=normalize_progress_sort_mode(str(form.get("sort", ""))),
         sort_direction=normalize_progress_sort_direction(str(form.get("direction", ""))),
     )
@@ -519,8 +502,6 @@ def _make_progress_state(
     hide_upcoming: bool,
     show_paused: bool,
     show_dropped: bool,
-    min_year: int | None,
-    use_year_filter: bool,
     sort_mode: str,
     sort_direction: str,
 ) -> _ProgressPageState:
@@ -532,8 +513,6 @@ def _make_progress_state(
         hide_upcoming=hide_upcoming,
         show_paused=show_paused,
         show_dropped=show_dropped,
-        min_year=min_year,
-        use_year_filter=use_year_filter,
         sort_mode=normalize_progress_sort_mode(sort_mode),
         sort_direction=normalize_progress_sort_direction(sort_direction),
     )
@@ -565,8 +544,6 @@ def _load_progress_items(
         hide_upcoming=state.hide_upcoming,
         show_paused=state.show_paused,
         show_dropped=state.show_dropped,
-        min_year=state.min_year,
-        use_year_filter=state.use_year_filter,
     )
     unseen_episode_ids = services.notifications.unseen_episode_ids()
     new_items = [

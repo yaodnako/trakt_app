@@ -6,7 +6,7 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
     ENRICH_STATUS_UNKNOWN,
 )
-from trakt_tracker.domain import HistoryItemInput, RatingInput, TitleSummary
+from trakt_tracker.domain import EpisodeSummary, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
 
 
 UNDATED_HISTORY_AT = datetime(1970, 1, 1, tzinfo=UTC)
@@ -23,6 +23,8 @@ class HistoryService:
         episode_repo,
         history_read_model,
         episode_metadata,
+        trakt_outbox=None,
+        progress_repo=None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -32,6 +34,8 @@ class HistoryService:
         self._episode_repo = episode_repo
         self._history_read_model = history_read_model
         self._episode_metadata = episode_metadata
+        self._trakt_outbox = trakt_outbox
+        self._progress_repo = progress_repo
 
     def add_history_item(self, item: HistoryItemInput) -> None:
         self.add_history_items([item])
@@ -39,7 +43,9 @@ class HistoryService:
     def add_history_items(self, items: list[HistoryItemInput]) -> None:
         if not items:
             return
-        client = self._auth.get_client()
+        client = self._auth.get_client() if self._trakt_outbox is None else None
+        queued = False
+        projection_show_ids: set[int] = set()
         remote_items: list[HistoryItemInput] = []
         with self._db.session() as session:
             hydrated_show_ids: set[int] = set()
@@ -57,22 +63,23 @@ class HistoryService:
                 remote_item = item
                 if item.title_type == "show" and item.season is not None and item.episode is not None:
                     episode_row = self._episode_repo.find_episode(session, item.trakt_id, item.season, item.episode)
-                    if episode_row is None and item.trakt_id not in hydrated_show_ids:
+                    if episode_row is None and client is not None and item.trakt_id not in hydrated_show_ids:
                         episodes = client.get_show_episodes(item.trakt_id)
                         self._episode_repo.replace_show_episodes(session, item.trakt_id, episodes)
                         hydrated_show_ids.add(item.trakt_id)
                         episode_row = self._episode_repo.find_episode(session, item.trakt_id, item.season, item.episode)
-                    if episode_row is None or not episode_row.episode_trakt_id:
+                    if self._trakt_outbox is None and (episode_row is None or not episode_row.episode_trakt_id):
                         raise RuntimeError("Episode metadata was not found for the selected season/episode")
-                    remote_item = HistoryItemInput(
-                        title_type=item.title_type,
-                        trakt_id=episode_row.episode_trakt_id,
-                        watched_at=item.watched_at,
-                        season=item.season,
-                        episode=item.episode,
-                        title=item.title,
-                )
-                if existing_local is None and watched_at_known:
+                    if episode_row is not None and episode_row.episode_trakt_id:
+                        remote_item = HistoryItemInput(
+                            title_type=item.title_type,
+                            trakt_id=episode_row.episode_trakt_id,
+                            watched_at=item.watched_at,
+                            season=item.season,
+                            episode=item.episode,
+                            title=item.title,
+                        )
+                if existing_local is None and watched_at_known and self._trakt_outbox is None:
                     remote_items.append(remote_item)
                 title = self._titles.get_title(session, item.trakt_id)
                 if title is None:
@@ -102,22 +109,48 @@ class HistoryService:
                     episode=item.episode,
                     source="local",
                 )
+                if existing_local is None and watched_at_known and self._trakt_outbox is not None:
+                    operation_key = self._trakt_outbox.enqueue_history(
+                        session,
+                        title_type=item.title_type,
+                        trakt_id=item.trakt_id,
+                        title=title.title,
+                        desired_watched=True,
+                        base_watched=False,
+                        watched_at=local_watched_at,
+                        season=item.season,
+                        episode=item.episode,
+                        episode_trakt_id=(
+                            int(episode_row.episode_trakt_id)
+                            if item.title_type == "show" and episode_row is not None
+                            else None
+                        ),
+                    )
+                    queued = queued or operation_key is not None
+                if item.title_type == "show":
+                    projection_show_ids.add(int(item.trakt_id))
+            for show_id in projection_show_ids:
+                self._rebuild_local_progress(session, show_id)
             if remote_items:
+                assert client is not None
                 if hasattr(client, "add_history_items"):
                     client.add_history_items(remote_items)
                 else:
                     for remote_item in remote_items:
                         client.add_history_item(remote_item)
+        if queued:
+            self._trakt_outbox.wake()
 
     def remove_episode_watch(self, *, show_trakt_id: int, season: int, episode: int) -> dict:
-        client = self._auth.get_client()
+        client = self._auth.get_client() if self._trakt_outbox is None else None
+        queued = False
         with self._db.session() as session:
             episode_row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
-            if episode_row is None:
+            if episode_row is None and client is not None:
                 episodes = client.get_show_episodes(show_trakt_id)
                 self._episode_repo.replace_show_episodes(session, show_trakt_id, episodes)
                 episode_row = self._episode_repo.find_episode(session, show_trakt_id, season, episode)
-            if episode_row is None or not episode_row.episode_trakt_id:
+            if self._trakt_outbox is None and (episode_row is None or not episode_row.episode_trakt_id):
                 raise RuntimeError("Episode metadata was not found for the selected season/episode")
 
             previous = self._history.episode_watch(
@@ -132,18 +165,20 @@ class HistoryService:
             restore_watched_at_known = bool(previous.watched_at_known)
             restore_title = previous.title
 
-            client.remove_history_items(
-                [
-                    HistoryItemInput(
-                        title_type="show",
-                        trakt_id=int(episode_row.episode_trakt_id),
-                        watched_at=None,
-                        season=season,
-                        episode=episode,
-                        title=restore_title,
-                    )
-                ]
-            )
+            if self._trakt_outbox is None:
+                assert client is not None and episode_row is not None
+                client.remove_history_items(
+                    [
+                        HistoryItemInput(
+                            title_type="show",
+                            trakt_id=int(episode_row.episode_trakt_id),
+                            watched_at=None,
+                            season=season,
+                            episode=episode,
+                            title=restore_title,
+                        )
+                    ]
+                )
 
             self._history.remove_episode_watch(
                 session,
@@ -163,6 +198,27 @@ class HistoryService:
                 )
                 if latest is None:
                     state.tracked = False
+            if self._trakt_outbox is not None and restore_watched_at_known:
+                queued = self._trakt_outbox.enqueue_history(
+                    session,
+                    title_type="show",
+                    trakt_id=show_trakt_id,
+                    title=restore_title,
+                    desired_watched=False,
+                    base_watched=True,
+                    watched_at=restore_watched_at,
+                    season=season,
+                    episode=episode,
+                    episode_trakt_id=(
+                        int(episode_row.episode_trakt_id)
+                        if episode_row is not None and episode_row.episode_trakt_id
+                        else None
+                    ),
+                ) is not None
+            self._rebuild_local_progress(session, show_trakt_id)
+
+        if queued:
+            self._trakt_outbox.wake()
 
         normalized_watched_at = restore_watched_at
         if normalized_watched_at.tzinfo is None:
@@ -200,7 +256,8 @@ class HistoryService:
         if episode_keys is not None and (normalized_type != "show" or scope != "season"):
             raise RuntimeError("Episode-key scope is only supported for show seasons.")
 
-        client = self._auth.get_client()
+        client = self._auth.get_client() if self._trakt_outbox is None else None
+        queued = False
         with self._db.session() as session:
             if episode_keys is not None:
                 rows = self._history.watches_for_episode_keys(
@@ -238,28 +295,33 @@ class HistoryService:
                     key: self._episode_repo.find_episode(session, trakt_id, key[0], key[1])
                     for key in keys
                 }
-                if any(row is None or not row.episode_trakt_id for row in episode_rows.values()):
+                if client is not None and any(row is None or not row.episode_trakt_id for row in episode_rows.values()):
                     episodes = client.get_show_episodes(trakt_id)
                     self._episode_repo.replace_show_episodes(session, trakt_id, episodes)
                     episode_rows = {
                         key: self._episode_repo.find_episode(session, trakt_id, key[0], key[1])
                         for key in keys
                     }
-                if any(row is None or not row.episode_trakt_id for row in episode_rows.values()):
+                if self._trakt_outbox is None and any(
+                    row is None or not row.episode_trakt_id for row in episode_rows.values()
+                ):
                     raise RuntimeError("Episode metadata was not found for all watched episodes.")
-                remote_items.extend(
-                    HistoryItemInput(
-                        title_type="show",
-                        trakt_id=int(episode_rows[key].episode_trakt_id),
-                        watched_at=None,
-                        season=key[0],
-                        episode=key[1],
-                        title=rows[0].title,
+                if self._trakt_outbox is None:
+                    remote_items.extend(
+                        HistoryItemInput(
+                            title_type="show",
+                            trakt_id=int(episode_rows[key].episode_trakt_id),
+                            watched_at=None,
+                            season=key[0],
+                            episode=key[1],
+                            title=rows[0].title,
+                        )
+                        for key in sorted(keys)
                     )
-                    for key in sorted(keys)
-                )
 
-            client.remove_history_items(remote_items)
+            if self._trakt_outbox is None:
+                assert client is not None
+                client.remove_history_items(remote_items)
             if episode_keys is not None:
                 removed = self._history.remove_watches_for_episode_keys(
                     session,
@@ -294,6 +356,43 @@ class HistoryService:
                 title_type=normalized_type,
                 trakt_id=trakt_id,
             ) is not None
+            if self._trakt_outbox is not None:
+                latest_removed: dict[tuple[int | None, int | None], object] = {}
+                for row in removed:
+                    if not bool(row.watched_at_known):
+                        continue
+                    key = (row.season, row.episode)
+                    previous = latest_removed.get(key)
+                    if previous is None or row.watched_at > previous.watched_at:
+                        latest_removed[key] = row
+                for (row_season, row_episode), row in latest_removed.items():
+                    episode_row = (
+                        episode_rows.get((int(row_season), int(row_episode)))
+                        if normalized_type == "show" and row_season is not None and row_episode is not None
+                        else None
+                    )
+                    operation_key = self._trakt_outbox.enqueue_history(
+                        session,
+                        title_type=normalized_type,
+                        trakt_id=trakt_id,
+                        title=row.title,
+                        desired_watched=False,
+                        base_watched=True,
+                        watched_at=row.watched_at,
+                        season=row_season,
+                        episode=row_episode,
+                        episode_trakt_id=(
+                            int(episode_row.episode_trakt_id)
+                            if episode_row is not None and episode_row.episode_trakt_id
+                            else None
+                        ),
+                    )
+                    queued = queued or operation_key is not None
+            if normalized_type == "show":
+                self._rebuild_local_progress(session, trakt_id)
+
+        if queued:
+            self._trakt_outbox.wake()
 
         return {
             "kind": "scope",
@@ -313,6 +412,21 @@ class HistoryService:
             raise RuntimeError("Missing watched-history restore data.")
         if any(not bool(item.get("watched_at_known", True)) for item in items):
             raise RuntimeError("Cannot restore a Trakt watch with an unknown date.")
+        if self._trakt_outbox is not None:
+            self.add_history_items(
+                [
+                    HistoryItemInput(
+                        title_type="show" if item.get("title_type") == "show" else "movie",
+                        trakt_id=int(item["trakt_id"]),
+                        watched_at=item["watched_at"],
+                        season=int(item["season"]) if item.get("season") is not None else None,
+                        episode=int(item["episode"]) if item.get("episode") is not None else None,
+                        title=str(item.get("title") or ""),
+                    )
+                    for item in items
+                ]
+            )
+            return
         client = self._auth.get_client()
         with self._db.session() as session:
             remote_items: list[HistoryItemInput] = []
@@ -441,25 +555,30 @@ class HistoryService:
         )
 
     def set_rating(self, item: RatingInput, title: str = "") -> None:
-        client = self._auth.get_client()
+        client = self._auth.get_client() if self._trakt_outbox is None else None
+        queued = False
         with self._db.session() as session:
             remote_item = item
+            episode_row = None
             if item.title_type == "show" and item.season is not None and item.episode is not None:
                 episode_row = self._episode_repo.find_episode(session, item.trakt_id, item.season, item.episode)
-                if episode_row is None:
+                if episode_row is None and client is not None:
                     episodes = client.get_show_episodes(item.trakt_id)
                     self._episode_repo.replace_show_episodes(session, item.trakt_id, episodes)
                     episode_row = self._episode_repo.find_episode(session, item.trakt_id, item.season, item.episode)
-                if episode_row is None or not episode_row.episode_trakt_id:
+                if self._trakt_outbox is None and (episode_row is None or not episode_row.episode_trakt_id):
                     raise RuntimeError("Episode metadata was not found for the selected season/episode")
-                remote_item = RatingInput(
-                    title_type=item.title_type,
-                    trakt_id=episode_row.episode_trakt_id,
-                    rating=item.rating,
-                    season=item.season,
-                    episode=item.episode,
-                )
-            client.set_rating(remote_item)
+                if episode_row is not None and episode_row.episode_trakt_id:
+                    remote_item = RatingInput(
+                        title_type=item.title_type,
+                        trakt_id=episode_row.episode_trakt_id,
+                        rating=item.rating,
+                        season=item.season,
+                        episode=item.episode,
+                    )
+            if self._trakt_outbox is None:
+                assert client is not None
+                client.set_rating(remote_item)
             model = self._titles.get_title(session, item.trakt_id)
             if model is None:
                 model = self._titles.upsert_title(
@@ -470,8 +589,12 @@ class HistoryService:
                         title=title or f"{item.title_type.capitalize()} {item.trakt_id}",
                     ),
                 )
+            rated_map = self._history.latest_rated_map(session, title_type=item.title_type)
+            base_rating = rated_map.get((int(item.trakt_id), item.season, item.episode))
             if item.season is None and item.episode is None:
                 state = self._user_states.ensure_state(session, model.id)
+                if base_rating is None:
+                    base_rating = state.rating
                 state.rating = item.rating
             self._history.add_event(
                 session,
@@ -500,6 +623,24 @@ class HistoryService:
                     episode_row.trakt_details_status = ENRICH_STATUS_UNKNOWN
             else:
                 model.ratings_status = ENRICH_STATUS_UNKNOWN
+            if self._trakt_outbox is not None:
+                queued = self._trakt_outbox.enqueue_rating(
+                    session,
+                    title_type=item.title_type,
+                    trakt_id=item.trakt_id,
+                    rating=item.rating,
+                    base_rating=base_rating,
+                    title=model.title,
+                    season=item.season,
+                    episode=item.episode,
+                    episode_trakt_id=(
+                        int(episode_row.episode_trakt_id)
+                        if episode_row is not None and episode_row.episode_trakt_id
+                        else None
+                    ),
+                ) is not None
+        if queued:
+            self._trakt_outbox.wake()
 
     def history(
         self,
@@ -579,6 +720,85 @@ class HistoryService:
             if count:
                 badges[trakt_id] = total / count
         return badges
+
+    def _rebuild_local_progress(self, session, show_trakt_id: int) -> None:
+        if self._progress_repo is None:
+            return
+        watched_keys = self._history.watched_episode_keys(session, int(show_trakt_id))
+        if not watched_keys:
+            self._progress_repo.delete_progress(session, int(show_trakt_id))
+            return
+        rows = [
+            row
+            for row in self._episode_repo.list_show_episode_metadata(session, int(show_trakt_id))
+            if row.get("season") is not None
+            and row.get("number") is not None
+            and int(row["season"]) > 0
+        ]
+        if not rows:
+            return
+        now = datetime.now(tz=UTC)
+        aired_rows = []
+        for row in rows:
+            first_aired = row.get("first_aired")
+            if first_aired is None:
+                aired_rows.append(row)
+                continue
+            known = first_aired.replace(tzinfo=UTC) if first_aired.tzinfo is None else first_aired.astimezone(UTC)
+            if known <= now:
+                aired_rows.append(row)
+        completed = sum(
+            1
+            for row in aired_rows
+            if (int(row["season"]), int(row["number"])) in watched_keys
+        )
+        next_row = next(
+            (
+                row
+                for row in rows
+                if (int(row["season"]), int(row["number"])) not in watched_keys
+            ),
+            None,
+        )
+        last_row = next(
+            (
+                row
+                for row in reversed(rows)
+                if (int(row["season"]), int(row["number"])) in watched_keys
+            ),
+            None,
+        )
+        title = self._titles.get_title(session, int(show_trakt_id))
+        self._progress_repo.upsert_progress(
+            session,
+            ProgressSnapshot(
+                trakt_id=int(show_trakt_id),
+                title=str(title.title if title is not None else f"Show {show_trakt_id}"),
+                completed=completed,
+                aired=len(aired_rows),
+                percent_completed=(completed / len(aired_rows) * 100.0) if aired_rows else 0.0,
+                next_episode=self._progress_episode(next_row),
+                last_episode=self._progress_episode(last_row),
+            ),
+        )
+
+    @staticmethod
+    def _progress_episode(row: dict | None) -> EpisodeSummary | None:
+        if row is None or not int(row.get("episode_trakt_id") or 0):
+            return None
+        return EpisodeSummary(
+            trakt_id=int(row["episode_trakt_id"]),
+            season=int(row["season"]),
+            number=int(row["number"]),
+            title=str(row.get("title") or ""),
+            still_url=str(row.get("still_url") or ""),
+            trakt_rating=row.get("trakt_rating"),
+            trakt_votes=row.get("trakt_votes"),
+            imdb_id=str(row.get("imdb_id") or ""),
+            imdb_rating=row.get("imdb_rating"),
+            imdb_votes=row.get("imdb_votes"),
+            first_aired=row.get("first_aired"),
+        )
 
     def has_missing_visible_episode_details(self, rows: list[dict]) -> bool:
         return bool(self._episode_metadata.select_episode_enrich_keys(rows))

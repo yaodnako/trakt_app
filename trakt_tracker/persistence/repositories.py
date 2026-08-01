@@ -141,6 +141,14 @@ class TitleRepository:
             return {}
         return {int(row.trakt_id): row for row in session.scalars(select(Title).where(Title.trakt_id.in_(unique_ids)))}
 
+    def by_tmdb_id(self, session: Session, title_type: str, tmdb_id: int) -> Title | None:
+        return session.scalar(
+            select(Title).where(
+                Title.title_type == str(title_type),
+                Title.tmdb_id == int(tmdb_id),
+            )
+        )
+
     def update_poster_enrich_state(
         self,
         session: Session,
@@ -812,6 +820,39 @@ class HistoryRepository:
             if row.season is not None and row.episode is not None
         }
 
+    def watched_show_episode_keys(
+        self,
+        session: Session,
+        episode_keys: set[tuple[int, int, int]],
+    ) -> set[tuple[int, int, int]]:
+        normalized_keys = {
+            (int(trakt_id), int(season), int(episode))
+            for trakt_id, season, episode in episode_keys
+        }
+        if not normalized_keys:
+            return set()
+        rows = session.execute(
+            select(
+                HistoryEvent.title_trakt_id,
+                HistoryEvent.season,
+                HistoryEvent.episode,
+            )
+            .where(HistoryEvent.action == "watched")
+            .where(HistoryEvent.title_type == "show")
+            .where(
+                tuple_(
+                    HistoryEvent.title_trakt_id,
+                    HistoryEvent.season,
+                    HistoryEvent.episode,
+                ).in_(normalized_keys)
+            )
+        )
+        return {
+            (int(trakt_id), int(season), int(episode))
+            for trakt_id, season, episode in rows
+            if season is not None and episode is not None
+        }
+
     def watches_for_scope(
         self,
         session: Session,
@@ -985,6 +1026,27 @@ class HistoryRepository:
             .values(rating=None)
         )
         session.flush()
+
+    def delete_trakt_watches_for_identity(
+        self,
+        session: Session,
+        *,
+        title_type: str,
+        trakt_id: int,
+        season: int | None,
+        episode: int | None,
+    ) -> int:
+        result = session.execute(
+            delete(HistoryEvent)
+            .where(HistoryEvent.source == "trakt")
+            .where(HistoryEvent.action == "watched")
+            .where(HistoryEvent.title_type == title_type)
+            .where(HistoryEvent.title_trakt_id == int(trakt_id))
+            .where(HistoryEvent.season == season)
+            .where(HistoryEvent.episode == episode)
+        )
+        session.flush()
+        return int(getattr(result, "rowcount", 0) or 0)
 
     def known_trakt_history_ids(self, session: Session) -> set[int]:
         stmt = select(HistoryEvent.trakt_history_id).where(HistoryEvent.trakt_history_id.is_not(None))
@@ -1726,6 +1788,29 @@ class ReleaseTrackingRepository:
             row.title = item.title
             row.release_at = self._naive_utc(item.released_at)
         session.flush()
+
+    def upsert_local(
+        self,
+        session: Session,
+        *,
+        title_type: str,
+        trakt_id: int,
+        title: str = "",
+        release_at: datetime | None = None,
+        list_count: int | None = None,
+    ) -> ReleaseTrackingState:
+        row = self.get(session, title_type, trakt_id)
+        if row is None:
+            row = ReleaseTrackingState(title_type=title_type, trakt_id=int(trakt_id))
+            session.add(row)
+        if title:
+            row.title = title
+        if release_at is not None:
+            row.release_at = self._naive_utc(release_at)
+        if list_count is not None:
+            row.list_count = max(0, int(list_count))
+        session.flush()
+        return row
 
     def list_all(self, session: Session) -> list[ReleaseTrackingState]:
         return list(session.scalars(select(ReleaseTrackingState)))

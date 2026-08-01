@@ -31,8 +31,12 @@ def test_build_script_never_contains_provider_values() -> None:
 def test_verify_script_propagates_tool_failures() -> None:
     verify_script = (ROOT / "tools" / "verify.ps1").read_text(encoding="utf-8")
 
-    assert verify_script.count("if ($LASTEXITCODE -ne 0)") == 2
-    assert verify_script.count("exit $LASTEXITCODE") == 3
+    assert (
+        "node --test tests/test_ui_core_title_matrix_state.cjs tests/test_show_watch_panel_state.cjs"
+        in verify_script
+    )
+    assert verify_script.count("if ($LASTEXITCODE -ne 0)") == 3
+    assert verify_script.count("exit $LASTEXITCODE") == 4
 
 
 def test_portable_readme_describes_local_data_and_manual_updates() -> None:

@@ -1,4 +1,39 @@
 (() => {
+    function datasetOf(value) {
+        return value?.dataset || value || {};
+    }
+
+    function shouldFocusDefaultEpisode(panel) {
+        const data = datasetOf(panel);
+        return Number(data.searchWatchWatchedCount || "0") > 0
+            && Boolean(data.defaultEpisodeKey);
+    }
+
+    function readSeasonScopeState(panel, tab) {
+        const panelData = datasetOf(panel);
+        const tabData = datasetOf(tab);
+        const season = String(tabData.searchWatchSeasonTab || "");
+        return {
+            traktId: Number(panelData.searchWatchTraktId || "0"),
+            title: panelData.searchWatchTitle || "",
+            season,
+            label: tabData.searchWatchSeasonLabel || (season ? `S${season}` : ""),
+            seasonLayout: panelData.seasonLayout || "trakt",
+            canMark: Boolean(season && tabData.searchWatchSeasonCanMark === "1"),
+            canUnwatch: Boolean(season && tabData.searchWatchSeasonCanUnwatch === "1"),
+        };
+    }
+
+    if (typeof module !== "undefined" && module.exports && typeof document === "undefined") {
+        module.exports = Object.freeze({
+            configureSeasonScopeActions,
+            focusDefaultEpisode,
+            readSeasonScopeState,
+            shouldFocusDefaultEpisode,
+        });
+        return;
+    }
+
     function payloadFromElement(target) {
         return {
             title_type: target.dataset.titleType || "show",
@@ -225,10 +260,11 @@
         } else if (state.focusRole === "season-tab") {
             body.querySelector("[data-search-watch-season-tab].is-active")?.focus?.({preventScroll: true});
         } else if (state.focusRole === "season-watch" || state.focusRole === "season-unwatch") {
+            const actionRoot = body.closest?.(".search-watch-dialog") || body;
             const selector = state.focusRole === "season-unwatch"
-                ? "[data-search-watch-season-action][data-search-unwatch-action]:not(.is-hidden)"
-                : "[data-search-watch-season-action][data-search-watch-action]:not(.is-hidden)";
-            body.querySelector(selector)?.focus?.({preventScroll: true});
+                ? "[data-search-watch-header-season-unwatch]:not([hidden])"
+                : "[data-search-watch-header-season-mark]:not([hidden])";
+            actionRoot.querySelector(selector)?.focus?.({preventScroll: true});
         }
     }
 
@@ -248,15 +284,17 @@
             panel.classList.toggle("is-hidden", !active);
             panel.hidden = !active;
         });
-        body.querySelectorAll("[data-search-watch-season-action]").forEach((button) => {
-            button.classList.toggle("is-hidden", button.dataset.searchWatchSeasonAction !== String(season));
-        });
+        configureSeasonScopeActions(body.closest?.(".search-watch-overlay"), body);
     }
 
     function focusDefaultEpisode(body) {
         const panel = body?.querySelector("[data-search-watch-panel]");
+        if (!panel) return;
+        if (!shouldFocusDefaultEpisode(panel)) {
+            body.scrollTop = 0;
+            return;
+        }
         const key = panel?.dataset.defaultEpisodeKey || "";
-        if (!key) return;
         const target = Array.from(body.querySelectorAll(".search-watch-episode-card[data-episode-key]"))
             .find((node) => node.dataset.episodeKey === key);
         if (!target) return;
@@ -266,9 +304,9 @@
     }
 
     function focusUnwatchScope(body, overlay = null) {
-        const activeSeason = body?.querySelector("[data-search-watch-season-tab].is-active")?.dataset.searchWatchSeasonTab || "";
-        const seasonAction = Array.from(body?.querySelectorAll("[data-search-unwatch-action][data-scope='season']") || [])
-            .find((node) => node.dataset.season === activeSeason && !node.classList.contains("is-hidden"));
+        const seasonAction = overlay?.querySelector?.(
+            "[data-search-watch-header-season-unwatch]:not([hidden])",
+        );
         const target = seasonAction || overlay?.querySelector("[data-search-watch-header-unwatch]");
         target?.focus?.({preventScroll: true});
     }
@@ -291,8 +329,45 @@
         if (imdbRating) imdbRating.textContent = panel.dataset.searchWatchImdbRating || "Loading";
     }
 
+    function configureSeasonScopeAction(action, state, {visible, unwatch = false}) {
+        if (!action) return;
+        action.dataset.titleType = "show";
+        action.dataset.traktId = String(state.traktId);
+        action.dataset.title = state.title;
+        action.dataset.scope = "season";
+        action.dataset.season = state.season;
+        action.dataset.seasonLayout = state.seasonLayout;
+        action.dataset.searchWatchSeasonAction = state.season;
+        action.disabled = false;
+        action.hidden = !state.traktId || !visible;
+        const label = state.label || "this season";
+        action.title = unwatch
+            ? `Remove watched history for ${label}`
+            : `Mark all released episodes in ${label} watched`;
+        action.setAttribute("aria-label", action.title);
+        const labelNode = action.querySelector?.("[data-search-watch-header-season-label]");
+        if (labelNode) labelNode.textContent = state.label;
+    }
+
+    function configureSeasonScopeActions(overlay, body) {
+        const panel = body?.querySelector?.("[data-search-watch-panel]");
+        const tab = panel?.querySelector?.("[data-search-watch-season-tab].is-active");
+        const state = readSeasonScopeState(panel, tab);
+        configureSeasonScopeAction(
+            overlay?.querySelector?.("[data-search-watch-header-season-mark]"),
+            state,
+            {visible: state.canMark},
+        );
+        configureSeasonScopeAction(
+            overlay?.querySelector?.("[data-search-watch-header-season-unwatch]"),
+            state,
+            {visible: state.canUnwatch, unwatch: true},
+        );
+    }
+
     function configureScopeActions(overlay, trigger, body) {
         configureTitleRatings(overlay, body);
+        configureSeasonScopeActions(overlay, body);
         const panel = body?.querySelector?.("[data-search-watch-panel]");
         const traktId = Number(panel?.dataset.searchWatchTraktId || trigger?.dataset?.traktId || "0");
         const title = panel?.dataset.searchWatchTitle || trigger?.dataset?.title || "";

@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import subprocess
+from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
 from time import monotonic
 from typing import Any
@@ -15,7 +16,7 @@ from urllib.request import urlopen
 import httpx
 
 from trakt_tracker.domain import TitleSummary
-from trakt_tracker.infrastructure.cache import ProviderCache
+from trakt_tracker.infrastructure.cache import ProviderCache, ProviderCacheEntry
 from trakt_tracker.infrastructure.fragmented_https import request_with_fragmented_tls
 
 
@@ -36,12 +37,13 @@ class TMDbClient:
         *,
         timeout: float = 15.0,
         cache_ttl_hours: int = 24,
+        cache_provider: str = "tmdb",
     ) -> None:
         self.api_key = api_key.strip()
         self.read_access_token = read_access_token.strip()
         self._request_budget_seconds = max(1.0, float(timeout))
         self._client = httpx.Client(timeout=self._request_budget_seconds)
-        self._cache = ProviderCache("tmdb")
+        self._cache = ProviderCache(cache_provider)
         self._cache_ttl_hours = cache_ttl_hours
         self._direct_dns_loopback_only: bool | None = None
 
@@ -51,6 +53,9 @@ class TMDbClient:
     def close(self) -> None:
         """Release the persistent HTTP connection pool owned by this client."""
         self._client.close()
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
 
     def enrich_title(self, title: TitleSummary) -> TitleSummary:
         if not self.is_configured() or not title.tmdb_id:
@@ -123,7 +128,101 @@ class TMDbClient:
                 result[number] = f"{TMDB_STILL_IMAGE_BASE}{still_path}"
         return result
 
-    def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> Any:
+    def search_catalog(
+        self,
+        query: str,
+        *,
+        title_type: str | None = None,
+        page: int = 1,
+        language: str = "en-US",
+    ) -> dict[str, Any]:
+        """Read-only TMDb catalog search used by the optional preview provider."""
+        if not self.is_configured():
+            return {"page": 1, "total_pages": 0, "total_results": 0, "results": []}
+        media = "multi" if title_type not in {"movie", "show"} else ("movie" if title_type == "movie" else "tv")
+        return self._request(
+            "GET",
+            f"/search/{media}",
+            params={
+                "query": str(query or "").strip(),
+                "page": max(1, int(page)),
+                "include_adult": "false",
+                "language": language,
+            },
+            stale_fallback=True,
+        )
+
+    def trending_catalog(
+        self,
+        title_type: str,
+        *,
+        page: int = 1,
+        language: str = "en-US",
+    ) -> dict[str, Any]:
+        if not self.is_configured():
+            return {"page": 1, "total_pages": 0, "total_results": 0, "results": []}
+        media = "tv" if title_type == "show" else "movie"
+        return self._request(
+            "GET",
+            f"/trending/{media}/week",
+            params={"page": max(1, int(page)), "language": language},
+            stale_fallback=True,
+        )
+
+    def discover_catalog(
+        self,
+        title_type: str,
+        *,
+        page: int = 1,
+        upcoming: bool = False,
+        language: str = "en-US",
+    ) -> dict[str, Any]:
+        if not self.is_configured():
+            return {"page": 1, "total_pages": 0, "total_results": 0, "results": []}
+        media = "tv" if title_type == "show" else "movie"
+        params: dict[str, Any] = {
+            "page": max(1, int(page)),
+            "sort_by": "popularity.desc",
+            "include_adult": "false",
+            "include_video": "false",
+            "language": language,
+        }
+        if upcoming:
+            date_field = "first_air_date" if media == "tv" else "primary_release_date"
+            today = datetime.now(tz=UTC).date().isoformat()
+            params[f"{date_field}.gte"] = today
+            params[f"{date_field}.lte"] = (datetime.now(tz=UTC).date() + timedelta(days=730)).isoformat()
+            params["sort_by"] = f"{date_field}.asc"
+        return self._request("GET", f"/discover/{media}", params=params, stale_fallback=True)
+
+    def get_catalog_details(self, title_type: str, tmdb_id: int) -> dict[str, Any] | None:
+        if not self.is_configured():
+            return None
+        media = "tv" if title_type == "show" else "movie"
+        return self._request_optional(
+            "GET",
+            f"/{media}/{int(tmdb_id)}",
+            params={"append_to_response": "external_ids"},
+            stale_fallback=True,
+        )
+
+    def get_catalog_season(self, show_tmdb_id: int, season: int) -> dict[str, Any] | None:
+        if not self.is_configured():
+            return None
+        return self._request_optional(
+            "GET",
+            f"/tv/{int(show_tmdb_id)}/season/{int(season)}",
+            stale_fallback=True,
+        )
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        stale_fallback: bool = False,
+    ) -> Any:
         headers = {
             "Accept": "application/json",
         }
@@ -133,46 +232,81 @@ class TMDbClient:
         elif self.api_key:
             params["api_key"] = self.api_key
         cache_key = f"{method.upper()}|{path}|{repr(sorted(params.items()))}"
-        cached = self._cache.get_json(cache_key, self._cache_ttl_hours)
-        if cached is not None:
-            return cached
-        deadline = monotonic() + self._request_budget_seconds
-        if self._system_dns_is_loopback_only():
-            try:
-                payload = self._request_with_fragmented_tls(
-                    method,
-                    path,
-                    headers=headers,
-                    params=params,
-                    deadline=deadline,
-                )
-            except Exception:
-                payload = self._request_with_curl(
-                    method,
-                    path,
-                    headers=headers,
-                    params=params,
-                    deadline=deadline,
-                )
-        else:
-            try:
-                response = self._client.request(
-                    method,
-                    f"{TMDB_API_URL}{path}",
-                    headers=headers,
-                    params=params,
-                    timeout=self._attempt_timeout(deadline, TMDB_DIRECT_ATTEMPT_SECONDS),
-                )
-                response.raise_for_status()
-                payload = response.json()
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    raise
-                payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
-            except (httpx.HTTPError, ValueError):
-                payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
-        self._cache.set_json(cache_key, payload)
-        return payload
+        # Keep compatibility with the small cache doubles used by callers and
+        # older integrations that only expose ``get_json``.  A bare MagicMock
+        # returned by an unconfigured ``get_json_entry`` must not be treated as
+        # a real cache entry.
+        entry_reader = getattr(self._cache, "get_json_entry", None)
+        cached_entry = (
+            entry_reader(cache_key, ttl_hours=self._cache_ttl_hours)
+            if callable(entry_reader)
+            else None
+        )
+        if not isinstance(cached_entry, ProviderCacheEntry):
+            legacy_reader = getattr(self._cache, "get_json", None)
+            cached_value = (
+                legacy_reader(cache_key, ttl_hours=self._cache_ttl_hours)
+                if callable(legacy_reader)
+                else None
+            )
+            cached_entry = (
+                ProviderCacheEntry(value=cached_value, created_at=datetime.now(tz=UTC))
+                if cached_value is not None
+                else None
+            )
+        if cached_entry is not None:
+            return cached_entry.value
+        stale_entry = None
+        if stale_fallback:
+            candidate = (
+                entry_reader(cache_key, ttl_hours=None)
+                if callable(entry_reader)
+                else None
+            )
+            if isinstance(candidate, ProviderCacheEntry):
+                stale_entry = candidate
+        try:
+            deadline = monotonic() + self._request_budget_seconds
+            if self._system_dns_is_loopback_only():
+                try:
+                    payload = self._request_with_fragmented_tls(
+                        method,
+                        path,
+                        headers=headers,
+                        params=params,
+                        deadline=deadline,
+                    )
+                except Exception:
+                    payload = self._request_with_curl(
+                        method,
+                        path,
+                        headers=headers,
+                        params=params,
+                        deadline=deadline,
+                    )
+            else:
+                try:
+                    response = self._client.request(
+                        method,
+                        f"{TMDB_API_URL}{path}",
+                        headers=headers,
+                        params=params,
+                        timeout=self._attempt_timeout(deadline, TMDB_DIRECT_ATTEMPT_SECONDS),
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 404:
+                        raise
+                    payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
+                except (httpx.HTTPError, ValueError):
+                    payload = self._request_with_curl(method, path, headers=headers, params=params, deadline=deadline)
+            self._cache.set_json(cache_key, payload)
+            return payload
+        except Exception as exc:
+            if stale_entry is not None and self._can_stale_fallback(exc):
+                return stale_entry.value
+            raise
 
     def _system_dns_is_loopback_only(self) -> bool:
         if self._direct_dns_loopback_only is not None:
@@ -322,9 +456,16 @@ class TMDbClient:
     def _attempt_timeout(self, deadline: float, maximum: float) -> float:
         return max(0.1, min(float(maximum), self._remaining_timeout(deadline)))
 
-    def _request_optional(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> Any | None:
+    def _request_optional(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        stale_fallback: bool = False,
+    ) -> Any | None:
         try:
-            return self._request(method, path, params=params)
+            return self._request(method, path, params=params, stale_fallback=stale_fallback)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None
@@ -333,3 +474,21 @@ class TMDbClient:
             if exc.code == 404:
                 return None
             raise
+
+    @staticmethod
+    def _can_stale_fallback(exc: Exception) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code == 429 or exc.response.status_code >= 500
+        if isinstance(exc, HTTPError):
+            return exc.code == 429 or exc.code >= 500
+        return isinstance(
+            exc,
+            (
+                httpx.HTTPError,
+                TimeoutError,
+                OSError,
+                subprocess.SubprocessError,
+                ValueError,
+                json.JSONDecodeError,
+            ),
+        )

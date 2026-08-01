@@ -141,17 +141,6 @@ def parse_bool_flag(value: str | None, default: bool = False) -> bool:
     return default
 
 
-def parse_progress_year(value: str | None) -> int | None:
-    normalized = (value or "").strip()
-    if not normalized:
-        return None
-    try:
-        year = int(normalized)
-    except ValueError:
-        return None
-    return year if 1900 <= year <= 3000 else None
-
-
 def normalize_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -222,22 +211,12 @@ def filter_progress_items(
     hide_upcoming: bool,
     show_dropped: bool,
     show_paused: bool = False,
-    min_year: int | None = None,
-    use_year_filter: bool = False,
 ) -> list:
     filtered = items
     if show_dropped or show_paused:
         filtered = items
     elif hide_upcoming:
         filtered = [item for item in items if int(getattr(item, "completed", 0) or 0) < progress_effective_aired(item)]
-    if use_year_filter and min_year is not None:
-        filtered = [
-            item
-            for item in filtered
-            if getattr(getattr(item, "next_episode", None), "first_aired", None) is not None
-            and getattr(item.next_episode.first_aired, "year", None) is not None
-            and item.next_episode.first_aired.year >= min_year
-        ]
     return filtered
 
 
@@ -308,8 +287,6 @@ def progress_query_string(
     show_paused: bool = False,
     sort_mode: str = DEFAULT_PROGRESS_SORT_MODE,
     sort_direction: str = DEFAULT_PROGRESS_SORT_DIRECTION,
-    min_year: int | None = None,
-    use_year_filter: bool = False,
     flash: str = "",
     rate_trakt_id: int | None = None,
     rate_season: int | None = None,
@@ -322,10 +299,7 @@ def progress_query_string(
         "show_dropped": "1" if show_dropped else "0",
         "sort": normalize_progress_sort_mode(sort_mode),
         "direction": normalize_progress_sort_direction(sort_direction),
-        "use_year_filter": "1" if use_year_filter else "0",
     }
-    if min_year is not None:
-        params["min_year"] = str(min_year)
     if flash:
         params["flash"] = flash
     if rate_trakt_id is not None:

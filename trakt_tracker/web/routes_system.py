@@ -19,6 +19,7 @@ from trakt_tracker.config import (
     get_app_data_dir,
     normalize_kinopoisk_domain_options,
     normalize_kinopoisk_domain_tail,
+    normalize_catalog_provider_mode,
     normalize_utc_offset,
     resolved_tmdb_api_key,
     resolved_tmdb_read_access_token,
@@ -109,7 +110,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
                 services.database,
                 task_running=setup_task_running(request, services),
             )
-        if services.auth.is_authorized() and state.get("state") == "complete":
+        if state.get("state") == "complete":
             return RedirectResponse(url="/progress", status_code=302)
         config = services.auth.config
         return render(
@@ -240,6 +241,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
                 "credentials_source": trakt_credentials_source(config),
                 "trakt_configured": services.auth.is_configured(),
                 "tmdb_configured": bool(resolved_tmdb_api_key(config) or resolved_tmdb_read_access_token(config)),
+                "catalog_provider_mode": normalize_catalog_provider_mode(getattr(config, "catalog_provider_mode", "trakt")),
                 "kinopoisk_domain_options": normalize_kinopoisk_domain_options(getattr(config, "kinopoisk_domain_options", "")),
                 "imdb_sync_running": bg_tasks.is_running("imdb_manual_sync") or bg_tasks.is_running("imdb_auto_sync"),
                 "imdb_sync_status": request.app.state.services.sync.imdb_dataset_status(),
@@ -335,6 +337,9 @@ def register_system_routes(app, *, render, template_filters) -> None:
         config.imdb_auto_sync_interval_minutes = max(1, min(10080, imdb_auto_sync_interval_minutes))
         config.imdb_auto_sync_interval_hours = max(1, config.imdb_auto_sync_interval_minutes // 60 or 1)
         config.notification_sound_path = notification_sound_path
+        config.catalog_provider_mode = normalize_catalog_provider_mode(
+            str(form.get("catalog_provider_mode", getattr(config, "catalog_provider_mode", "trakt")) or "trakt")
+        )
         config.notifications_enabled = parse_bool_flag(str(form.get("notifications_enabled", "")))
         config.debug_mode = parse_bool_flag(str(form.get("debug_mode", "")))
         config.open_in_embedded_player = parse_bool_flag(str(form.get("open_in_embedded_player", "")))
@@ -349,6 +354,19 @@ def register_system_routes(app, *, render, template_filters) -> None:
         (runtime.config_store if runtime is not None else ConfigStore()).save(config)
         template_filters.utc_offset = config.utc_offset
         return RedirectResponse(url="/settings?flash=Settings+saved.", status_code=303)
+
+    @app.post("/settings/tmdb-preview/reset")
+    async def settings_tmdb_preview_reset(request: Request) -> RedirectResponse:
+        services: ServiceContainer = request.app.state.services
+        try:
+            payload = await request.json()
+        except Exception:
+            form = await request.form()
+            payload = dict(form)
+        if payload.get("confirm") is not True and str(payload.get("confirm", "")).casefold() not in {"1", "true", "yes", "on"}:
+            return RedirectResponse(url="/settings?flash=Explicit+confirmation+is+required.", status_code=303)
+        services.tmdb_catalog.clear()
+        return RedirectResponse(url="/settings?flash=TMDb+preview+state+and+cache+were+cleared.", status_code=303)
 
     @app.post("/settings/trakt-authorize")
     async def settings_trakt_authorize(request: Request) -> RedirectResponse:
@@ -366,6 +384,9 @@ def register_system_routes(app, *, render, template_filters) -> None:
             if state.get("state") != "complete":
                 start_initial_setup(request, services)
                 return_to = "/setup"
+            trakt_sync = getattr(services, "trakt_sync", None)
+            if trakt_sync is not None:
+                trakt_sync.wake()
             flash = f"Trakt authorized as {slug}."
         return RedirectResponse(url=with_flash(return_to, flash), status_code=303)
 
@@ -393,9 +414,6 @@ def register_system_routes(app, *, render, template_filters) -> None:
         if slug not in services.auth.config.known_profile_slugs:
             flash = "Unknown Trakt profile."
             return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
-        if not services.auth.has_token(slug):
-            flash = "Reconnect this Trakt profile before switching."
-            return RedirectResponse(url=f"/settings?flash={quote(flash)}", status_code=303)
         services = activate_services(request, slug)
         if read_setup_state(services.database).get("state") != "complete":
             return RedirectResponse(url="/setup", status_code=303)
@@ -410,8 +428,35 @@ def register_system_routes(app, *, render, template_filters) -> None:
             return RedirectResponse(url="/settings?flash=Unknown+Trakt+profile.", status_code=303)
         services.auth.disconnect(slug)
         if slug == services.auth.config.active_slug:
-            return RedirectResponse(url=f"/setup?flash={quote(f'{slug} disconnected. Profile data was preserved.')}", status_code=303)
+            return RedirectResponse(
+                url=f"/settings?flash={quote(f'{slug} disconnected. Local mode is active; profile data was preserved.')}",
+                status_code=303,
+            )
         return RedirectResponse(url=f"/settings?flash={quote(f'{slug} disconnected. Profile data was preserved.')}", status_code=303)
+
+    @app.get("/trakt-sync/status")
+    async def trakt_sync_status(request: Request) -> JSONResponse:
+        services: ServiceContainer = request.app.state.services
+        return JSONResponse(services.trakt_sync.status())
+
+    @app.post("/trakt-sync/retry")
+    async def trakt_sync_retry(request: Request) -> JSONResponse:
+        services: ServiceContainer = request.app.state.services
+        services.trakt_sync.retry()
+        return JSONResponse({"ok": True, **services.trakt_sync.status()})
+
+    @app.post("/trakt-sync/blocked/{item_id}/discard")
+    async def trakt_sync_discard_blocked(request: Request, item_id: int) -> JSONResponse:
+        services: ServiceContainer = request.app.state.services
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if payload.get("confirm") is not True:
+            return JSONResponse({"ok": False, "message": "Explicit confirmation is required."}, status_code=400)
+        if not services.trakt_sync.discard_blocked(item_id):
+            return JSONResponse({"ok": False, "message": "Blocked queue item was not found."}, status_code=404)
+        return JSONResponse({"ok": True, **services.trakt_sync.status()})
 
     @app.post("/settings/imdb-sync")
     async def settings_imdb_sync(request: Request) -> RedirectResponse:
@@ -654,10 +699,11 @@ def register_system_routes(app, *, render, template_filters) -> None:
     @app.get("/notifications/poll")
     async def notifications_poll(request: Request) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
-        if not services.auth.is_authorized():
-            return JSONResponse({"items": [], "activity_seq": None})
         try:
-            items = services.notifications.poll_upcoming(send_native=False)
+            items = services.notifications.poll_upcoming(
+                send_native=False,
+                refresh_remote=services.auth.is_authorized(),
+            )
         except Exception:
             items = []
         activity_seq = services.notifications.record_activity(items) if items else None
@@ -666,14 +712,6 @@ def register_system_routes(app, *, render, template_filters) -> None:
     @app.get("/notifications/activity")
     async def notification_activity(request: Request, after: int = 0) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
-        if not services.auth.is_authorized():
-            return JSONResponse(
-                {
-                    "events": [],
-                    "seq": services.notifications.current_activity_seq(),
-                    "pending_sources": [],
-                }
-            )
         return JSONResponse(
             {
                 "events": services.notifications.activity_after(after),

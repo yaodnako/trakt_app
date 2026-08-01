@@ -165,7 +165,7 @@
         if (watchTitle) {
             watchTitle.textContent = trigger.dataset.title || "Episodes";
         }
-        window.traktShowWatchPanel?.configureTitleRatings(watchOverlay, null);
+        window.traktShowWatchPanel?.configureScopeActions(watchOverlay, trigger, null);
         window.traktShowWatchPanel?.configurePlayAction(watchOverlay, trigger);
         openOverlay(watchOverlay);
         await loadWatchPanel("", {focusDefault: trigger.dataset.unwatchFocus !== "true"});
@@ -351,6 +351,9 @@
                     title_type: button.dataset.titleType || "",
                     trakt_id: Number(button.dataset.traktId || "0"),
                     watchlisted: nextState,
+                    title: button.dataset.title || "",
+                    released_at: button.dataset.releasedAt || "",
+                    list_count: Number(button.dataset.listCount || "0") || null,
                 }),
             });
             const result = await response.json();
@@ -386,6 +389,8 @@
                     trakt_id: Number(button.dataset.traktId || "0"),
                     tracked: nextState,
                     list_count: Number(button.dataset.listCount || "0") || null,
+                    title: button.dataset.title || "",
+                    released_at: button.dataset.releasedAt || "",
                 }),
             });
             const result = await response.json();

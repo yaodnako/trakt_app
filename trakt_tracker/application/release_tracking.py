@@ -11,7 +11,18 @@ from trakt_tracker.infrastructure.notifications import NotificationMessage
 
 
 class ReleaseTrackingService:
-    def __init__(self, db, auth_service, config_store, repository, progress_repository, sender, *, titles=None) -> None:
+    def __init__(
+        self,
+        db,
+        auth_service,
+        config_store,
+        repository,
+        progress_repository,
+        sender,
+        *,
+        titles=None,
+        trakt_outbox=None,
+    ) -> None:
         self._db = db
         self._auth = auth_service
         self._config_store = config_store
@@ -19,6 +30,7 @@ class ReleaseTrackingService:
         self._progress_repository = progress_repository
         self._sender = sender
         self._titles = titles
+        self._trakt_outbox = trakt_outbox
         self._list_count_refresh_lock = Lock()
         self._list_count_refreshed_at = 0.0
         self._notification_state_callback: Callable[[], None] | None = None
@@ -31,7 +43,32 @@ class ReleaseTrackingService:
             self._notification_state_callback()
 
     def refresh(self) -> list:
-        items = self._auth.get_client().get_release_tracking()
+        fetch = self._auth.get_client().get_release_tracking
+        try:
+            items = fetch(authoritative=True)
+        except TypeError as exc:
+            if "authoritative" not in str(exc):
+                raise
+            items = fetch()
+        if self._trakt_outbox is not None:
+            by_key = {(item.title_type, int(item.trakt_id)): item for item in items}
+            for payload, desired_member in self._trakt_outbox.membership_intents(operation_type="release"):
+                key = (str(payload.get("title_type") or ""), int(payload.get("trakt_id") or 0))
+                if not desired_member:
+                    by_key.pop(key, None)
+                    continue
+                if key not in by_key:
+                    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+                    by_key[key] = TitleSummary(
+                        trakt_id=key[1],
+                        title_type="show" if key[0] == "show" else "movie",
+                        title=str(snapshot.get("title") or f"{key[0].capitalize()} {key[1]}"),
+                        released_at=self._parse_datetime(snapshot.get("released_at")),
+                        explore_metric_kind="lists",
+                        explore_metric_count=self._optional_int(snapshot.get("list_count")),
+                        is_release_tracked=True,
+                    )
+            items = list(by_key.values())
         with self._db.session() as session:
             if self._titles is not None:
                 for item in items:
@@ -130,15 +167,73 @@ class ReleaseTrackingService:
         with self._db.session() as session:
             return {(row.title_type, int(row.trakt_id)) for row in self._repository.list_all(session)}
 
-    def set_tracked(self, title_type: str, trakt_id: int, *, tracked: bool, list_count: int | None = None) -> bool:
-        self._auth.get_client().set_release_tracking(title_type, trakt_id, tracked=tracked)
-        if not tracked:
-            with self._db.session() as session:
+    def set_tracked(
+        self,
+        title_type: str,
+        trakt_id: int,
+        *,
+        tracked: bool,
+        list_count: int | None = None,
+        title: str = "",
+        released_at: datetime | str | None = None,
+        dependency_key: str | None = None,
+        origin: str = "user",
+    ) -> bool:
+        if self._trakt_outbox is None:
+            self._auth.get_client().set_release_tracking(title_type, trakt_id, tracked=tracked)
+            if not tracked:
+                with self._db.session() as session:
+                    self._repository.delete(session, title_type, trakt_id)
+            else:
+                self.refresh()
+                with self._db.session() as session:
+                    self._repository.set_list_count(session, title_type, trakt_id, list_count)
+            self._notify_notification_state_changed()
+            return tracked
+
+        release_at = self._parse_datetime(released_at)
+        queued = False
+        with self._db.session() as session:
+            base_member = self._repository.get(session, title_type, trakt_id) is not None
+            if tracked:
+                self._repository.upsert_local(
+                    session,
+                    title_type=title_type,
+                    trakt_id=trakt_id,
+                    title=title,
+                    release_at=release_at,
+                    list_count=list_count,
+                )
+                if self._titles is not None and title:
+                    self._titles.upsert_title(
+                        session,
+                        TitleSummary(
+                            trakt_id=int(trakt_id),
+                            title_type="show" if title_type == "show" else "movie",
+                            title=title,
+                            released_at=release_at,
+                        ),
+                    )
+            else:
                 self._repository.delete(session, title_type, trakt_id)
-        else:
-            self.refresh()
-            with self._db.session() as session:
-                self._repository.set_list_count(session, title_type, trakt_id, list_count)
+            operation_key = self._trakt_outbox.enqueue_membership(
+                session,
+                operation_type="release",
+                title_type=title_type,
+                trakt_id=trakt_id,
+                base_member=base_member,
+                desired_member=tracked,
+                snapshot={
+                    "title": title,
+                    "released_at": release_at.isoformat() if release_at is not None else "",
+                    "list_count": list_count,
+                },
+                dependency_key=dependency_key,
+                origin=origin,
+            )
+            queued = operation_key is not None
+        if queued:
+            self._trakt_outbox.wake()
         self._notify_notification_state_changed()
         return tracked
 
@@ -148,9 +243,15 @@ class ReleaseTrackingService:
         self._notify_notification_state_changed()
         return result
 
-    def poll(self, *, send_native: bool = True) -> list[dict]:
+    def poll(
+        self,
+        *,
+        send_native: bool = True,
+        refresh_remote: bool = True,
+    ) -> list[dict]:
         config = self._config_store.load()
-        self.refresh()
+        if refresh_remote:
+            self.refresh()
         if not config.notifications_enabled:
             return []
         now = datetime.now(tz=UTC)
@@ -161,12 +262,7 @@ class ReleaseTrackingService:
                 release_at = self._as_utc(row.release_at)
                 if release_at is None or release_at > now or row.acknowledged_at is not None:
                     continue
-                delay_minutes = (
-                    int(getattr(config, "movie_release_notification_delay_minutes", 10080) or 0)
-                    if row.title_type == "movie"
-                    else int(getattr(config, "notification_release_delay_minutes", 120) or 0)
-                )
-                if now < release_at + timedelta(minutes=max(0, delay_minutes)):
+                if now < release_at + self._notification_delay(config, row.title_type):
                     continue
                 last_sent = self._as_utc(row.last_sent_at)
                 if last_sent is not None and now - last_sent < repeat:
@@ -190,14 +286,20 @@ class ReleaseTrackingService:
                 release_at = self._as_utc(row.release_at)
                 if release_at is None or row.acknowledged_at is not None:
                     continue
-                delay_minutes = (
-                    int(getattr(config, "movie_release_notification_delay_minutes", 10080) or 0)
-                    if row.title_type == "movie"
-                    else int(getattr(config, "notification_release_delay_minutes", 120) or 0)
-                )
-                if now >= release_at + timedelta(minutes=max(0, delay_minutes)):
+                if now >= release_at + self._notification_delay(config, row.title_type):
                     return True
             return False
+
+    def matured_release_keys(self) -> set[tuple[str, int]]:
+        now = datetime.now(tz=UTC)
+        config = self._config_store.load()
+        with self._db.session() as session:
+            return {
+                (str(row.title_type), int(row.trakt_id))
+                for row in self._repository.list_all(session)
+                if (release_at := self._as_utc(row.release_at)) is not None
+                and now >= release_at + self._notification_delay(config, row.title_type)
+            }
 
     def progress_waiting_count(self) -> int:
         now = datetime.now(tz=UTC)
@@ -220,14 +322,6 @@ class ReleaseTrackingService:
                         else 0,
                     )
                 ]
-            if bool(getattr(config, "web_progress_year_filter_enabled", False)) and getattr(config, "web_progress_min_year", None) is not None:
-                minimum_year = int(config.web_progress_min_year)
-                items = [
-                    item for item in items
-                    if item.next_episode is not None
-                    and item.next_episode.first_aired is not None
-                    and item.next_episode.first_aired.year >= minimum_year
-                ]
             return sum(
                 1
                 for item in items
@@ -245,7 +339,35 @@ class ReleaseTrackingService:
         return value.astimezone(UTC)
 
     @staticmethod
+    def _notification_delay(config, title_type: str) -> timedelta:
+        delay_minutes = (
+            int(getattr(config, "movie_release_notification_delay_minutes", 10080) or 0)
+            if title_type == "movie"
+            else int(getattr(config, "notification_release_delay_minutes", 120) or 0)
+        )
+        return timedelta(minutes=max(0, delay_minutes))
+
+    @staticmethod
     def _known_utc(value: datetime) -> datetime:
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
+
+    @staticmethod
+    def _parse_datetime(value) -> datetime | None:
+        if isinstance(value, datetime):
+            return value
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _optional_int(value) -> int | None:
+        try:
+            return int(value) if value is not None and str(value).strip() else None
+        except (TypeError, ValueError):
+            return None

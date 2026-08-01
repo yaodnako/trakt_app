@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -13,13 +14,24 @@ from typing import Any
 from trakt_tracker.config import get_app_data_dir
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderCacheEntry:
+    value: Any
+    created_at: datetime
+
+
 class ProviderCache:
     def __init__(self, provider: str) -> None:
         self.provider = provider
         self._dir = get_app_data_dir() / "cache" / provider
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._write_lock = Lock()
 
     def get_json(self, key: str, ttl_hours: int) -> Any | None:
+        entry = self.get_json_entry(key, ttl_hours=ttl_hours)
+        return entry.value if entry is not None else None
+
+    def get_json_entry(self, key: str, *, ttl_hours: int | None = None) -> ProviderCacheEntry | None:
         path = self._path_for_key(key)
         if not path.exists():
             return None
@@ -34,9 +46,29 @@ class ProviderCache:
             created_at = datetime.fromisoformat(created_at_raw)
         except ValueError:
             return None
-        if datetime.now(tz=UTC) - created_at > timedelta(hours=ttl_hours):
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        if ttl_hours is not None and datetime.now(tz=UTC) - created_at > timedelta(hours=ttl_hours):
             return None
-        return payload.get("value")
+        return ProviderCacheEntry(value=payload.get("value"), created_at=created_at)
+
+    def latest_created_at(self) -> datetime | None:
+        latest: datetime | None = None
+        try:
+            paths = self._dir.glob("*.json")
+            for path in paths:
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    created_at = datetime.fromisoformat(str(payload.get("created_at") or ""))
+                except (OSError, ValueError, json.JSONDecodeError):
+                    continue
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=UTC)
+                if latest is None or created_at > latest:
+                    latest = created_at
+        except OSError:
+            return latest
+        return latest
 
     def set_json(self, key: str, value: Any) -> None:
         path = self._path_for_key(key)
@@ -44,7 +76,8 @@ class ProviderCache:
             "created_at": datetime.now(tz=UTC).isoformat(),
             "value": value,
         }
-        _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        with self._write_lock:
+            _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     def clear(self) -> None:
         if self._dir.exists():
@@ -76,6 +109,7 @@ class BinaryCache:
         self.provider = provider
         self._dir = get_app_data_dir() / "cache" / provider
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._write_lock = Lock()
         self._index_lock = Lock()
         self._index: dict[str, tuple[Path, ...]] | None = None
 

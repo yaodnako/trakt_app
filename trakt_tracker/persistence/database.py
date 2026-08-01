@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -13,7 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .models import Base
 
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 7
 
 
 class Database:
@@ -38,7 +39,7 @@ class Database:
         finally:
             cursor.close()
 
-    def create_schema(self) -> None:
+    def create_schema(self, *, pre_migration_cache: Path | None = None) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with _exclusive_file_lock(self._path.with_name(f".{self._path.name}.schema.lock")):
             existed_before_open = self._path.exists()
@@ -47,6 +48,8 @@ class Database:
             current_version = self._current_schema_version()
             if current_version < LATEST_SCHEMA_VERSION and existed_before_open:
                 self._backup_before_migration()
+                if pre_migration_cache is not None:
+                    self._backup_cache_before_migration(pre_migration_cache)
             Base.metadata.create_all(self._engine)
             self._ensure_schema_migration_table()
             current_version = self._current_schema_version()
@@ -99,6 +102,23 @@ class Database:
             destination.close()
             source.close()
         os.replace(temporary, backup_path)
+
+    @staticmethod
+    def _backup_cache_before_migration(cache_path: Path) -> None:
+        source = Path(cache_path)
+        if not source.is_dir():
+            return
+        backup_path = source.with_name(f"{source.name}.pre-migration.bak")
+        if backup_path.exists():
+            return
+        temporary = backup_path.with_name(f".{backup_path.name}.{os.getpid()}.tmp")
+        shutil.rmtree(temporary, ignore_errors=True)
+        shutil.copytree(source, temporary)
+        try:
+            os.replace(temporary, backup_path)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
 
     def _apply_migrations(self) -> None:
         additions = {

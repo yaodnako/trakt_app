@@ -33,6 +33,17 @@ class TraktError(RuntimeError):
     pass
 
 
+class TraktRequestError(TraktError):
+    def __init__(self, status_code: int, response_text: str) -> None:
+        self.status_code = int(status_code)
+        self.response_text = str(response_text or "")
+        super().__init__(f"Trakt request failed: {self.status_code} {self.response_text}")
+
+
+class TraktMutationUncertain(TraktError):
+    pass
+
+
 class TraktReauthorizationRequired(TraktError):
     pass
 
@@ -174,6 +185,9 @@ class TraktClient:
 
     def clear_cache(self) -> None:
         self._cache.clear()
+
+    def last_good_cache_at(self) -> datetime | None:
+        return self._cache.latest_created_at()
 
     def exchange_code(self, code: str) -> OAuthTokens:
         payload = {
@@ -340,7 +354,6 @@ class TraktClient:
         data = self._request(
             "GET",
             f"/{collection}/{int(trakt_id)}/translations/{language.strip().casefold()}",
-            use_cache=False,
         )
         if not isinstance(data, list):
             return []
@@ -365,7 +378,6 @@ class TraktClient:
             "GET",
             endpoint,
             params=params,
-            use_cache=False,
             include_headers=True,
         )
         result: list[TitleSummary] = []
@@ -428,7 +440,6 @@ class TraktClient:
             "GET",
             f"/{title_type}s/{feed}",
             params=params,
-            use_cache=False,
             include_headers=True,
         )
         rows = payload if isinstance(payload, list) else []
@@ -537,11 +548,23 @@ class TraktClient:
             return None
         return self._parse_episode(payload, season)
 
-    def get_watch_history(self, title_type: str | None = None, limit: int = 100, page: int = 1) -> list[dict[str, Any]]:
+    def get_watch_history(
+        self,
+        title_type: str | None = None,
+        limit: int = 100,
+        page: int = 1,
+        *,
+        authoritative: bool = False,
+    ) -> list[dict[str, Any]]:
         endpoint = "/sync/history"
         if title_type:
             endpoint = f"/sync/history/{title_type}s"
-        return self._request("GET", endpoint, params={"limit": limit, "page": page, "extended": "full"})
+        return self._request(
+            "GET",
+            endpoint,
+            params={"limit": limit, "page": page, "extended": "full"},
+            use_cache=not authoritative,
+        )
 
     def get_watch_history_page(
         self,
@@ -561,20 +584,32 @@ class TraktClient:
         )
         return (payload if isinstance(payload, list) else []), headers
 
-    def get_ratings(self, title_type: str | None = None, limit: int = 100, page: int = 1) -> list[dict[str, Any]]:
+    def get_ratings(
+        self,
+        title_type: str | None = None,
+        limit: int = 100,
+        page: int = 1,
+        *,
+        authoritative: bool = False,
+    ) -> list[dict[str, Any]]:
         endpoint = "/sync/ratings"
         if title_type:
             endpoint = f"/sync/ratings/{title_type}s"
-        return self._request("GET", endpoint, params={"limit": limit, "page": page, "extended": "full"})
+        return self._request(
+            "GET",
+            endpoint,
+            params={"limit": limit, "page": page, "extended": "full"},
+            use_cache=not authoritative,
+        )
 
-    def get_watchlist(self) -> list[TitleSummary]:
+    def get_watchlist(self, *, authoritative: bool = False) -> list[TitleSummary]:
         data = []
         for item_type in ("movies", "shows"):
             payload = self._request(
                 "GET",
                 f"/sync/watchlist/{item_type}",
                 params={"extended": "full", "limit": 1000},
-                use_cache=False,
+                use_cache=not authoritative,
             )
             if isinstance(payload, list):
                 data.extend(payload)
@@ -618,13 +653,13 @@ class TraktClient:
         endpoint = "/sync/watchlist" if watchlisted else "/sync/watchlist/remove"
         return self._request("POST", endpoint, json={key: [{"ids": {"trakt": trakt_id}}]})
 
-    def get_release_tracking(self) -> list[TitleSummary]:
-        list_id = self._release_tracking_list_id()
+    def get_release_tracking(self, *, authoritative: bool = False) -> list[TitleSummary]:
+        list_id = self._release_tracking_list_id(authoritative=authoritative)
         payload = self._request(
             "GET",
             f"/users/me/lists/{list_id}/items",
             params={"extended": "full", "limit": 1000},
-            use_cache=False,
+            use_cache=not authoritative,
         )
         result: list[TitleSummary] = []
         for item in payload if isinstance(payload, list) else []:
@@ -661,7 +696,7 @@ class TraktClient:
     def set_release_tracking(self, title_type: str, trakt_id: int, *, tracked: bool) -> dict[str, Any]:
         if title_type not in {"movie", "show"}:
             raise ValueError("Unsupported title type")
-        list_id = self._release_tracking_list_id()
+        list_id = self._release_tracking_list_id(authoritative=True)
         key = "movies" if title_type == "movie" else "shows"
         suffix = "items" if tracked else "items/remove"
         return self._request(
@@ -670,8 +705,8 @@ class TraktClient:
             json={key: [{"ids": {"trakt": int(trakt_id)}}]},
         )
 
-    def _release_tracking_list_id(self) -> str:
-        payload = self._request("GET", "/users/me/lists", use_cache=False)
+    def _release_tracking_list_id(self, *, authoritative: bool = False) -> str:
+        payload = self._request("GET", "/users/me/lists", use_cache=not authoritative)
         for item in payload if isinstance(payload, list) else []:
             if not isinstance(item, dict) or str(item.get("name", "") or "").strip().casefold() != "release_tracking":
                 continue
@@ -692,20 +727,32 @@ class TraktClient:
         except ValueError:
             return None
 
-    def get_paused_shows(self, limit: int = 100, page: int = 1) -> list[dict[str, Any]]:
+    def get_paused_shows(
+        self,
+        limit: int = 100,
+        page: int = 1,
+        *,
+        authoritative: bool = False,
+    ) -> list[dict[str, Any]]:
         return self._request(
             "GET",
             "/users/hidden/progress_watched",
             params={"type": "show", "limit": limit, "page": page},
-            use_cache=False,
+            use_cache=not authoritative,
         )
 
-    def get_dropped_shows(self, limit: int = 100, page: int = 1) -> list[dict[str, Any]]:
+    def get_dropped_shows(
+        self,
+        limit: int = 100,
+        page: int = 1,
+        *,
+        authoritative: bool = False,
+    ) -> list[dict[str, Any]]:
         return self._request(
             "GET",
             "/users/hidden/dropped",
             params={"type": "show", "limit": limit, "page": page},
-            use_cache=False,
+            use_cache=not authoritative,
         )
 
     def add_paused_show(self, trakt_id: int) -> dict[str, Any]:
@@ -771,16 +818,22 @@ class TraktClient:
         return payload
 
     def set_rating(self, item: RatingInput) -> dict[str, Any]:
-        if not 1 <= item.rating <= 10:
-            raise ValueError("Rating must be between 1 and 10")
+        return self.set_ratings([item])
+
+    def set_ratings(self, items: list[RatingInput]) -> dict[str, Any]:
         payload: dict[str, Any] = {}
-        body = {"ids": {"trakt": item.trakt_id}, "rating": item.rating}
-        if item.title_type == "movie":
-            payload["movies"] = [body]
-        elif item.season is not None and item.episode is not None:
-            payload["episodes"] = [body]
-        else:
-            payload["shows"] = [body]
+        for item in items:
+            if not 1 <= item.rating <= 10:
+                raise ValueError("Rating must be between 1 and 10")
+            body = {"ids": {"trakt": item.trakt_id}, "rating": item.rating}
+            if item.title_type == "movie":
+                payload.setdefault("movies", []).append(body)
+            elif item.season is not None and item.episode is not None:
+                payload.setdefault("episodes", []).append(body)
+            else:
+                payload.setdefault("shows", []).append(body)
+        if not payload:
+            return {}
         return self._request("POST", "/sync/ratings", json=payload)
 
     def get_calendar(self, start_date: str, days: int = 14) -> list[CalendarEntry]:
@@ -822,6 +875,22 @@ class TraktClient:
         _rate_limit_waited: float = 0.0,
         **kwargs: Any,
     ) -> Any:
+        normalized_method = method.upper()
+        cache_key: str | None = None
+        stale_entry = None
+        if normalized_method == "GET":
+            cache_key = self._make_cache_key(
+                method,
+                path,
+                kwargs.get("params"),
+                auth_required,
+                include_headers=include_headers,
+            )
+            if use_cache:
+                fresh_entry = self._cache.get_json_entry(cache_key, ttl_hours=self._cache_ttl_hours)
+                if fresh_entry is not None:
+                    return self._cached_response(fresh_entry.value, include_headers=include_headers)
+                stale_entry = self._cache.get_json_entry(cache_key)
         headers = {
             "Content-Type": "application/json",
             "trakt-api-key": self.client_id,
@@ -829,17 +898,17 @@ class TraktClient:
         }
         request_token: TokenBundle | None = None
         if auth_required:
-            request_token = self._ensure_authenticated_token()
+            try:
+                request_token = self._ensure_authenticated_token()
+            except TraktError:
+                if stale_entry is not None:
+                    return self._cached_response(stale_entry.value, include_headers=include_headers)
+                raise
             headers["Authorization"] = f"Bearer {request_token.access_token}"
-        if method.upper() == "GET" and use_cache and not include_headers:
-            cache_key = self._make_cache_key(method, path, kwargs.get("params"), auth_required)
-            cached = self._cache.get_json(cache_key, self._cache_ttl_hours)
-            if cached is not None:
-                return cached
         try:
             response = self._client.request(method, f"{API_URL}{path}", headers=headers, **kwargs)
         except httpx.TransportError as exc:
-            if _retry_on_transport and method.upper() == "GET":
+            if _retry_on_transport and normalized_method == "GET":
                 return self._request(
                     method,
                     path,
@@ -852,9 +921,18 @@ class TraktClient:
                     _rate_limit_waited=_rate_limit_waited,
                     **kwargs,
                 )
+            if stale_entry is not None:
+                return self._cached_response(stale_entry.value, include_headers=include_headers)
+            if normalized_method != "GET" and path != "/oauth/token":
+                raise TraktMutationUncertain(str(exc)) from exc
             raise TraktError(str(exc)) from exc
         if response.status_code == 401 and auth_required and _retry_on_401 and request_token is not None:
-            self._refresh_access_token(request_token)
+            try:
+                self._refresh_access_token(request_token)
+            except TraktError:
+                if stale_entry is not None:
+                    return self._cached_response(stale_entry.value, include_headers=include_headers)
+                raise
             return self._request(
                 method,
                 path,
@@ -867,9 +945,14 @@ class TraktClient:
                 _rate_limit_waited=_rate_limit_waited,
                 **kwargs,
             )
+        if response.status_code == 401 and auth_required:
+            self._mark_reauthorization_required()
+            if stale_entry is not None:
+                return self._cached_response(stale_entry.value, include_headers=include_headers)
+            raise TraktReauthorizationRequired("Trakt session expired. Reconnect required.")
         if response.status_code == 429:
             retry_after = self._retry_after_seconds(response.headers.get("Retry-After"))
-            if method.upper() == "GET" and _rate_limit_attempt < 2:
+            if normalized_method == "GET" and _rate_limit_attempt < 2:
                 base_delay = float(retry_after if retry_after is not None else (5 if _rate_limit_attempt == 0 else 15))
                 jitter = min(1.0, max(0.0, base_delay * 0.1)) * max(0.0, self._rate_limit_jitter())
                 delay = base_delay + jitter
@@ -894,27 +977,46 @@ class TraktClient:
                         _rate_limit_waited=_rate_limit_waited + delay,
                         **kwargs,
                     )
+            if stale_entry is not None:
+                return self._cached_response(stale_entry.value, include_headers=include_headers)
             detail = "Trakt rate limit exceeded"
             if retry_after is not None:
                 detail = f"{detail}; retry after {retry_after} seconds"
             raise TraktRateLimitError(detail, retry_after_seconds=retry_after)
-        if response.status_code == 400 and path == "/oauth/token":
+        if response.status_code in {400, 401} and path == "/oauth/token":
             try:
                 oauth_error = response.json()
             except ValueError:
                 oauth_error = {}
-            if isinstance(oauth_error, dict) and oauth_error.get("error") == "invalid_grant":
+            if isinstance(oauth_error, dict) and oauth_error.get("error") in {"invalid_grant", "invalid_client"}:
                 oauth_request = kwargs.get("json")
                 if isinstance(oauth_request, dict) and oauth_request.get("grant_type") == "refresh_token":
                     raise TraktReauthorizationRequired("Trakt session expired. Reconnect required.")
                 raise TraktError("Trakt authorization was rejected. Start Reconnect again.")
+        if response.status_code >= 500:
+            if stale_entry is not None:
+                return self._cached_response(stale_entry.value, include_headers=include_headers)
+            if normalized_method != "GET" and path != "/oauth/token":
+                raise TraktMutationUncertain(
+                    f"Trakt request may have been applied before server error {response.status_code}."
+                )
+            raise TraktRequestError(response.status_code, response.text)
         if response.status_code >= 400:
-            raise TraktError(f"Trakt request failed: {response.status_code} {response.text}")
+            if stale_entry is not None:
+                return self._cached_response(stale_entry.value, include_headers=include_headers)
+            raise TraktRequestError(response.status_code, response.text)
         if response.status_code == 204:
             return ({}, dict(response.headers)) if include_headers else {}
         payload = response.json()
-        if method.upper() == "GET" and use_cache and not include_headers:
-            self._cache.set_json(cache_key, payload)
+        if normalized_method == "GET" and cache_key is not None:
+            cached_value: Any = payload
+            if include_headers:
+                cached_value = {
+                    "__trakt_cached_response_v1__": True,
+                    "payload": payload,
+                    "headers": dict(response.headers),
+                }
+            self._cache.set_json(cache_key, cached_value)
         return (payload, dict(response.headers)) if include_headers else payload
 
     @staticmethod
@@ -1007,6 +1109,27 @@ class TraktClient:
             return TraktClient._as_float(imdb)
         return None
 
-    def _make_cache_key(self, method: str, path: str, params: Any, auth_required: bool) -> str:
+    @staticmethod
+    def _cached_response(value: Any, *, include_headers: bool) -> Any:
+        if not include_headers:
+            return value
+        if isinstance(value, dict) and value.get("__trakt_cached_response_v1__") is True:
+            payload = value.get("payload")
+            headers = value.get("headers")
+            return payload, headers if isinstance(headers, dict) else {}
+        return value, {}
+
+    def _make_cache_key(
+        self,
+        method: str,
+        path: str,
+        params: Any,
+        auth_required: bool,
+        *,
+        include_headers: bool = False,
+    ) -> str:
         params_repr = repr(sorted((params or {}).items())) if isinstance(params, dict) else repr(params)
-        return f"{self._cache_namespace}|{auth_required}|{method.upper()}|{path}|{params_repr}"
+        return (
+            f"{self._cache_namespace}|{auth_required}|headers={include_headers}|"
+            f"{method.upper()}|{path}|{params_repr}"
+        )

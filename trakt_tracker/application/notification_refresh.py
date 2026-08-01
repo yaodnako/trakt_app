@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from trakt_tracker.domain import ProgressView
+from trakt_tracker.domain import CalendarEntry, ProgressView
 from trakt_tracker.infrastructure.notifications import NotificationMessage
 
 
@@ -28,16 +28,27 @@ class NotificationRefreshWorkflow:
         self._progress_repo = progress_repo
         self._sender = sender
 
-    def poll_upcoming(self, *, send_native: bool = True) -> list[dict]:
+    def poll_upcoming(
+        self,
+        *,
+        send_native: bool = True,
+        refresh_remote: bool = True,
+    ) -> list[dict]:
         config = self._config_store.load()
         if not config.notifications_enabled:
             return []
         repeat_interval = timedelta(minutes=max(1, int(config.notification_repeat_minutes or 1)))
         release_delay = timedelta(minutes=max(0, int(getattr(config, "notification_release_delay_minutes", 120) or 0)))
-        client = self._auth.get_client()
         now = datetime.now(tz=UTC)
-        start_date = (now - timedelta(days=self._CALENDAR_LOOKBACK_DAYS)).date().isoformat()
-        entries = client.get_calendar(start_date, days=self._CALENDAR_SPAN_DAYS)
+        calendar_start_date = (now - timedelta(days=self._CALENDAR_LOOKBACK_DAYS)).date()
+        calendar_start = datetime.combine(calendar_start_date, datetime.min.time(), tzinfo=UTC)
+        remote_entries: list[CalendarEntry] = []
+        if refresh_remote:
+            client = self._auth.get_client()
+            remote_entries = client.get_calendar(
+                calendar_start_date.isoformat(),
+                days=self._CALENDAR_SPAN_DAYS,
+            )
         sent: list[dict] = []
         with self._db.session() as session:
             active_items = self._progress_repo.list_in_progress(
@@ -50,17 +61,39 @@ class NotificationRefreshWorkflow:
                 view=ProgressView.PAUSED,
                 limit=None,
             )
+            progress_items = [*active_items, *paused_items]
             current_next_episodes = {
                 item.trakt_id: item.next_episode
-                for item in [*active_items, *paused_items]
+                for item in progress_items
                 if item.next_episode is not None
             }
             paused_show_ids = {int(item.trakt_id) for item in paused_items}
-            for entry in entries:
+            entries: dict[tuple[int, int], CalendarEntry] = {}
+            for item in progress_items:
+                episode = item.next_episode
+                if episode is None or episode.first_aired is None:
+                    continue
+                release_at = (
+                    episode.first_aired.replace(tzinfo=UTC)
+                    if episode.first_aired.tzinfo is None
+                    else episode.first_aired.astimezone(UTC)
+                )
+                if release_at < calendar_start:
+                    continue
+                entries[(int(item.trakt_id), int(episode.trakt_id))] = CalendarEntry(
+                    show_trakt_id=item.trakt_id,
+                    show_title=item.title,
+                    episode=episode,
+                )
+            for entry in remote_entries:
                 expected_episode = current_next_episodes.get(entry.show_trakt_id)
                 if expected_episode is None or expected_episode.trakt_id != entry.episode.trakt_id:
                     self._notification_repo.delete_sent(session, entry.show_trakt_id, entry.episode.trakt_id)
                     continue
+                entries[(int(entry.show_trakt_id), int(entry.episode.trakt_id))] = entry
+
+            for entry in entries.values():
+                expected_episode = current_next_episodes[entry.show_trakt_id]
                 first_aired = entry.episode.first_aired or expected_episode.first_aired
                 if first_aired is None:
                     continue

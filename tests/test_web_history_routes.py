@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.testclient import TestClient
 
+from trakt_tracker.application.episode_ratings_matrix import rating_bucket_color
 from trakt_tracker.application.enrich_queue import TASK_STATUS_COMPLETED
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_STILL,
@@ -273,6 +274,7 @@ class HistoryRouteTests(unittest.TestCase):
         static_dir = STATIC_DIR
         self.templates = Jinja2Templates(directory=str(templates_dir))
         self.templates.env.filters["rating_with_votes"] = lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a"
+        self.templates.env.filters["rating_bucket_color"] = rating_bucket_color
         self.templates.env.filters["episode_label"] = lambda season, episode, imdb_season=None, imdb_episode=None: (
             f"S{int(season):02d}E{int(episode):02d}"
             + (
@@ -642,9 +644,55 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertNotIn('data-history-title-key="04.04.2026:show:1"', html)
         self.assertNotIn("history-episode-card", html)
         self.assertIn('data-title-matrix-url="/titles/show/1/episode-ratings-matrix"', html)
-        self.assertIn("8.5", html)
-        self.assertIn("9", html)
+        self.assertIn('class="history-rating-badge user-rating-badge poster-average-rating-badge"', html)
+        self.assertIn('style="--user-rating-color: rgb(40, 180, 99);"', html)
+        self.assertIn('<span class="user-rating-value">8.5</span>', html)
+        self.assertIn('<span class="user-rating-star">&#9733;</span>', html)
+        self.assertIn('class="history-rating-badge user-rating-badge"', html)
+        self.assertIn('style="--user-rating-color: rgb(24, 106, 59);"', html)
+        self.assertIn('<span class="user-rating-value">9</span>', html)
         self.assertIn('href="https://trakt.tv/shows/severance"', html)
+
+    def test_history_grouped_show_average_rating_uses_imdb_palette(self) -> None:
+        self.history.rows = [
+            {
+                **self._row("show", 1, "Severance", watched_at=datetime(2026, 4, 4, 12, 0, tzinfo=UTC)),
+                "title_episode_avg_rating": 6.5,
+                "title_episode_rated_count": 2,
+            },
+        ]
+
+        response = self.client.get("/history?page=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="history-rating-badge user-rating-badge poster-average-rating-badge"', response.text)
+        self.assertIn('style="--user-rating-color: rgb(243, 156, 18);"', response.text)
+        self.assertIn('<span class="user-rating-value">6.5</span>', response.text)
+        self.assertIn('<span class="user-rating-star">&#9733;</span>', response.text)
+
+    def test_history_episode_and_movie_ratings_use_shared_badge_style(self) -> None:
+        self.history.rows = [
+            {
+                **self._row("show", 1, "Severance", watched_at=datetime(2026, 4, 4, 12, 0, tzinfo=UTC)),
+                "display_rating": 5,
+            },
+            {
+                **self._row("movie", 2, "Dune", watched_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC)),
+                "display_rating": 9,
+            },
+        ]
+
+        response = self.client.get("/history?page=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="history-rating-badge user-rating-badge episode-user-rating-badge"', response.text)
+        self.assertIn('data-user-rating="5"', response.text)
+        self.assertIn('style="--user-rating-color: rgb(231, 76, 60);"', response.text)
+        self.assertIn('<span class="user-rating-value">5</span>', response.text)
+        self.assertIn('<span class="user-rating-star">&#9733;</span>', response.text)
+        self.assertIn('class="history-rating-badge user-rating-badge"', response.text)
+        self.assertIn('data-user-rating="9"', response.text)
+        self.assertIn('style="--user-rating-color: rgb(24, 106, 59);"', response.text)
 
     def test_history_title_mode_sorts_in_both_directions_with_nulls_last(self) -> None:
         self.history.rows = [

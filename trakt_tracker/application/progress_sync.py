@@ -20,7 +20,13 @@ from trakt_tracker.application.metadata_refresh_policy import (
 from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.application.sync_policy import SyncPolicy
 from trakt_tracker.config import AppConfig
-from trakt_tracker.domain import ProgressSnapshot, ProgressSortMode, ProgressView, TitleSummary
+from trakt_tracker.domain import (
+    EpisodeSummary,
+    ProgressSnapshot,
+    ProgressSortMode,
+    ProgressView,
+    TitleSummary,
+)
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 from trakt_tracker.infrastructure.tmdb import TMDbClient
 
@@ -42,6 +48,7 @@ class ProgressSyncWorkflow:
         history_repo=None,
         catalog=None,
         notification_repo=None,
+        trakt_outbox=None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -58,6 +65,7 @@ class ProgressSyncWorkflow:
         self._episode_metadata = episode_metadata
         self._catalog = catalog
         self._notification_repo = notification_repo
+        self._trakt_outbox = trakt_outbox
 
     def refresh_show_progress(
         self,
@@ -169,6 +177,16 @@ class ProgressSyncWorkflow:
                 dropped_only=dropped_only,
                 limit=limit,
             )
+            if self._history is not None and items:
+                for item in items:
+                    self._overlay_local_watches(
+                        session,
+                        item,
+                        self._history.watched_episode_keys(
+                            session,
+                            int(item.trakt_id),
+                        ),
+                    )
             title_episode_averages = (
                 self._history.watched_episode_average_ratings(
                     session,
@@ -180,6 +198,102 @@ class ProgressSyncWorkflow:
         for item in items:
             item.title_episode_avg_rating = title_episode_averages.get(int(item.trakt_id))
         return items
+
+    def _overlay_local_watches(
+        self,
+        session,
+        progress: ProgressSnapshot,
+        watched_keys: set[tuple[int, int]],
+    ) -> None:
+        rows = [
+            row
+            for row in self._episode_repo.list_show_episode_metadata(
+                session,
+                int(progress.trakt_id),
+            )
+            if row.get("season") is not None
+            and row.get("number") is not None
+            and int(row["season"]) > 0
+        ]
+        if not rows:
+            return
+        now = datetime.now(tz=UTC)
+        known_aired = 0
+        for row in rows:
+            first_aired = row.get("first_aired")
+            if first_aired is None:
+                continue
+            aired_at = first_aired.replace(tzinfo=UTC) if first_aired.tzinfo is None else first_aired.astimezone(UTC)
+            if aired_at <= now:
+                known_aired += 1
+        aired = min(len(rows), max(int(progress.aired or 0), known_aired))
+        completed = sum(
+            1
+            for row in rows[:aired]
+            if (int(row["season"]), int(row["number"])) in watched_keys
+        )
+        next_row = next(
+            (
+                row
+                for row in rows
+                if (int(row["season"]), int(row["number"])) not in watched_keys
+            ),
+            None,
+        )
+        last_row = next(
+            (
+                row
+                for row in reversed(rows)
+                if (int(row["season"]), int(row["number"])) in watched_keys
+            ),
+            None,
+        )
+        progress.completed = completed
+        progress.percent_completed = (
+            min(100.0, (completed / aired) * 100.0)
+            if aired > 0
+            else 0.0
+        )
+        progress.aired = aired
+        progress.last_episode = self._episode_summary_from_row(last_row) if last_row is not None else None
+        progress.next_episode = self._episode_summary_from_row(next_row) if next_row is not None else None
+
+    @staticmethod
+    def _episode_summary_from_row(row: dict) -> EpisodeSummary | None:
+        trakt_id = int(row.get("episode_trakt_id") or 0)
+        if trakt_id <= 0:
+            return None
+        imdb_rating = row.get("imdb_rating")
+        imdb_votes = row.get("imdb_votes")
+        imdb_id = str(row.get("imdb_id") or "")
+        return EpisodeSummary(
+            trakt_id=trakt_id,
+            season=int(row["season"]),
+            number=int(row["number"]),
+            title=str(row.get("title") or ""),
+            still_url=str(row.get("still_url") or ""),
+            still_status=str(row.get("still_status") or "unknown"),
+            still_refreshed_at=row.get("still_refreshed_at"),
+            trakt_rating=row.get("trakt_rating"),
+            trakt_votes=row.get("trakt_votes"),
+            trakt_details_status=str(
+                row.get("trakt_details_status") or "unknown"
+            ),
+            trakt_details_refreshed_at=row.get("trakt_details_refreshed_at"),
+            imdb_id=imdb_id,
+            imdb_rating=imdb_rating,
+            imdb_votes=imdb_votes,
+            imdb_season=row.get("imdb_season"),
+            imdb_episode=row.get("imdb_episode"),
+            imdb_status=(
+                ENRICH_STATUS_READY
+                if imdb_rating is not None and imdb_votes is not None
+                else ENRICH_STATUS_CHECKED_NO_DATA
+                if imdb_id
+                else "unknown"
+            ),
+            first_aired=row.get("first_aired"),
+        )
 
     def select_title_enrich_keys(
         self,
@@ -274,36 +388,99 @@ class ProgressSyncWorkflow:
         return snapshots
 
     def pause_show(self, trakt_id: int, *, progress: ProgressSnapshot | None = None) -> None:
-        client = self._auth.get_client()
-        client.add_paused_show(trakt_id)
+        if self._trakt_outbox is None:
+            client = self._auth.get_client()
+            client.add_paused_show(trakt_id)
         with self._db.session() as session:
+            state = self._user_states.progress_state(session, trakt_id)
+            base_paused = bool(state.paused) if state is not None else False
             self._user_states.set_paused(session, trakt_id, True)
             if progress is not None:
                 progress.is_paused = True
                 self._acknowledge_progress_episode(session, progress)
+            queued = bool(
+                self._trakt_outbox is not None
+                and self._trakt_outbox.enqueue_hidden(
+                    session,
+                    operation_type="paused",
+                    trakt_id=trakt_id,
+                    base_hidden=base_paused,
+                    desired_hidden=True,
+                )
+            )
+        if queued:
+            self._trakt_outbox.wake()
 
     def resume_show(self, trakt_id: int) -> None:
-        client = self._auth.get_client()
-        client.remove_paused_show(trakt_id)
+        if self._trakt_outbox is None:
+            client = self._auth.get_client()
+            client.remove_paused_show(trakt_id)
         with self._db.session() as session:
+            state = self._user_states.progress_state(session, trakt_id)
+            base_paused = bool(state.paused) if state is not None else True
             self._user_states.set_paused(session, trakt_id, False)
+            queued = bool(
+                self._trakt_outbox is not None
+                and self._trakt_outbox.enqueue_hidden(
+                    session,
+                    operation_type="paused",
+                    trakt_id=trakt_id,
+                    base_hidden=base_paused,
+                    desired_hidden=False,
+                )
+            )
+        if queued:
+            self._trakt_outbox.wake()
 
     def drop_show(self, trakt_id: int) -> None:
-        client = self._auth.get_client()
-        client.add_dropped_show(trakt_id)
+        if self._trakt_outbox is None:
+            client = self._auth.get_client()
+            client.add_dropped_show(trakt_id)
         with self._db.session() as session:
+            state = self._user_states.progress_state(session, trakt_id)
+            base_dropped = bool(state.archived) if state is not None else False
             self._user_states.set_archived(session, trakt_id, True)
+            queued = bool(
+                self._trakt_outbox is not None
+                and self._trakt_outbox.enqueue_hidden(
+                    session,
+                    operation_type="dropped",
+                    trakt_id=trakt_id,
+                    base_hidden=base_dropped,
+                    desired_hidden=True,
+                )
+            )
+        if queued:
+            self._trakt_outbox.wake()
 
     def undrop_show(self, trakt_id: int) -> None:
-        client = self._auth.get_client()
-        client.remove_dropped_show(trakt_id)
+        if self._trakt_outbox is None:
+            client = self._auth.get_client()
+            client.remove_dropped_show(trakt_id)
         with self._db.session() as session:
+            state = self._user_states.progress_state(session, trakt_id)
+            base_dropped = bool(state.archived) if state is not None else True
             self._user_states.set_archived(session, trakt_id, False)
+            queued = bool(
+                self._trakt_outbox is not None
+                and self._trakt_outbox.enqueue_hidden(
+                    session,
+                    operation_type="dropped",
+                    trakt_id=trakt_id,
+                    base_hidden=base_dropped,
+                    desired_hidden=False,
+                )
+            )
+        if queued:
+            self._trakt_outbox.wake()
 
     def _sync_hidden_status(self) -> None:
         client = self._auth.get_client()
         paused_ids = self._fetch_hidden_show_ids(client.get_paused_shows)
         dropped_ids = self._fetch_hidden_show_ids(client.get_dropped_shows)
+        if self._trakt_outbox is not None:
+            paused_ids = self._trakt_outbox.overlay_hidden(paused_ids, operation_type="paused")
+            dropped_ids = self._trakt_outbox.overlay_hidden(dropped_ids, operation_type="dropped")
         with self._db.session() as session:
             self._user_states.sync_progress_hidden_states(
                 session,
@@ -323,7 +500,12 @@ class ProgressSyncWorkflow:
         page = 1
         page_size = 100
         while True:
-            batch = fetch_page(limit=page_size, page=page)
+            try:
+                batch = fetch_page(limit=page_size, page=page, authoritative=True)
+            except TypeError as exc:
+                if "authoritative" not in str(exc):
+                    raise
+                batch = fetch_page(limit=page_size, page=page)
             if not isinstance(batch, list) or not batch:
                 break
             for item in batch:

@@ -1,4 +1,37 @@
 (() => {
+    function isImdbSeasonsLayoutLocked(toggle) {
+        return Boolean(toggle && toggle.hasAttribute("data-layout-locked"));
+    }
+
+    function readImdbSeasonsControlState(toggle) {
+        if (!toggle) {
+            return null;
+        }
+        return isImdbSeasonsLayoutLocked(toggle) ? false : Boolean(toggle.checked);
+    }
+
+    function syncImdbSeasonsToggle(toggle, enabled) {
+        if (!toggle) {
+            return false;
+        }
+        if (isImdbSeasonsLayoutLocked(toggle)) {
+            toggle.checked = false;
+            return false;
+        }
+        if (enabled !== null && enabled !== undefined) {
+            toggle.checked = Boolean(enabled);
+        }
+        return Boolean(toggle.checked);
+    }
+
+    if (typeof module !== "undefined" && module.exports && typeof document === "undefined") {
+        module.exports = Object.freeze({
+            readImdbSeasonsControlState,
+            syncImdbSeasonsToggle,
+        });
+        return;
+    }
+
     const runtimeValue = (name, fallback = "") => document.querySelector(`meta[name="${name}"]`)?.content ?? fallback;
     const runtimeBoolean = (name, fallback = false) => {
         const value = runtimeValue(name, fallback ? "true" : "false");
@@ -158,6 +191,43 @@
             return response;
         });
     };
+
+    const traktSyncBanner = document.querySelector("[data-trakt-sync-banner]");
+    const traktSyncMessage = traktSyncBanner?.querySelector("[data-trakt-sync-message]");
+    const renderTraktSyncStatus = (payload) => {
+        if (!traktSyncBanner || !payload) return;
+        const waiting = Math.max(0, Number(payload.pending || 0) + Number(payload.blocked || 0));
+        const mode = String(payload.mode || "local");
+        traktSyncBanner.dataset.pendingCount = String(waiting);
+        traktSyncBanner.hidden = mode === "synced";
+        if (traktSyncMessage) {
+            if (mode === "attention") {
+                traktSyncMessage.textContent = `Trakt sync needs attention — local mode. ${waiting} changes waiting to sync.`;
+            } else if (mode === "syncing") {
+                traktSyncMessage.textContent = `Trakt synchronization in progress. ${waiting} changes waiting to sync.`;
+            } else {
+                traktSyncMessage.textContent = `Trakt unavailable — local mode. ${waiting} changes waiting to sync.`;
+            }
+        }
+        window.dispatchEvent(new CustomEvent("trakt-sync-status", {detail: payload}));
+    };
+    const pollTraktSyncStatus = async () => {
+        if (!traktSyncBanner) return;
+        try {
+            const response = await window.fetch("/trakt-sync/status", {
+                headers: {"Accept": "application/json"},
+                cache: "no-store",
+            });
+            if (response.ok) renderTraktSyncStatus(await response.json());
+        } catch {
+            const waiting = Number(traktSyncBanner.dataset.pendingCount || "0");
+            renderTraktSyncStatus({mode: "local", pending: waiting, blocked: 0});
+        }
+    };
+    window.refreshTraktSyncStatus = pollTraktSyncStatus;
+    pollTraktSyncStatus();
+    window.setInterval(pollTraktSyncStatus, 10000);
+
     document.addEventListener("submit", (event) => {
         const form = event.target;
         if (!(form instanceof HTMLFormElement)) return;
@@ -620,8 +690,6 @@
             ["show_dropped", prompt.showDropped || "0"],
             ["sort", prompt.sort || "episode_release"],
             ["direction", prompt.direction || "desc"],
-            ["min_year", prompt.minYear || ""],
-            ["use_year_filter", prompt.useYearFilter || "0"],
         ].forEach(([name, value]) => {
             const input = document.createElement("input");
             input.type = "hidden";
@@ -732,8 +800,6 @@
                     showDropped: link.dataset.playShowDropped || "0",
                     sort: link.dataset.playSort || "episode_release",
                     direction: link.dataset.playDirection || "desc",
-                    useYearFilter: link.dataset.playUseYearFilter || "0",
-                    minYear: link.dataset.playMinYear || "",
                 });
                 renderPlayPrompts();
             });
@@ -888,6 +954,26 @@
         );
     }
 
+    function renderSavedRating(trigger, rating) {
+        const isEpisodeRating = (
+            ratingContext
+            && ratingContext.titleType === "show"
+            && String(ratingContext.season) !== ""
+            && String(ratingContext.episode) !== ""
+        );
+        const value = document.createElement("span");
+        value.className = "user-rating-value";
+        value.textContent = String(rating);
+        const star = document.createElement("span");
+        star.className = "user-rating-star";
+        star.textContent = "\u2605";
+        trigger.classList.add("user-rating-badge");
+        trigger.classList.toggle("episode-user-rating-badge", isEpisodeRating);
+        trigger.style.removeProperty("--user-rating-color");
+        trigger.dataset.userRating = String(rating);
+        trigger.replaceChildren(value, star);
+    }
+
     function applySavedRatingToTrigger(rating) {
         if (!(ratingTrigger instanceof HTMLElement)) {
             return;
@@ -895,7 +981,7 @@
         if (ratingTrigger.classList.contains("history-rate-chip")) {
             const badge = document.createElement("button");
             badge.type = "button";
-            badge.className = "history-rating-badge search-watch-user-rating";
+            badge.className = "history-rating-badge user-rating-badge search-watch-user-rating";
             badge.setAttribute("data-rating-trigger", "");
             badge.dataset.ratingTitleType = ratingContext.titleType;
             badge.dataset.ratingTraktId = ratingContext.traktId;
@@ -903,12 +989,12 @@
             badge.dataset.ratingSeason = ratingContext.season;
             badge.dataset.ratingEpisode = ratingContext.episode;
             badge.setAttribute("aria-label", `Change rating for ${ratingLabel(ratingContext) || ratingContext.title}`);
-            badge.textContent = `${rating} \u2605`;
+            renderSavedRating(badge, rating);
             ratingTrigger.replaceWith(badge);
             return;
         }
         if (ratingTrigger.classList.contains("history-rating-badge")) {
-            ratingTrigger.textContent = `${rating} \u2605`;
+            renderSavedRating(ratingTrigger, rating);
         }
     }
 
@@ -1122,9 +1208,7 @@
         const imdbSeasonsToggle = titleMatrixBody.querySelector("[data-imdb-seasons-toggle]");
         return {
             hideSeasonZero: hideToggle ? Boolean(hideToggle.checked) : true,
-            imdbSeasons: imdbSeasonsToggle && !imdbSeasonsToggle.disabled
-                ? Boolean(imdbSeasonsToggle.checked)
-                : false,
+            imdbSeasons: readImdbSeasonsControlState(imdbSeasonsToggle),
             ratingMode: getSelectedTitleMatrixMode(null),
         };
     }
@@ -1139,7 +1223,7 @@
         }
         const imdbSeasonsToggle = titleMatrixBody.querySelector("[data-imdb-seasons-toggle]");
         if (imdbSeasonsToggle) {
-            imdbSeasonsToggle.checked = !imdbSeasonsToggle.disabled && state.imdbSeasons !== false;
+            syncImdbSeasonsToggle(imdbSeasonsToggle, state.imdbSeasons);
         }
     }
 
@@ -1286,7 +1370,10 @@
             syncTitleMatrixTitleRatings();
             const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
             restoreTitleMatrixControlState(controlState);
-            applyImdbSeasonLayout(fragmentRoot, Boolean(controlState.imdbSeasons));
+            applyImdbSeasonLayout(
+                fragmentRoot,
+                readImdbSeasonsControlState(titleMatrixBody.querySelector("[data-imdb-seasons-toggle]")) === true,
+            );
             applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
             applyTitleMatrixMode(fragmentRoot, normalizedProvider);
             if (refreshMissing && normalizedProvider === "trakt" && titleMatrixRefreshAttempts < 6) {
@@ -1328,7 +1415,10 @@
             }
             const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
             restoreTitleMatrixControlState(controlState);
-            applyImdbSeasonLayout(fragmentRoot, Boolean(controlState.imdbSeasons));
+            applyImdbSeasonLayout(
+                fragmentRoot,
+                readImdbSeasonsControlState(titleMatrixBody.querySelector("[data-imdb-seasons-toggle]")) === true,
+            );
             applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
             applyTitleMatrixMode(fragmentRoot, normalizedProvider);
         } catch (error) {
@@ -1534,7 +1624,10 @@
                 titleMatrixBody.innerHTML = titleMatrixCache.get(cacheKey);
                 const fragmentRoot = titleMatrixBody.querySelector(".title-matrix-fragment");
                 restoreTitleMatrixControlState(controlState);
-                applyImdbSeasonLayout(fragmentRoot, Boolean(controlState.imdbSeasons));
+                applyImdbSeasonLayout(
+                    fragmentRoot,
+                    readImdbSeasonsControlState(titleMatrixBody.querySelector("[data-imdb-seasons-toggle]")) === true,
+                );
                 applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
                 applyTitleMatrixMode(fragmentRoot, provider);
             } else {
@@ -1587,7 +1680,7 @@
         const toggle = titleMatrixBody?.querySelector("[data-imdb-seasons-toggle]");
         const fragmentRoot = titleMatrixBody?.querySelector(".title-matrix-fragment");
         if (toggle) {
-            toggle.checked = !toggle.disabled && enabled;
+            syncImdbSeasonsToggle(toggle, enabled);
         }
         applyTitleMatrixToggles(fragmentRoot);
     });

@@ -38,8 +38,12 @@
             <div class="poster-fallback poster-loading">Loading</div>
             {% endif %}
             {% if title_group.title_episode_avg_rating is not none %}
-            <div class="history-rating-badge">
-                {{ title_group.title_episode_avg_rating|round(1) }} ★
+            <div
+                class="history-rating-badge user-rating-badge{% if title_group.type == 'show' %} poster-average-rating-badge{% endif %}"
+                style="--user-rating-color: {{ title_group.title_episode_avg_rating|rating_bucket_color }};"
+            >
+                <span class="user-rating-value">{{ title_group.title_episode_avg_rating|round(1) }}</span>
+                <span class="user-rating-star">&#9733;</span>
             </div>
             {% endif %}
             {% if title_group.type != 'show' %}
@@ -173,16 +177,19 @@
                 </div>
                 {% endif %}
                 {% if row.display_rating is not none %}
+                {% set is_episode_user_rating = row.type == 'show' and row.season is not none and row.episode is not none %}
                 <button
                     type="button"
-                    class="history-rating-badge"
+                    class="history-rating-badge user-rating-badge{% if is_episode_user_rating %} episode-user-rating-badge{% endif %}"
+                    style="--user-rating-color: {{ row.display_rating|rating_bucket_color }};"
                     data-rating-trigger
                     data-rating-title-type="{{ row.type }}"
                     data-rating-trakt-id="{{ row.title_trakt_id }}"
                     data-rating-title="{{ row.title }}"
-                    data-rating-season="{{ row.season or '' }}"
-                    data-rating-episode="{{ row.episode or '' }}"
-                >{{ row.display_rating }} &#9733;</button>
+                    data-rating-season="{{ row.season if row.season is not none else '' }}"
+                    data-rating-episode="{{ row.episode if row.episode is not none else '' }}"
+                    data-user-rating="{{ row.display_rating|int }}"
+                ><span class="user-rating-value">{{ row.display_rating }}</span><span class="user-rating-star">&#9733;</span></button>
                 {% else %}
                 <button
                     type="button"
@@ -191,8 +198,8 @@
                     data-rating-title-type="{{ row.type }}"
                     data-rating-trakt-id="{{ row.title_trakt_id }}"
                     data-rating-title="{{ row.title }}"
-                    data-rating-season="{{ row.season or '' }}"
-                    data-rating-episode="{{ row.episode or '' }}"
+                    data-rating-season="{{ row.season if row.season is not none else '' }}"
+                    data-rating-episode="{{ row.episode if row.episode is not none else '' }}"
                 >Rate</button>
                 {% endif %}
                 {% if row.type == 'show' and row.season is not none and row.episode is not none %}

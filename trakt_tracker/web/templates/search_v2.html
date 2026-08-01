@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div id="catalog-page-region">
+{% set tmdb_preview = catalog_provider_mode|default('trakt') == 'tmdb_preview' %}
+<div id="catalog-page-region" data-catalog-provider="{{ 'tmdb_preview' if tmdb_preview else 'trakt' }}">
 {% if page_kind == 'search' %}
 <section class="panel panel-hero search-toolbar-panel">
     <form method="get" action="/search" class="filter-grid search-filter-grid">
@@ -45,8 +46,8 @@
             <input type="number" name="imdb_min" value="{{ search_imdb_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum IMDb rating" data-catalog-auto-submit>
         </label>
         <label class="search-rating-field">
-            <span>Trakt ≥</span>
-            <input type="number" name="trakt_min" value="{{ search_trakt_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum Trakt rating" data-catalog-auto-submit>
+            <span>{{ 'TMDb' if tmdb_preview else 'Trakt' }} ≥</span>
+            <input type="number" name="{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}" value="{{ search_tmdb_min if tmdb_preview else search_trakt_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum {{ 'TMDb' if tmdb_preview else 'Trakt' }} rating" data-catalog-auto-submit>
         </label>
         <div class="catalog-exclusion-filters">
             <input type="hidden" name="hide_watchlisted" value="0">
@@ -61,8 +62,8 @@
             </label>
         </div>
         </div>
-        {% if search_imdb_min or search_trakt_min or search_hide_watchlisted or search_hide_history %}
-        <a class="icon-button catalog-filter-reset" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page=1&imdb_min=&trakt_min=&hide_watchlisted=0&hide_history=0" title="Reset filters" aria-label="Reset search filters">
+        {% if search_imdb_min or (search_tmdb_min if tmdb_preview else search_trakt_min) or search_hide_watchlisted or search_hide_history %}
+        <a class="icon-button catalog-filter-reset" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page=1&imdb_min=&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}=&hide_watchlisted=0&hide_history=0" title="Reset filters" aria-label="Reset search filters">
             <img src="{{ request.url_for('static', path='filter_reset.svg') }}" alt="" aria-hidden="true">
         </a>
         {% endif %}
@@ -75,13 +76,13 @@
 <section class="panel panel-hero search-toolbar-panel explore-toolbar-panel">
     <nav class="explore-toolbar" aria-label="Explore filters">
         <div class="explore-tabs explore-media-tabs" aria-label="Media type">
-            <a class="chip{% if explore_type == 'show' %} active{% endif %}" href="/explore?type=show&feed={{ explore_feed }}&page=1{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}{% endif %}">Shows</a>
-            <a class="chip{% if explore_type == 'movie' %} active{% endif %}" href="/explore?type=movie&feed={{ explore_feed }}&page=1{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}{% endif %}">Movies</a>
+            <a class="chip{% if explore_type == 'show' %} active{% endif %}" href="/explore?type=show&feed={{ explore_feed }}&page=1{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ explore_tmdb_min if tmdb_preview else explore_trakt_min }}{% endif %}">Shows</a>
+            <a class="chip{% if explore_type == 'movie' %} active{% endif %}" href="/explore?type=movie&feed={{ explore_feed }}&page=1{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ explore_tmdb_min if tmdb_preview else explore_trakt_min }}{% endif %}">Movies</a>
         </div>
         <div class="explore-tabs explore-feed-tabs" aria-label="Explore feed">
             <a class="chip{% if explore_feed == 'anticipated' %} active{% endif %}" href="/explore?type={{ explore_type }}&feed=anticipated&page=1&hide_releases={{ 1 if explore_hide_releases else 0 }}">Anticipated</a>
-            <a class="chip{% if explore_feed == 'trending' %} active{% endif %}" href="/explore?type={{ explore_type }}&feed=trending&page=1&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}">Trending</a>
-            <a class="chip{% if explore_feed == 'popular' %} active{% endif %}" href="/explore?type={{ explore_type }}&feed=popular&page=1&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}">Popular</a>
+            <a class="chip{% if explore_feed == 'trending' %} active{% endif %}" href="/explore?type={{ explore_type }}&feed=trending&page=1&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ explore_tmdb_min if tmdb_preview else explore_trakt_min }}">Trending</a>
+            <a class="chip{% if explore_feed == 'popular' %} active{% endif %}" href="/explore?type={{ explore_type }}&feed=popular&page=1&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ explore_tmdb_min if tmdb_preview else explore_trakt_min }}">Popular</a>
         </div>
         <form method="get" action="/explore" class="explore-rating-filters">
             <input type="hidden" name="type" value="{{ explore_type }}">
@@ -92,8 +93,8 @@
                 <input type="number" name="imdb_min" value="{{ explore_imdb_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum IMDb rating" data-catalog-auto-submit>
             </label>
             <label>
-                <span>Trakt ≥</span>
-                <input type="number" name="trakt_min" value="{{ explore_trakt_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum Trakt rating" data-catalog-auto-submit>
+                <span>{{ 'TMDb' if tmdb_preview else 'Trakt' }} ≥</span>
+                <input type="number" name="{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}" value="{{ explore_tmdb_min if tmdb_preview else explore_trakt_min }}" min="0" max="10" step="0.1" placeholder="—" aria-label="Minimum {{ 'TMDb' if tmdb_preview else 'Trakt' }} rating" data-catalog-auto-submit>
             </label>
             {% endif %}
             <div class="catalog-exclusion-filters">
@@ -114,8 +115,8 @@
             <a class="icon-button catalog-filter-reset" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page=1&hide_releases=0" title="Reset filters" aria-label="Reset Explore filters">
                 <img src="{{ request.url_for('static', path='filter_reset.svg') }}" alt="" aria-hidden="true">
             </a>
-            {% elif explore_feed != 'anticipated' and (explore_imdb_min or explore_trakt_min or explore_hide_watchlisted or explore_hide_history) %}
-            <a class="icon-button catalog-filter-reset" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page=1&imdb_min=&trakt_min=&hide_watchlisted=0&hide_history=0" title="Reset filters" aria-label="Reset Explore filters">
+            {% elif explore_feed != 'anticipated' and (explore_imdb_min or (explore_tmdb_min if tmdb_preview else explore_trakt_min) or explore_hide_watchlisted or explore_hide_history) %}
+            <a class="icon-button catalog-filter-reset" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page=1&imdb_min=&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}=&hide_watchlisted=0&hide_history=0" title="Reset filters" aria-label="Reset Explore filters">
                 <img src="{{ request.url_for('static', path='filter_reset.svg') }}" alt="" aria-hidden="true">
             </a>
             {% endif %}
@@ -200,12 +201,16 @@
 <section class="search-results-grid">
     {% for item in results %}
     {% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ (item.slug or item.trakt_id) %}
+    {% set tmdb_item = tmdb_preview and item.tmdb_id is defined and item.tmdb_id %}
+    {% set mapped_to_trakt = not tmdb_item or item.trakt_id %}
+    {% set provider_id = item.trakt_id if item.trakt_id else item.tmdb_id %}
+    {% set title_url = item.source_url if tmdb_item else trakt_title_url %}
     {% set actions_available = item.catalog_actions_available if page_kind == 'explore' else true %}
-    <article class="result-card search-result-card">
+    <article class="result-card search-result-card"{% if tmdb_item %} data-tmdb-card data-tmdb-id="{{ item.tmdb_id }}" data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id or '' }}"{% endif %}>
         <div class="search-result-side">
             <div class="search-result-title-stack">
                 <h3 class="search-result-title{% if item.title|length > 18 %} is-long{% endif %}{% if item.title|length > 28 %} is-xlong{% endif %}">
-                    <a href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">{{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}</a>
+                    <a href="{{ title_url }}" target="_blank" rel="noreferrer">{{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}</a>
                     {% if item.title_type == 'movie' %}<img class="search-result-type-icon" src="{{ request.url_for('static', path='film.svg') }}" alt="Movie" title="Movie">{% endif %}
                 </h3>
             </div>
@@ -214,10 +219,15 @@
                 <button
                     type="button"
                     class="progress-poster search-result-poster search-watch-poster-trigger"
+                    {% if tmdb_item and not mapped_to_trakt %}
+                    data-tmdb-watch-panel
+                    data-tmdb-id="{{ item.tmdb_id }}"
+                    {% else %}
                     data-search-show-watch-trigger
                     data-watch-panel-url="/search/show/{{ item.trakt_id }}/watch-panel"
-                    data-title-type="show"
                     data-trakt-id="{{ item.trakt_id }}"
+                    {% endif %}
+                    data-title-type="show"
                     data-title="{{ item.title }}"
                     aria-label="Open episode watch panel for {{ item.title }}"
                 >
@@ -234,15 +244,19 @@
                         {% endif %}
                         {% if item.is_in_history and page_kind in ('search', 'explore') %}<span class="catalog-seen-overlay" aria-label="Seen"><img src="{{ request.url_for('static', path='seen.svg') }}" alt=""></span>{% endif %}
                         {% if item.title_episode_avg_rating is defined and item.title_episode_avg_rating is not none %}
-                    <div class="history-rating-badge">
-                        {{ item.title_episode_avg_rating|round(1) }} &#9733;
+                    <div
+                        class="history-rating-badge user-rating-badge poster-average-rating-badge"
+                        style="--user-rating-color: {{ item.title_episode_avg_rating|rating_bucket_color }};"
+                    >
+                        <span class="user-rating-value">{{ item.title_episode_avg_rating|round(1) }}</span>
+                        <span class="user-rating-star">&#9733;</span>
                     </div>
                     {% endif %}
                 </button>
                 {% if actions_available %}
                 <a
                     class="icon-button search-card-action search-play-button"
-                    href="/search/{{ item.title_type }}/{{ item.trakt_id }}/play?title={{ item.title|urlencode }}"
+                    href="/search/{{ item.title_type }}/{{ provider_id }}/play?title={{ item.title|urlencode }}"
                     title="Play"
                     aria-label="Play {{ item.title }}"
                     target="_blank"
@@ -255,11 +269,16 @@
                     type="button"
                     class="icon-button search-card-action search-watch-title-button"
                     title="Choose watched history to remove"
+                    {% if tmdb_item and not mapped_to_trakt %}
+                    data-tmdb-watch-panel
+                    data-tmdb-id="{{ item.tmdb_id }}"
+                    {% else %}
                     data-search-show-watch-trigger
                     data-watch-panel-url="/search/show/{{ item.trakt_id }}/watch-panel"
                     data-trakt-id="{{ item.trakt_id }}"
-                    data-title="{{ item.title }}"
                     data-unwatch-focus="true"
+                    {% endif %}
+                    data-title="{{ item.title }}"
                     aria-label="Choose watched history to remove for {{ item.title }}"
                 >
                     <span class="search-watch-action-glyphs" aria-hidden="true">
@@ -272,10 +291,15 @@
                     type="button"
                     class="icon-button search-card-action search-watch-title-button"
                     title="Mark watched"
+                    {% if tmdb_item and not mapped_to_trakt %}
+                    data-tmdb-watch-panel
+                    data-tmdb-id="{{ item.tmdb_id }}"
+                    {% else %}
                     data-search-show-watch-trigger
                     data-watch-panel-url="/search/show/{{ item.trakt_id }}/watch-panel"
-                    data-title-type="show"
                     data-trakt-id="{{ item.trakt_id }}"
+                    {% endif %}
+                    data-title-type="show"
                     data-title="{{ item.title }}"
                     data-remove-from-watchlist="{{ 'true' if page_kind == 'watchlist' else 'false' }}"
                     aria-label="Mark {{ item.title }} watched"
@@ -285,7 +309,7 @@
                 {% endif %}
                 {% endif %}
                 {% else %}
-                <a class="progress-poster search-result-poster" href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">
+                <a class="progress-poster search-result-poster" href="{{ title_url }}" target="_blank" rel="noreferrer">
                     {% if item.poster_url %}
                     <img
                         src="{{ item.poster_url|cached_image_url }}"
@@ -300,7 +324,9 @@
                         {% if item.is_in_history and page_kind in ('search', 'explore') %}<span class="catalog-seen-overlay" aria-label="Seen"><img src="{{ request.url_for('static', path='seen.svg') }}" alt=""></span>{% endif %}
                         {% if item.title_episode_avg_rating is defined and item.title_episode_avg_rating is not none %}
                     <span
-                        class="history-rating-badge"
+                        class="history-rating-badge user-rating-badge{% if item.title_type == 'show' %} poster-average-rating-badge{% endif %}"
+                        style="--user-rating-color: {{ item.title_episode_avg_rating|rating_bucket_color }};"
+                        data-user-rating="{{ item.title_episode_avg_rating|int }}"
                         role="button"
                         tabindex="0"
                         data-rating-trigger
@@ -308,14 +334,15 @@
                         data-rating-trakt-id="{{ item.trakt_id }}"
                         data-rating-title="{{ item.title }}"
                     >
-                        {{ item.title_episode_avg_rating|round(1) }} &#9733;
+                        <span class="user-rating-value">{{ item.title_episode_avg_rating|round(1) if item.title_type == 'show' else item.title_episode_avg_rating|int }}</span>
+                        <span class="user-rating-star">&#9733;</span>
                     </span>
                     {% endif %}
                 </a>
                 {% if actions_available %}
                 <a
                     class="icon-button search-card-action search-play-button"
-                    href="/search/{{ item.title_type }}/{{ item.trakt_id }}/play?title={{ item.title|urlencode }}"
+                    href="/search/{{ item.title_type }}/{{ provider_id }}/play?title={{ item.title|urlencode }}"
                     title="Play"
                     aria-label="Play {{ item.title }}"
                     target="_blank"
@@ -328,11 +355,17 @@
                     type="button"
                     class="icon-button search-card-action search-watch-title-button search-watch-movie-button"
                     title="Remove from watched history"
+                    {% if tmdb_item and not mapped_to_trakt %}
+                    data-tmdb-watch-toggle
+                    data-tmdb-watched="true"
+                    data-tmdb-id="{{ item.tmdb_id }}"
+                    {% else %}
                     data-search-unwatch-action
-                    data-title-type="movie"
                     data-trakt-id="{{ item.trakt_id }}"
-                    data-title="{{ item.title }}"
                     data-scope="title"
+                    {% endif %}
+                    data-title-type="movie"
+                    data-title="{{ item.title }}"
                     aria-label="Remove {{ item.title }} from watched history"
                 >
                     <span class="search-watch-action-glyphs" aria-hidden="true">
@@ -345,11 +378,17 @@
                     type="button"
                     class="icon-button search-card-action search-watch-title-button search-watch-movie-button"
                     title="Mark watched"
+                    {% if tmdb_item and not mapped_to_trakt %}
+                    data-tmdb-watch-toggle
+                    data-tmdb-watched="false"
+                    data-tmdb-id="{{ item.tmdb_id }}"
+                    {% else %}
                     data-search-watch-action
-                    data-title-type="movie"
                     data-trakt-id="{{ item.trakt_id }}"
-                    data-title="{{ item.title }}"
                     data-scope="title"
+                    {% endif %}
+                    data-title-type="movie"
+                    data-title="{{ item.title }}"
                     data-remove-from-watchlist="{{ 'true' if page_kind == 'watchlist' else 'false' }}"
                     aria-label="Mark {{ item.title }} watched"
                 >
@@ -363,7 +402,13 @@
                     type="button"
                     class="icon-button search-card-action search-watchlist-button{% if item.is_release_tracked %} is-active{% endif %}"
                     title="{{ 'Stop release tracking' if item.is_release_tracked else 'Track release' }}"
+                    {% if tmdb_item %}
+                    data-tmdb-release-toggle data-tmdb-tracked="{{ 'true' if item.is_release_tracked else 'false' }}" data-tmdb-id="{{ item.tmdb_id }}"
+                    {% else %}
                     data-release-toggle data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id }}"
+                    {% endif %}
+                    data-title-type="{{ item.title_type }}"
+                    data-title="{{ item.title }}" data-released-at="{{ item.released_at.isoformat() if item.released_at else '' }}"
                     data-tracked="{{ 'true' if item.is_release_tracked else 'false' }}"
                     data-list-count="{{ item.explore_metric_count if item.explore_metric_count is not none else '' }}"
                     aria-pressed="{{ 'true' if item.is_release_tracked else 'false' }}"
@@ -375,9 +420,16 @@
                     type="button"
                     class="icon-button search-card-action search-watchlist-button{% if item.is_watchlisted %} is-active{% endif %}"
                     title="{{ 'Remove from watchlist' if item.is_watchlisted else 'Add to watchlist' }}"
+                    {% if tmdb_item %}
+                    data-tmdb-watchlist-toggle data-tmdb-watchlisted="{{ 'true' if item.is_watchlisted else 'false' }}" data-tmdb-id="{{ item.tmdb_id }}"
+                    {% else %}
                     data-watchlist-toggle
-                    data-title-type="{{ item.title_type }}"
                     data-trakt-id="{{ item.trakt_id }}"
+                    {% endif %}
+                    data-title-type="{{ item.title_type }}"
+                    data-title="{{ item.title }}"
+                    data-released-at="{{ item.released_at.isoformat() if item.released_at else '' }}"
+                    data-list-count="{{ item.explore_metric_count if item.explore_metric_count is not none else '' }}"
                     data-watchlisted="{{ 'true' if item.is_watchlisted else 'false' }}"
                     aria-pressed="{{ 'true' if item.is_watchlisted else 'false' }}"
                     aria-label="{{ 'Remove' if item.is_watchlisted else 'Add' }} {{ item.title }} {{ 'from' if item.is_watchlisted else 'to' }} watchlist"
@@ -393,9 +445,19 @@
                 </button>
                 {% endif %}
                 {% if page_kind == 'explore' and explore_feed == 'anticipated' %}
-                <div class="poster-chip progress-title-chip search-title-ratings-chip anticipated-release-chip" aria-label="Release timing and list count">
+                <div class="poster-chip progress-title-chip search-title-ratings-chip anticipated-release-chip" aria-label="{{ 'Release timing' if tmdb_item else 'Release timing and list count' }}">
                     <span>{{ item.release_distance_text or 'Release date unknown' }}</span>
+                    {% if not tmdb_item %}
                     <span class="anticipated-list-count"><img src="{{ request.url_for('static', path='bookmark.svg') }}" alt="" aria-hidden="true"> {{ item.explore_metric_count|compact_votes if item.explore_metric_count is not none else '—' }}</span>
+                    {% endif %}
+                </div>
+                {% elif tmdb_item %}
+                <div class="poster-chip progress-title-chip search-title-ratings-chip" aria-label="TMDb and IMDb title ratings">
+                    <span class="poster-chip-part"><span>TMDb {{ item.tmdb_rating|round(1) if item.tmdb_rating is not none else 'n/a' }}{% if item.tmdb_votes is not none %} ({{ item.tmdb_votes|compact_votes }}){% endif %}</span></span>
+                    <span class="poster-chip-part">
+                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="imdb">
+                        <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
+                    </span>
                 </div>
                 {% elif item.title_type == 'show' %}
                 <button
@@ -434,7 +496,16 @@
             <p class="search-result-meta">
                 <span>{{ 'TV Series' if item.title_type == 'show' else 'Movie' }}</span>
                 {% if item.status %}<span>{{ item.status }}</span>{% endif %}
-                {% if item.explore_metric_count is not none and item.explore_metric_kind and explore_feed != 'anticipated' %}
+                {% if tmdb_item and page_kind == 'explore' %}
+                {% if explore_feed == 'trending' and item.explore_rank is not none %}
+                <span
+                    class="explore-rank-metric"
+                    title="#{{ item.explore_rank }} weekly trend{% if item.popularity is not none %}; TMDb popularity {{ item.popularity|round(1) }}{% endif %}"
+                >weekly #{{ item.explore_rank }}{% if item.popularity is not none %} · TMDb pop. {{ item.popularity|round(1) }}{% endif %}</span>
+                {% elif item.popularity is not none %}
+                <span class="explore-rank-metric">TMDb popularity {{ item.popularity|round(1) }}</span>
+                {% endif %}
+                {% elif item.explore_metric_count is not none and item.explore_metric_kind and explore_feed != 'anticipated' %}
                 <span class="explore-rank-metric">{{ item.explore_metric_count|compact_votes }} {{ item.explore_metric_kind }}</span>
                 {% endif %}
             </p>
@@ -446,16 +517,16 @@
 <div class="pager">
     {% if page > 1 %}
     {% if page_kind == 'explore' %}
-    <a class="button ghost" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page - 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}{% endif %}">Previous</a>
+    <a class="button ghost" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page - 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ explore_tmdb_min if tmdb_preview else explore_trakt_min }}{% endif %}">Previous</a>
     {% else %}
-    <a class="button ghost" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page - 1 }}&imdb_min={{ search_imdb_min }}&trakt_min={{ search_trakt_min }}&hide_watchlisted={{ 1 if search_hide_watchlisted else 0 }}&hide_history={{ 1 if search_hide_history else 0 }}">Previous</a>
+    <a class="button ghost" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page - 1 }}&imdb_min={{ search_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ search_tmdb_min if tmdb_preview else search_trakt_min }}&hide_watchlisted={{ 1 if search_hide_watchlisted else 0 }}&hide_history={{ 1 if search_hide_history else 0 }}">Previous</a>
     {% endif %}
     {% endif %}
     {% if has_next %}
     {% if page_kind == 'explore' %}
-    <a class="button" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page + 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}{% endif %}">Next</a>
+    <a class="button" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page + 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}&imdb_min={{ explore_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ explore_tmdb_min if tmdb_preview else explore_trakt_min }}{% endif %}">Next</a>
     {% else %}
-    <a class="button" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page + 1 }}&imdb_min={{ search_imdb_min }}&trakt_min={{ search_trakt_min }}&hide_watchlisted={{ 1 if search_hide_watchlisted else 0 }}&hide_history={{ 1 if search_hide_history else 0 }}">Next</a>
+    <a class="button" href="/search?q={{ query|urlencode }}&type={{ search_type }}&sort={{ sort_mode|urlencode }}&page={{ page + 1 }}&imdb_min={{ search_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ search_tmdb_min if tmdb_preview else search_trakt_min }}&hide_watchlisted={{ 1 if search_hide_watchlisted else 0 }}&hide_history={{ 1 if search_hide_history else 0 }}">Next</a>
     {% endif %}
     {% endif %}
 </div>
@@ -475,7 +546,7 @@
 </section>
 {% elif page_kind == 'explore' and not error_message %}
 <section class="empty-state">
-    {% if explore_imdb_min or explore_trakt_min %}
+    {% if explore_imdb_min or (explore_tmdb_min if tmdb_preview else explore_trakt_min) %}
     <p>No titles on this page match the selected rating filters.</p>
     {% else %}
     <p>No titles are available in this Explore feed.</p>
@@ -484,10 +555,10 @@
 {% if page > 1 or has_next %}
 <div class="pager">
     {% if page > 1 %}
-    <a class="button ghost" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page - 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}{% endif %}">Previous</a>
+    <a class="button ghost" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page - 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&imdb_min={{ explore_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ explore_tmdb_min if tmdb_preview else explore_trakt_min }}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}{% endif %}">Previous</a>
     {% endif %}
     {% if has_next %}
-    <a class="button" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page + 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&imdb_min={{ explore_imdb_min }}&trakt_min={{ explore_trakt_min }}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}{% endif %}">Next</a>
+    <a class="button" href="/explore?type={{ explore_type }}&feed={{ explore_feed }}&page={{ page + 1 }}{% if explore_feed == 'anticipated' %}&hide_releases={{ 1 if explore_hide_releases else 0 }}{% else %}&imdb_min={{ explore_imdb_min }}&{{ 'tmdb_min' if tmdb_preview else 'trakt_min' }}={{ explore_tmdb_min if tmdb_preview else explore_trakt_min }}&hide_watchlisted={{ 1 if explore_hide_watchlisted else 0 }}&hide_history={{ 1 if explore_hide_history else 0 }}{% endif %}">Next</a>
     {% endif %}
 </div>
 {% endif %}
@@ -511,8 +582,14 @@
                     <span class="poster-chip-part"><img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt"><span data-search-watch-trakt-rating></span></span>
                     <span class="poster-chip-part"><img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="IMDb"><span data-search-watch-imdb-rating></span></span>
                 </button>
+                <button type="button" class="search-watch-scope-button search-watch-header-scope" data-search-watch-action data-search-watch-season-action data-search-watch-header-season-mark data-title-type="show" data-scope="season" hidden>
+                    <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"><span data-search-watch-header-season-label></span>
+                </button>
                 <button type="button" class="search-watch-scope-button search-watch-header-scope" data-search-watch-action data-search-watch-header-mark data-title-type="show" data-scope="title" hidden>
                     <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"><span>All</span>
+                </button>
+                <button type="button" class="search-watch-scope-button is-danger search-watch-header-scope" data-search-unwatch-action data-search-watch-season-action data-search-watch-header-season-unwatch data-title-type="show" data-scope="season" hidden>
+                    <span class="search-watch-action-glyphs" aria-hidden="true"><img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt=""><img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt=""></span><span data-search-watch-header-season-label></span>
                 </button>
                 <button type="button" class="search-watch-scope-button is-danger search-watch-header-scope" data-search-unwatch-action data-search-watch-header-unwatch data-title-type="show" data-scope="title" hidden>
                     <span class="search-watch-action-glyphs" aria-hidden="true"><img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt=""><img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt=""></span><span>All</span>
@@ -550,4 +627,5 @@
 
 {% block page_scripts %}
 <script src="{{ request.url_for('static', path='catalog_page.js') }}?v={{ static_js_version }}"></script>
+{% if tmdb_preview %}<script src="{{ request.url_for('static', path='tmdb_preview.js') }}?v={{ static_js_version }}"></script>{% endif %}
 {% endblock %}

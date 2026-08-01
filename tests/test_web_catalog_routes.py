@@ -18,11 +18,13 @@ from trakt_tracker.application.episode_ratings_matrix import (
     EpisodeMatrixRow,
     EpisodeMatrixSeason,
     EpisodeRatingsMatrixViewModel,
+    rating_bucket_color,
 )
 from trakt_tracker.application.enrich_state import ENRICH_STATUS_CHECKED_NO_DATA
 from trakt_tracker.web.routes_catalog import register_catalog_routes
 from trakt_tracker.domain import ExploreResultPage, TitleSummary
 from trakt_tracker.application.search_watch import SearchShowWatchPanel, SearchWatchEpisode, SearchWatchSeason
+from trakt_tracker.application.tmdb_catalog import TmdbCatalogItem, TmdbCatalogPage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = PROJECT_ROOT / "trakt_tracker" / "web" / "static"
@@ -280,6 +282,7 @@ class CatalogRouteTests(unittest.TestCase):
         self.templates.env.filters["rating_with_votes"] = lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a"
         self.templates.env.filters["compact_votes"] = lambda value: f"{value / 1000:.1f}k" if value >= 1000 else str(value)
         self.templates.env.filters["cached_image_url"] = lambda value: (f"/cached-image?url={quote(str(value))}&v=3" if value else "")
+        self.templates.env.filters["rating_bucket_color"] = rating_bucket_color
         self.templates.env.filters["episode_preview_url"] = lambda value: str(value).replace("/w780/", "/w342/")
         self.templates.env.filters["dt"] = lambda value: value.isoformat() if value else ""
         self.templates.env.filters["release_distance"] = lambda value: "soon" if value else "Release date unknown"
@@ -289,11 +292,12 @@ class CatalogRouteTests(unittest.TestCase):
         self.watchlist_calls: list[dict] = []
         self.catalog_watchlist_keys = {("show", 3)}
         self.release_tracking_keys = set()
+        self.release_tracking_calls: list[dict] = []
         self.catalog_history_keys = {("movie", 1)}
         self.enrichment_calls: list[dict] = []
         self.enrich_tasks: list[object] = []
         self.image_tasks: list[tuple[str, int]] = []
-        self.progress_refresh_calls: list[tuple[int, bool]] = []
+        self.progress_refresh_calls: list[tuple[int, bool, bool]] = []
         self.bg_task_calls: list[tuple[tuple, dict]] = []
         self.explore_saved_filters = {"imdb_min": "", "trakt_min": ""}
         self.search_saved_filters = {"imdb_min": "", "trakt_min": ""}
@@ -432,7 +436,7 @@ class CatalogRouteTests(unittest.TestCase):
                 filtered_search_titles=filtered_search_titles,
                 load_search_rating_filters=lambda: dict(self.search_saved_filters),
                 save_search_rating_filters=save_search_rating_filters,
-                set_watchlisted=lambda title_type, trakt_id, *, watchlisted: self.watchlist_calls.append(
+                set_watchlisted=lambda title_type, trakt_id, *, watchlisted, snapshot=None: self.watchlist_calls.append(
                     {"title_type": title_type, "trakt_id": trakt_id, "watchlisted": watchlisted}
                 ),
                 get_title_details=lambda trakt_id, title_type: TitleSummary(trakt_id=trakt_id, title_type=title_type, title="Fallback"),
@@ -449,8 +453,8 @@ class CatalogRouteTests(unittest.TestCase):
             ),
             history=SimpleNamespace(title_rating_badges=lambda trakt_ids: {1: 9.0, 3: 8.5}),
             progress=SimpleNamespace(
-                refresh_show_progress=lambda trakt_id, *, fresh=False: self.progress_refresh_calls.append(
-                    (trakt_id, fresh)
+                refresh_show_progress=lambda trakt_id, *, fresh=False, enrich_assets=True: self.progress_refresh_calls.append(
+                    (trakt_id, fresh, enrich_assets)
                 )
             ),
             play=SimpleNamespace(resolve_kinopoisk_url=lambda title: f"https://kino.example/{quote(title)}" if title else None),
@@ -459,11 +463,20 @@ class CatalogRouteTests(unittest.TestCase):
                 keys=lambda: set(self.release_tracking_keys),
                 local_keys=lambda: set(self.release_tracking_keys),
                 local_items=lambda: list(self.release_items),
+                matured_release_keys=lambda: {("show", 21)},
                 refresh=lambda: list(self.release_items),
                 refresh_anticipated_list_counts=lambda _items: None,
+                set_tracked=lambda title_type, trakt_id, *, tracked: self.release_tracking_calls.append(
+                    {
+                        "title_type": title_type,
+                        "trakt_id": trakt_id,
+                        "tracked": tracked,
+                    }
+                ),
             ),
             auth=SimpleNamespace(
                 config=SimpleNamespace(
+                    catalog_provider_mode="trakt",
                     utc_offset="+03:00",
                     explore_imdb_scan_page_limit=10,
                     web_imdb_seasons_enabled=True,
@@ -471,14 +484,83 @@ class CatalogRouteTests(unittest.TestCase):
                     active_slug="test-user",
                 )
             ),
+            tmdb_catalog=SimpleNamespace(
+                is_configured=lambda: True,
+                search_titles=lambda query, title_type=None, *, page, limit: TmdbCatalogPage(
+                    items=[
+                        TmdbCatalogItem(
+                            title_type="movie",
+                            tmdb_id=603,
+                            title="The Matrix",
+                            year=1999,
+                            poster_url="https://poster.example/matrix.jpg",
+                            tmdb_rating=8.2,
+                            tmdb_votes=28000,
+                            imdb_id="tt0133093",
+                            imdb_rating=8.7,
+                            imdb_votes=2_100_000,
+                            ratings_status="ready",
+                        )
+                    ],
+                    page=page,
+                    page_count=1,
+                ),
+                explore_titles=lambda title_type, feed, *, page, limit: TmdbCatalogPage(
+                    items=[
+                        TmdbCatalogItem(
+                            title_type=title_type,
+                            tmdb_id=101,
+                            title="TMDb Explore Title",
+                            year=2026,
+                            poster_url="https://poster.example/tmdb-explore.jpg",
+                            tmdb_rating=7.8,
+                            tmdb_votes=12000,
+                            imdb_id="tt0101",
+                            imdb_rating=7.6,
+                            imdb_votes=14000,
+                            ratings_status="ready",
+                            popularity=94.5,
+                            explore_metric_kind="weekly trend" if feed == "trending" else "popularity",
+                            explore_rank=1 if feed == "trending" else None,
+                            released_at=datetime(2026, 7, 1, tzinfo=UTC),
+                        )
+                    ],
+                    page=page,
+                    page_count=2,
+                ),
+                local_release_items=lambda: [
+                    TmdbCatalogItem(
+                        title_type="movie",
+                        tmdb_id=202,
+                        title="TMDb Released Movie",
+                        year=2026,
+                        poster_url="https://poster.example/tmdb-release.jpg",
+                        tmdb_rating=7.5,
+                        tmdb_votes=9000,
+                        imdb_id="tt0202",
+                        imdb_rating=7.3,
+                        imdb_votes=11000,
+                        ratings_status="ready",
+                        released_at=datetime.now(tz=UTC) - timedelta(days=2),
+                        is_release_tracked=True,
+                        is_notification_matured=True,
+                    )
+                ],
+                refresh_release_items=lambda: [],
+            ),
         )
         self.saved_imdb_seasons: list[bool] = []
         self.config_store = SimpleNamespace(
             save=lambda config: self.saved_imdb_seasons.append(bool(config.web_imdb_seasons_enabled))
         )
         self.app.state.runtime = SimpleNamespace(config_store=self.config_store)
+        def start_background_task(*args, **kwargs):
+            self.bg_task_calls.append((args, kwargs))
+            return True
+
         self.app.state.bg_tasks = SimpleNamespace(
-            start=lambda *args, **kwargs: self.bg_task_calls.append((args, kwargs)) or True
+            start=start_background_task,
+            start_coalesced=start_background_task,
         )
 
         def render(request: Request, template_name: str, context: dict, status_code: int = 200) -> HTMLResponse:
@@ -537,6 +619,89 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn('data-title-imdb-rating="8.4 (3400)"', html)
         self.assertNotIn("title-matrix-imdb-coordinate", html)
         self.assertNotIn('data-my-rating-toggle', html)
+
+    def test_tmdb_preview_search_reuses_existing_toolbar_and_card_layout(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        self.app.state.services.catalog.search_history = lambda: ["The Matrix"]
+
+        response = self.client.get("/search?q=The+Matrix&type=all&sort=TMDb+votes&imdb_min=7&tmdb_min=8")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn("search-toolbar-panel", html)
+        self.assertIn("data-search-query-input", html)
+        self.assertIn('name="type"', html)
+        self.assertIn('name="sort"', html)
+        self.assertIn("TMDb votes", html)
+        self.assertIn("IMDb votes", html)
+        self.assertIn('name="imdb_min"', html)
+        self.assertIn('name="tmdb_min"', html)
+        self.assertNotIn('name="trakt_min"', html)
+        self.assertIn('class="result-card search-result-card"', html)
+        self.assertIn('href="https://www.themoviedb.org/movie/603"', html)
+        self.assertIn("The Matrix (1999)", html)
+        self.assertIn("data-tmdb-card", html)
+        self.assertIn("data-tmdb-watchlist-toggle", html)
+        self.assertIn("search-watchlist-button", html)
+        self.assertIn("TMDb 8.2", html)
+        self.assertIn("<span>TMDb 8.2 (28.0k)</span>", html)
+        self.assertIn('aria-label="TMDb and IMDb title ratings"', html)
+        self.assertIn("8.7 (2100000)", html)
+        self.assertIn("imdb_icon.png", html)
+        self.assertNotIn("tmdb-preview-toolbar", html)
+        self.assertNotIn("tmdb-preview-card", html)
+        self.assertNotIn("TMDb preview search", html)
+
+    def test_tmdb_preview_explore_reuses_existing_toolbar_and_card_layout(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+
+        response = self.client.get("/explore?type=movie&feed=popular&page=1&imdb_min=7&tmdb_min=7")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn("explore-toolbar-panel", html)
+        self.assertIn("explore-media-tabs", html)
+        self.assertIn("explore-feed-tabs", html)
+        self.assertIn('name="imdb_min"', html)
+        self.assertIn('name="tmdb_min"', html)
+        self.assertNotIn('name="trakt_min"', html)
+        self.assertIn('class="result-card search-result-card"', html)
+        self.assertIn("TMDb Explore Title (2026)", html)
+        self.assertIn("TMDb 7.8", html)
+        self.assertIn("<span>TMDb 7.8 (12.0k)</span>", html)
+        self.assertIn("TMDb popularity 94.5", html)
+        self.assertIn('aria-label="TMDb and IMDb title ratings"', html)
+        self.assertIn("7.6 (14000)", html)
+        self.assertIn("imdb_icon.png", html)
+        self.assertNotIn("tmdb-preview-toolbar", html)
+        self.assertNotIn("tmdb-preview-card", html)
+
+        trending = self.client.get("/explore?type=movie&feed=trending&page=1")
+        self.assertIn("#1 weekly trend", trending.text)
+        self.assertIn("TMDb popularity 94.5", trending.text)
+        self.assertIn("weekly #1 · TMDb pop. 94.5", trending.text)
+
+        anticipated = self.client.get("/explore?type=movie&feed=anticipated&page=1")
+        self.assertIn("TMDb popularity 94.5", anticipated.text)
+
+    def test_tmdb_preview_releases_reuses_existing_sections_and_cards(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+
+        response = self.client.get("/release-tracking")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn("release-tracking-section", html)
+        self.assertIn("Released", html)
+        self.assertIn("Awaiting release", html)
+        self.assertIn('class="result-card search-result-card release-tracking-card', html)
+        self.assertIn("TMDb Released Movie (2026)", html)
+        self.assertIn("data-tmdb-card", html)
+        self.assertIn("TMDb 7.5", html)
+        self.assertIn("<span>TMDb 7.5 (9.0k)</span>", html)
+        self.assertIn("7.3 (11000)", html)
+        self.assertNotIn("tmdb-preview-toolbar", html)
+        self.assertNotIn("tmdb-preview-card", html)
 
     def test_combined_imdb_series_uses_safe_trakt_layout(self) -> None:
         self.matrix.imdb_layout_available = False
@@ -622,6 +787,11 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("8.6 (860)", html)
         self.assertIn("8.2 (12400)", html)
         self.assertEqual(html.count("anticipated-rating-part"), 2)
+        self.assertIn(
+            "release-tracking-card is-unacknowledged is-notification-due",
+            html,
+        )
+        self.assertIn('data-notification-matured="true"', html)
         self.assertIn('id="release-watch-overlay"', html)
         self.assertIn("data-show-watch-play", html)
         release_script = (STATIC_DIR / "release_tracking_page.js").read_text(encoding="utf-8")
@@ -631,7 +801,24 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn('data-title-matrix-url="/titles/show/22/episode-ratings-matrix"', html)
         self.assertNotIn("scheduleWatchPanelRefreshIfPending", html)
         self.assertIn("refreshWatchPanel", release_script)
+        self.assertIn('"is-notification-due",', release_script)
         self.assertEqual(html.count('loading="lazy" decoding="async" fetchpriority="low"'), 1)
+        styles = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".release-tracking-card.is-notification-due", styles)
+        notification_styles = styles[
+            styles.index(".release-tracking-card.is-notification-due") :
+            styles.index(".anticipated-release-chip")
+        ]
+        self.assertIn("border-color: #c6283d;", notification_styles)
+        self.assertIn("outline: 3px solid", notification_styles)
+        self.assertIn(
+            ".release-tracking-card.is-notification-due .search-watchlist-button",
+            notification_styles,
+        )
+        self.assertIn("filter: brightness(0) invert(1);", notification_styles)
+        self.assertIn("@keyframes release-notification-alert", notification_styles)
+        self.assertIn("@keyframes release-notification-bell", notification_styles)
+        self.assertNotIn("border-color: #2f9f73;", notification_styles)
 
     def test_release_page_keeps_title_without_release_date_in_upcoming(self) -> None:
         self.release_items.append(
@@ -672,6 +859,36 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("pointer-events: none", css.split(".catalog-seen-overlay {", 1)[1].split("}", 1)[0])
         self.assertIn("z-index: 2", css.split(".search-title-ratings-chip {", 1)[1].split("}", 1)[0])
         self.assertIn("z-index: 2", css.split(".search-result-poster > .history-rating-badge {", 1)[1].split("}", 1)[0])
+        badge_rule = css.split(".user-rating-badge {", 1)[1].split("}", 1)[0]
+        tail_rule = css.split(".user-rating-badge::after {", 1)[1].split("}", 1)[0]
+        value_rule = css.split(".user-rating-value {", 1)[1].split("}", 1)[0]
+        star_rule = css.split(".user-rating-star {", 1)[1].split("}", 1)[0]
+        self.assertIn("border: 0", badge_rule)
+        self.assertIn("background: #fff", badge_rule)
+        self.assertIn("padding: 4px 14px 5px 8px", badge_rule)
+        self.assertIn("overflow: hidden", badge_rule)
+        self.assertIn("width: 10px", tail_rule)
+        self.assertIn("top: 2px", tail_rule)
+        self.assertIn("right: 2px", tail_rule)
+        self.assertIn("bottom: 2px", tail_rule)
+        self.assertIn("border-radius: 0 10px 10px 0", tail_rule)
+        self.assertIn("background: var(--user-rating-color", tail_rule)
+        self.assertIn("color: #374151", value_rule)
+        self.assertNotIn("font-weight", value_rule)
+        self.assertIn("-webkit-text-stroke: 0", value_rule)
+        self.assertNotIn("paint-order", value_rule)
+        self.assertIn("text-shadow: none", value_rule)
+        self.assertIn("color: #374151", star_rule)
+        self.assertIn("-webkit-text-stroke: 0", star_rule)
+        self.assertIn("text-shadow: none", star_rule)
+        self.assertNotIn(".poster-average-rating-badge {", css)
+        self.assertNotIn(".episode-user-rating-badge {", css)
+        self.assertIn('--user-rating-color: rgb(24, 106, 59)', css)
+        self.assertIn('--user-rating-color: rgb(40, 180, 99)', css)
+        self.assertIn('--user-rating-color: rgb(244, 208, 63)', css)
+        self.assertIn('--user-rating-color: rgb(243, 156, 18)', css)
+        self.assertIn('--user-rating-color: rgb(231, 76, 60)', css)
+        self.assertIn('--user-rating-color: rgb(99, 57, 116)', css)
 
     def test_search_rating_filters_apply_and_are_restored(self) -> None:
         response = self.client.get("/search?q=test&type=all&imdb_min=8&trakt_min=7")
@@ -744,12 +961,24 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertNotIn('data-search-watch-date-mode="none"', html)
         self.assertIn("data-search-watch-header-mark", html)
         self.assertIn("data-search-watch-header-unwatch", html)
-        self.assertLess(html.index("data-search-watch-header-mark"), html.index("data-search-watch-header-unwatch"))
-        self.assertLess(html.index("data-search-watch-header-unwatch"), html.index("data-show-watch-play"))
+        season_mark_index = html.index("data-search-watch-header-season-mark")
+        mark_all_index = html.index("data-search-watch-header-mark")
+        season_unwatch_index = html.index("data-search-watch-header-season-unwatch")
+        unwatch_all_index = html.index("data-search-watch-header-unwatch")
+        play_index = html.index("data-show-watch-play")
+        self.assertLess(season_mark_index, mark_all_index)
+        self.assertLess(mark_all_index, season_unwatch_index)
+        self.assertLess(season_unwatch_index, unwatch_all_index)
+        self.assertLess(unwatch_all_index, play_index)
         self.assertIn('/search/movie/1/play?title=Movie%20A', html)
         self.assertIn('/search/show/3/play?title=The%20Capture', html)
-        self.assertIn('8.5 &#9733;', html)
-        self.assertIn('9.0 &#9733;', html)
+        self.assertIn('class="history-rating-badge user-rating-badge poster-average-rating-badge"', html)
+        self.assertIn('style="--user-rating-color: rgb(40, 180, 99);"', html)
+        self.assertIn('<span class="user-rating-value">8.5</span>', html)
+        self.assertIn('<span class="user-rating-star">&#9733;</span>', html)
+        self.assertIn('class="history-rating-badge user-rating-badge"', html)
+        self.assertIn('style="--user-rating-color: rgb(24, 106, 59);"', html)
+        self.assertIn('<span class="user-rating-value">9</span>', html)
         self.assertIn('/cached-image?url=https%3A//poster.example/capture.jpg&amp;v=3', html)
         self.assertIn('/cached-image?url=https%3A//poster.example/movie-a.jpg&amp;v=3', html)
         self.assertEqual(html.count('decoding="async"'), 2)
@@ -1110,8 +1339,11 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertTrue(all("Unmapped" not in label for label in episode_labels))
         self.assertIn("No preview", html)
         self.assertIn('data-still-pending="1"', html)
-        self.assertNotIn('title="Mark all released episodes in S0 watched"', html)
-        self.assertIn('title="Remove watched history for S1"', html)
+        season_one_tab = html.split('data-search-watch-season-tab="1"', 1)[1].split("</button>", 1)[0]
+        self.assertIn('data-search-watch-season-label="S1"', season_one_tab)
+        self.assertIn('data-search-watch-season-can-mark="0"', season_one_tab)
+        self.assertIn('data-search-watch-season-can-unwatch="1"', season_one_tab)
+        self.assertNotIn("search-watch-bulk-actions", html)
         self.assertIn('data-season-layout="imdb"', html)
         self.assertIn('class="search-watch-episode-card is-watched"', html)
         self.assertIn('class="search-watch-seen-overlay"', html)
@@ -1130,16 +1362,21 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertNotIn("dataset.directSrc", html)
         self.assertEqual(self.search_watch.enrich_still_calls, [])
         self.assertIn("data-search-unwatch-action", html)
-        self.assertIn('data-scope="season"', html)
+        self.assertNotIn('data-scope="season"', html)
         self.assertNotIn("Mark season", html)
         self.assertNotIn("Undo season", html)
         self.assertNotIn("Undo entire series", html)
         self.assertIn("seen.svg", html)
         self.assertIn("cancel.svg", html)
-        self.assertIn('class="history-rating-badge search-watch-user-rating"', html)
+        self.assertIn(
+            'class="history-rating-badge user-rating-badge episode-user-rating-badge search-watch-user-rating"',
+            html,
+        )
         self.assertIn('data-rating-season="1"', html)
         self.assertIn('data-rating-episode="1"', html)
-        self.assertIn("8 &#9733;", html)
+        self.assertIn('data-user-rating="8"', html)
+        self.assertIn('<span class="user-rating-value">8</span>', html)
+        self.assertIn('<span class="user-rating-star">&#9733;</span>', html)
         self.assertIn('class="history-rate-chip search-watch-user-rating"', html)
         self.assertIn(">Rate</button>", html)
         page = self.client.get("/search?q=test&type=all")
@@ -1149,6 +1386,11 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("configureTitleRatings(overlay, body)", panel_script)
         self.assertIn("episode-ratings-matrix", panel_script)
         self.assertIn("syncTitleMatrixTitleRatings", ui_script)
+        self.assertIn("function renderSavedRating(trigger, rating)", ui_script)
+        self.assertIn('trigger.classList.add("user-rating-badge")', ui_script)
+        self.assertIn('trigger.dataset.userRating = String(rating)', ui_script)
+        self.assertIn('value.className = "user-rating-value"', ui_script)
+        self.assertIn('star.className = "user-rating-star"', ui_script)
 
     def test_watch_panel_spoilers_require_history_and_only_blur_after_frontier(self) -> None:
         self.app.state.services.auth.config.web_hide_spoilers = True
@@ -1218,9 +1460,30 @@ class CatalogRouteTests(unittest.TestCase):
             template = template_path.read_text(encoding="utf-8")
             actions_index = template.index('class="search-watch-header-actions"')
             ratings_index = template.index("data-search-watch-title-ratings")
+            season_mark_index = template.index("data-search-watch-header-season-mark")
             mark_all_index = template.index("data-search-watch-header-mark")
+            season_unwatch_index = template.index("data-search-watch-header-season-unwatch")
+            unwatch_all_index = template.index("data-search-watch-header-unwatch")
+            play_index = template.index("data-show-watch-play")
             self.assertLess(actions_index, ratings_index, template_path.name)
-            self.assertLess(ratings_index, mark_all_index, template_path.name)
+            self.assertLess(ratings_index, season_mark_index, template_path.name)
+            self.assertLess(season_mark_index, mark_all_index, template_path.name)
+            self.assertLess(mark_all_index, season_unwatch_index, template_path.name)
+            self.assertLess(season_unwatch_index, unwatch_all_index, template_path.name)
+            self.assertLess(unwatch_all_index, play_index, template_path.name)
+
+        adapter_paths = (
+            STATIC_DIR / "catalog_page.js",
+            STATIC_DIR / "history_watch_panel.js",
+            STATIC_DIR / "release_tracking_page.js",
+        )
+        for adapter_path in adapter_paths:
+            adapter = adapter_path.read_text(encoding="utf-8")
+            self.assertIn(
+                "configureScopeActions(watchOverlay, trigger, null)",
+                adapter,
+                adapter_path.name,
+            )
 
         css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
         matrix_rule = css.split(".title-matrix-overlay {", 1)[1].split("}", 1)[0]
@@ -1545,11 +1808,11 @@ class CatalogRouteTests(unittest.TestCase):
         progress_tasks = [
             kwargs
             for args, kwargs in self.bg_task_calls
-            if args and args[0] == "progress_watch_3_episode_1_1"
+            if args and args[0] == "progress_refresh_after_watch_3"
         ]
         self.assertEqual(len(progress_tasks), 1)
         progress_tasks[0]["fn"]()
-        self.assertEqual(self.progress_refresh_calls, [(3, True)])
+        self.assertEqual(self.progress_refresh_calls, [(3, True, False)])
 
     def test_watchlist_title_watch_removes_it_from_watchlist(self) -> None:
         response = self.client.post(
@@ -1566,6 +1829,10 @@ class CatalogRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["removed_from_watchlist"])
+        self.assertEqual(self.watchlist_calls, [])
+        tasks = {args[0]: kwargs for args, kwargs in self.bg_task_calls if args}
+        self.assertIn("watchlist_remove_after_watch_movie_4", tasks)
+        tasks["watchlist_remove_after_watch_movie_4"]["fn"]()
         self.assertEqual(
             self.watchlist_calls[-1],
             {"title_type": "movie", "trakt_id": 4, "watchlisted": False},
@@ -1587,6 +1854,11 @@ class CatalogRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["removed_from_watchlist"])
+        self.assertEqual(self.watchlist_calls, [])
+        tasks = {args[0]: kwargs for args, kwargs in self.bg_task_calls if args}
+        self.assertIn("watchlist_remove_after_watch_show_3", tasks)
+        self.assertIn("progress_refresh_after_watch_3", tasks)
+        tasks["watchlist_remove_after_watch_show_3"]["fn"]()
         self.assertEqual(
             self.watchlist_calls,
             [{"title_type": "show", "trakt_id": 3, "watchlisted": False}],
@@ -1608,9 +1880,38 @@ class CatalogRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["removed_from_watchlist"])
+        self.assertEqual(self.watchlist_calls, [])
+        tasks = {args[0]: kwargs for args, kwargs in self.bg_task_calls if args}
+        self.assertIn("watchlist_remove_after_watch_show_3", tasks)
+        self.assertIn("progress_refresh_after_watch_3", tasks)
+        tasks["watchlist_remove_after_watch_show_3"]["fn"]()
         self.assertEqual(
             self.watchlist_calls,
             [{"title_type": "show", "trakt_id": 3, "watchlisted": False}],
+        )
+
+    def test_title_watch_queues_release_tracking_cleanup(self) -> None:
+        self.release_tracking_keys.add(("show", 3))
+
+        response = self.client.post(
+            "/search/watch",
+            json={
+                "title_type": "show",
+                "trakt_id": 3,
+                "title": "The Capture",
+                "scope": "title",
+                "date_mode": "now",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.release_tracking_calls, [])
+        tasks = {args[0]: kwargs for args, kwargs in self.bg_task_calls if args}
+        self.assertIn("release_remove_after_watch_show_3", tasks)
+        tasks["release_remove_after_watch_show_3"]["fn"]()
+        self.assertEqual(
+            self.release_tracking_calls,
+            [{"title_type": "show", "trakt_id": 3, "tracked": False}],
         )
 
     def test_show_watch_does_not_write_watchlist_when_title_is_not_listed(self) -> None:
@@ -1630,6 +1931,10 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["removed_from_watchlist"])
         self.assertEqual(self.watchlist_calls, [])
+        self.assertEqual(
+            [args[0] for args, _kwargs in self.bg_task_calls if args],
+            ["progress_refresh_after_watch_30"],
+        )
 
 
 if __name__ == "__main__":

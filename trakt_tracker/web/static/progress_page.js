@@ -27,8 +27,6 @@
                 show_dropped: root.dataset.showDropped || "0",
                 sort: root.dataset.sort || "episode_release",
                 direction: root.dataset.direction || "desc",
-                use_year_filter: root.dataset.useYearFilter || "0",
-                min_year: root.dataset.minYear || "",
             });
             const toggleName = toggle.dataset.progressToggle || "";
             params.set(toggleName, toggle.checked ? "1" : "0");
@@ -44,11 +42,6 @@
         if (sortSelect instanceof HTMLSelectElement && sortSelect.form) {
             sortSelect.form.requestSubmit();
             return;
-        }
-        const yearToggle = event.target.closest("[data-progress-year-toggle]");
-        if (yearToggle instanceof HTMLInputElement && yearToggle.form) {
-            yearToggle.form.elements.use_year_filter.value = yearToggle.checked ? "1" : "0";
-            yearToggle.form.requestSubmit();
         }
     });
 
@@ -202,8 +195,6 @@
             this.showDropped = root.dataset.showDropped || "0";
             this.sort = root.dataset.sort || "episode_release";
             this.direction = root.dataset.direction || "desc";
-            this.minYear = root.dataset.minYear || "";
-            this.useYearFilter = root.dataset.useYearFilter || "0";
             this.idleRefreshIntervalMs = 300000;
             this.viewportRefreshDebounceMs = 180;
             this.progressSyncRunning = root.dataset.progressSyncRunning === "1";
@@ -446,8 +437,6 @@
                         show_dropped: this.showDropped,
                         sort: this.sort,
                         direction: this.direction,
-                        min_year: this.minYear,
-                        use_year_filter: this.useYearFilter,
                         viewport_card_keys: this.viewportKeys(),
                         nearby_card_keys: this.nearbyKeys(),
                         page_card_keys: this.pageCardKeys(),

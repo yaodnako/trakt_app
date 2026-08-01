@@ -33,6 +33,11 @@ class _FakeAuth:
         return self._client
 
 
+class _UnavailableAuth:
+    def get_client(self):
+        raise AssertionError("Offline notification evaluation must not contact Trakt")
+
+
 class _FakeNotificationRepository:
     def __init__(self) -> None:
         self.sent: list[dict] = []
@@ -189,6 +194,60 @@ class NotificationRefreshWorkflowTests(unittest.TestCase):
         self.assertEqual(notification_repo.sent, [])
         self.assertEqual(len(notification_repo.tracked), 1)
 
+    def test_poll_local_tracks_known_released_next_episode_without_trakt(self) -> None:
+        episode = EpisodeSummary(
+            trakt_id=70,
+            season=1,
+            number=2,
+            title="Known Local Release",
+            first_aired=datetime.now(tz=UTC) - timedelta(minutes=30),
+        )
+        notification_repo = _FakeNotificationRepository()
+        sender = _FakeSender()
+        workflow = NotificationRefreshWorkflow(
+            db=type("FakeDB", (), {"session": lambda self: nullcontext(object())})(),
+            auth_service=_UnavailableAuth(),
+            config_store=_FakeConfigStore(AppConfig(notification_release_delay_minutes=180)),
+            notification_repo=notification_repo,
+            episode_repo=object(),
+            progress_repo=_FakeProgressRepository(episode),
+            sender=sender,
+        )
+
+        sent = workflow.poll_upcoming(send_native=True, refresh_remote=False)
+
+        self.assertEqual(sent, [])
+        self.assertEqual(sender.messages, [])
+        self.assertEqual(len(notification_repo.tracked), 1)
+        self.assertIsNone(notification_repo.logs[(1, 70)].seen_at)
+
+    def test_poll_local_ignores_old_unwatched_episode_outside_calendar_lookback(self) -> None:
+        episode = EpisodeSummary(
+            trakt_id=70,
+            season=1,
+            number=2,
+            title="Old Unwatched Episode",
+            first_aired=datetime.now(tz=UTC) - timedelta(days=365 * 5),
+        )
+        notification_repo = _FakeNotificationRepository()
+        sender = _FakeSender()
+        workflow = NotificationRefreshWorkflow(
+            db=type("FakeDB", (), {"session": lambda self: nullcontext(object())})(),
+            auth_service=_UnavailableAuth(),
+            config_store=_FakeConfigStore(AppConfig(notification_release_delay_minutes=180)),
+            notification_repo=notification_repo,
+            episode_repo=object(),
+            progress_repo=_FakeProgressRepository(episode),
+            sender=sender,
+        )
+
+        sent = workflow.poll_upcoming(send_native=True, refresh_remote=False)
+
+        self.assertEqual(sent, [])
+        self.assertEqual(sender.messages, [])
+        self.assertEqual(notification_repo.tracked, [])
+        self.assertEqual(notification_repo.logs, {})
+
     def test_poll_upcoming_sends_after_configured_release_delay(self) -> None:
         sent, sender, notification_repo = self._poll(first_aired=datetime.now(tz=UTC) - timedelta(minutes=121))
 
@@ -327,7 +386,7 @@ class NotificationRefreshWorkflowTests(unittest.TestCase):
             season=1,
             number=3,
             title="Current Next",
-            first_aired=released_at,
+            first_aired=datetime.now(tz=UTC) + timedelta(days=1),
         )
         notification_repo = _FakeNotificationRepository()
         notification_repo.track_released(

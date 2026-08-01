@@ -118,7 +118,7 @@
         mappingRefreshAttempts = 0;
         if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
         if (watchTitle) watchTitle.textContent = trigger.dataset.title || "Episodes";
-        window.traktShowWatchPanel?.configureTitleRatings(watchOverlay, null);
+        window.traktShowWatchPanel?.configureScopeActions(watchOverlay, trigger, null);
         window.traktShowWatchPanel?.configurePlayAction(watchOverlay, trigger);
         setOverlayOpen(watchOverlay, true);
         loadWatchPanel("", {focusDefault: true});
@@ -248,7 +248,12 @@
                 const result = await post("/release-tracking/acknowledge", {title_type: button.dataset.titleType, trakt_id: Number(button.dataset.traktId), acknowledged: next});
                 button.dataset.acknowledged = result.acknowledged ? "true" : "false";
                 button.classList.toggle("is-active", result.acknowledged);
-                button.closest("[data-release-card]")?.classList.toggle("is-unacknowledged", !result.acknowledged);
+                const card = button.closest("[data-release-card]");
+                card?.classList.toggle("is-unacknowledged", !result.acknowledged);
+                card?.classList.toggle(
+                    "is-notification-due",
+                    !result.acknowledged && card.dataset.notificationMatured === "true",
+                );
                 button.title = result.acknowledged ? "Resume notifications" : "Acknowledge release";
             } else {
                 await post("/search/watch", {title_type: button.dataset.titleType, trakt_id: Number(button.dataset.traktId), title: button.dataset.title, scope: "title"});

@@ -43,7 +43,16 @@ def register_rating_routes(app) -> None:
         except Exception as exc:
             return JSONResponse({"ok": False, "message": f"Rating failed: {exc}"}, status_code=400)
         services.operations.publish("Rating action", f"Save rating: {title or title_type} -> {rating}/10")
-        return JSONResponse({"ok": True, "message": "Rating saved.", "rating": rating})
+        return JSONResponse({
+            "ok": True,
+            "message": "Rating saved.",
+            "rating": rating,
+            **(
+                services.trakt_sync.mutation_metadata()
+                if callable(getattr(getattr(services, "trakt_sync", None), "mutation_metadata", None))
+                else {}
+            ),
+        })
 
 
 def _optional_int(value) -> int | None:

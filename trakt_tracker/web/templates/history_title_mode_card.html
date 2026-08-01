@@ -38,7 +38,9 @@
             {% endif %}
             {% if title_card.my_rating is not none %}
             <span
-                class="history-rating-badge"
+                class="history-rating-badge user-rating-badge{% if title_card.type == 'show' %} poster-average-rating-badge{% endif %}"
+                style="--user-rating-color: {{ title_card.my_rating|rating_bucket_color }};"
+                data-user-rating="{{ title_card.my_rating|int }}"
                 {% if title_card.type == 'movie' %}
                 role="button"
                 tabindex="0"
@@ -48,7 +50,8 @@
                 data-rating-title="{{ title_card.title }}"
                 {% endif %}
             >
-                {% if title_card.type == 'show' %}{{ title_card.my_rating|round(1) }}{% else %}{{ title_card.my_rating|int }}{% endif %} &#9733;
+                <span class="user-rating-value">{{ title_card.my_rating|round(1) if title_card.type == 'show' else title_card.my_rating|int }}</span>
+                <span class="user-rating-star">&#9733;</span>
             </span>
             {% endif %}
         </a>

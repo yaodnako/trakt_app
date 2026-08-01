@@ -696,35 +696,6 @@ select {
     flex-wrap: wrap;
 }
 
-.year-filter-box {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-    order: 2;
-    flex: 0 0 auto;
-}
-
-.year-filter-form {
-    display: inline-flex;
-    align-items: center;
-}
-
-.year-input {
-    width: 58px;
-    min-width: 58px;
-    padding: 10px 4px;
-    border-radius: 999px;
-    text-align: center;
-    appearance: textfield;
-}
-
-.year-input::-webkit-inner-spin-button,
-.year-input::-webkit-outer-spin-button {
-    margin: 0;
-    appearance: none;
-}
-
 .progress-filter-label {
     display: inline-flex;
     align-items: center;
@@ -829,6 +800,18 @@ select {
 
 .settings-card-head .eyebrow {
     margin: 0 0 3px;
+}
+
+.settings-trakt-queue-line {
+    align-items: center;
+    display: flex;
+    gap: 0.75rem;
+    justify-content: space-between;
+}
+
+.settings-trakt-queue-line > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .settings-field-grid {
@@ -1050,6 +1033,65 @@ select {
     text-align: center;
     font-variant-numeric: tabular-nums;
     vertical-align: middle;
+}
+
+.user-rating-badge {
+    padding: 4px 14px 5px 8px;
+    border: 0;
+    background: #fff;
+    overflow: hidden;
+}
+
+.user-rating-badge::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    bottom: 2px;
+    width: 10px;
+    border-radius: 0 10px 10px 0;
+    pointer-events: none;
+    background: var(--user-rating-color, rgba(55, 65, 81, 0.92));
+}
+
+.user-rating-value {
+    color: #374151;
+    -webkit-text-stroke: 0;
+    text-shadow: none;
+}
+
+.user-rating-star {
+    color: #374151;
+    -webkit-text-stroke: 0;
+    text-shadow: none;
+}
+
+.user-rating-badge[data-user-rating="9"],
+.user-rating-badge[data-user-rating="10"] {
+    --user-rating-color: rgb(24, 106, 59);
+}
+
+.user-rating-badge[data-user-rating="8"] {
+    --user-rating-color: rgb(40, 180, 99);
+}
+
+.user-rating-badge[data-user-rating="7"] {
+    --user-rating-color: rgb(244, 208, 63);
+}
+
+.user-rating-badge[data-user-rating="6"] {
+    --user-rating-color: rgb(243, 156, 18);
+}
+
+.user-rating-badge[data-user-rating="5"] {
+    --user-rating-color: rgb(231, 76, 60);
+}
+
+.user-rating-badge[data-user-rating="1"],
+.user-rating-badge[data-user-rating="2"],
+.user-rating-badge[data-user-rating="3"],
+.user-rating-badge[data-user-rating="4"] {
+    --user-rating-color: rgb(99, 57, 116);
 }
 
 .history-rating-badge[data-rating-trigger] {
@@ -3395,6 +3437,7 @@ tbody tr:hover {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
     margin-left: 18px;
     align-self: center;
 }
@@ -3475,8 +3518,7 @@ tbody tr:hover {
     padding-inline: 10px;
 }
 
-.search-watch-seasons,
-.search-watch-bulk-actions {
+.search-watch-seasons {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -3539,8 +3581,7 @@ tbody tr:hover {
     gap: 12px;
 }
 
-.search-watch-episode-grid.is-hidden,
-.search-watch-season-action.is-hidden {
+.search-watch-episode-grid.is-hidden {
     display: none;
 }
 
@@ -4147,6 +4188,57 @@ tbody tr:hover {
     border-color: #2f9f73;
     background: rgba(238, 250, 243, 0.98);
     box-shadow: none;
+}
+.release-tracking-card.is-notification-due {
+    border-color: #c6283d;
+    outline: 3px solid rgba(198, 40, 61, 0.72);
+    outline-offset: 3px;
+    background: rgba(255, 240, 243, 0.98);
+    box-shadow:
+        0 0 0 4px rgba(198, 40, 61, 0.22),
+        0 0 30px 10px rgba(198, 40, 61, 0.38);
+    animation: release-notification-alert 1.6s ease-in-out infinite;
+}
+.release-tracking-card.is-notification-due .search-watchlist-button {
+    border-color: #fff;
+    background: #c6283d;
+    box-shadow:
+        0 0 0 3px rgba(198, 40, 61, 0.3),
+        0 0 18px 6px rgba(198, 40, 61, 0.55);
+    animation: release-notification-bell 0.8s ease-in-out infinite alternate;
+}
+.release-tracking-card.is-notification-due .release-bell-icon {
+    filter: brightness(0) invert(1);
+}
+@keyframes release-notification-alert {
+    0%,
+    100% {
+        border-color: #c6283d;
+        outline-color: rgba(198, 40, 61, 0.62);
+        box-shadow:
+            0 0 0 4px rgba(198, 40, 61, 0.22),
+            0 0 30px 10px rgba(198, 40, 61, 0.38);
+    }
+    50% {
+        border-color: #ff334e;
+        outline-color: rgba(255, 51, 78, 0.92);
+        box-shadow:
+            0 0 0 7px rgba(255, 51, 78, 0.34),
+            0 0 48px 16px rgba(255, 51, 78, 0.56);
+    }
+}
+@keyframes release-notification-bell {
+    from {
+        transform: scale(1);
+        background: #c6283d;
+    }
+    to {
+        transform: scale(1.16);
+        background: #ff334e;
+        box-shadow:
+            0 0 0 5px rgba(255, 51, 78, 0.38),
+            0 0 24px 9px rgba(255, 51, 78, 0.68);
+    }
 }
 .anticipated-release-chip {
     text-align: left;

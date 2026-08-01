@@ -14,8 +14,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from trakt_tracker.application.episode_ratings_matrix import rating_bucket_color
 from trakt_tracker.application.services import ServiceContainer
-from trakt_tracker.config import ConfigStore, format_local_datetime, get_app_data_dir
+from trakt_tracker.config import ConfigStore, format_local_datetime, get_app_data_dir, normalize_catalog_provider_mode
 from trakt_tracker.formatting import format_compact_votes, format_rating_with_votes
 from trakt_tracker.infrastructure.artwork_cache import tmdb_episode_preview_url
 from trakt_tracker.infrastructure.cache import BinaryCache
@@ -176,6 +177,9 @@ class _TraktEpisodeRatingsRefreshLoop:
                 services = self._app.state.services
                 if services is None:
                     raise RuntimeError("Profile services are unavailable")
+                if not services.auth.is_authorized():
+                    self._stop_event.wait(self._poll_interval_seconds)
+                    continue
                 bg_tasks = self._app.state.bg_tasks
                 if not bg_tasks.has_running_prefix(
                     "history_sync",
@@ -190,6 +194,33 @@ class _TraktEpisodeRatingsRefreshLoop:
                         "Episode ratings",
                         f"Episode ratings refresh loop failed: {type(exc).__name__}: {exc}",
                     )
+            self._stop_event.wait(self._poll_interval_seconds)
+
+
+class _TraktOutboxLoop:
+    def __init__(self, app: FastAPI, *, poll_interval_seconds: float = 30.0) -> None:
+        self._app = app
+        self._poll_interval_seconds = max(10.0, float(poll_interval_seconds))
+        self._stop_event = Event()
+        self._thread = Thread(target=self._run, name="web-trakt-outbox", daemon=True)
+
+    def start(self) -> None:
+        if not self._thread.is_alive():
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                services: ServiceContainer = self._app.state.services
+                status = services.trakt_sync.status()
+                if services.auth.is_authorized() and status["pending"] > 0:
+                    services.trakt_sync.wake()
+            except Exception:
+                logging.getLogger("trakt_tracker.runtime").exception("Trakt outbox loop failed")
             self._stop_event.wait(self._poll_interval_seconds)
 
 
@@ -294,6 +325,7 @@ def _build_templates() -> Jinja2Templates:
     templates_dir = Path(__file__).with_name("templates")
     templates = Jinja2Templates(directory=str(templates_dir))
     templates.env.filters["compact_votes"] = _TemplateFilters.format_compact_votes
+    templates.env.filters["rating_bucket_color"] = rating_bucket_color
     templates.env.filters["rating_with_votes"] = _TemplateFilters.format_rating_with_votes
     templates.env.filters["dt"] = _TemplateFilters.format_dt
     templates.env.filters["episode_label"] = _TemplateFilters.season_episode_label
@@ -380,12 +412,14 @@ def create_app(
     owns_runtime = runtime is None
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        application.state.trakt_outbox_loop.start()
         application.state.imdb_auto_sync_loop.start()
         application.state.trakt_episode_ratings_refresh_loop.start()
         application.state.artwork_cache_warm_loop.start()
         try:
             yield
         finally:
+            application.state.trakt_outbox_loop.stop()
             application.state.imdb_auto_sync_loop.stop()
             application.state.trakt_episode_ratings_refresh_loop.stop()
             application.state.artwork_cache_warm_loop.stop()
@@ -402,6 +436,7 @@ def create_app(
     app.state.image_cache = BinaryCache("images")
     app.state.bg_tasks = app.state.runtime.background_tasks
     app.state.imdb_auto_sync_loop = _IMDbAutoSyncLoop(app)
+    app.state.trakt_outbox_loop = _TraktOutboxLoop(app)
     app.state.trakt_episode_ratings_refresh_loop = _TraktEpisodeRatingsRefreshLoop(app)
     app.state.artwork_cache_warm_loop = _ArtworkCacheWarmLoop(app)
 
@@ -470,6 +505,13 @@ def create_app(
         status_code = 500
         try:
             response = await call_next(request)
+            if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+                try:
+                    metadata = request.app.state.services.trakt_sync.mutation_metadata()
+                    response.headers["X-Trakt-Sync-State"] = str(metadata["sync_state"])
+                    response.headers["X-Trakt-Pending-Count"] = str(metadata["pending_count"])
+                except Exception:
+                    pass
             status_code = response.status_code
             return response
         finally:
@@ -511,16 +553,11 @@ def create_app(
             or fetch_request
             or path.startswith("/notifications/")
         )
-        if reconnect_required(services, setup_complete=profile_setup_complete):
-            return reconnect_response(request, json_response=json_response)
-        if authorized and profile_setup_complete:
+        if profile_setup_complete:
             try:
-                response = await call_next(request)
+                return await call_next(request)
             except TraktReauthorizationRequired:
                 return reconnect_response(request, json_response=json_response)
-            if reconnect_required(services, setup_complete=True):
-                return reconnect_response(request, json_response=json_response)
-            return response
 
         if json_response:
             status_code = 401 if not authorized else 409
@@ -548,11 +585,28 @@ def create_app(
             stamp = int(sound_path.stat().st_mtime)
             notification_sound_url = f"/notification-sound?v={stamp}"
         try:
-            released_title_count = request.app.state.services.release_tracking.released_count()
-            progress_waiting_title_count = request.app.state.services.release_tracking.progress_waiting_count()
+            preview_mode = normalize_catalog_provider_mode(
+                getattr(services.auth.config, "catalog_provider_mode", "trakt")
+            ) == "tmdb_preview"
+            released_title_count = (
+                services.tmdb_catalog.released_count()
+                if preview_mode
+                else services.release_tracking.released_count()
+            )
+            progress_waiting_title_count = services.release_tracking.progress_waiting_count()
         except Exception:
             released_title_count = 0
             progress_waiting_title_count = 0
+        try:
+            trakt_sync_status = services.trakt_sync.status()
+        except Exception:
+            trakt_sync_status = {
+                "mode": "local",
+                "pending": 0,
+                "blocked": 0,
+                "items": [],
+                "last_error": "Trakt sync status is temporarily unavailable.",
+            }
         base_context = {
             "request": request,
             "current_path": request.url.path,
@@ -564,6 +618,7 @@ def create_app(
             "configured": services.auth.is_configured(),
             "settings_utc_offset": request.app.state.services.auth.config.utc_offset,
             "active_profile_slug": request.app.state.services.auth.config.active_slug,
+            "trakt_sync_status": trakt_sync_status,
             "web_hide_spoilers": bool(
                 getattr(request.app.state.services.auth.config, "web_hide_spoilers", False)
             ),
@@ -604,8 +659,6 @@ def create_app(
         show_dropped: bool,
         sort_mode: str = "episode_release",
         sort_direction: str = "desc",
-        min_year: int | None = None,
-        use_year_filter: bool = False,
         flash: str = "",
         rate_trakt_id: int | None = None,
         rate_season: int | None = None,
@@ -618,8 +671,6 @@ def create_app(
             show_dropped=show_dropped,
             sort_mode=sort_mode,
             sort_direction=sort_direction,
-            min_year=min_year,
-            use_year_filter=use_year_filter,
             flash=flash,
             rate_trakt_id=rate_trakt_id,
             rate_season=rate_season,

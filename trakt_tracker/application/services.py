@@ -36,6 +36,8 @@ from trakt_tracker.application.progress_sync import ProgressSyncWorkflow
 from trakt_tracker.application.release_tracking import ReleaseTrackingService
 from trakt_tracker.application.search_watch import SearchWatchService
 from trakt_tracker.application.title_aliases import TitleAliasService
+from trakt_tracker.application.trakt_outbox import TraktOutboxService
+from trakt_tracker.application.tmdb_catalog import TmdbCatalogService
 from trakt_tracker.application.trakt_payload_cache import (
     load_cached_trakt_history_items,
     load_cached_trakt_rating_items,
@@ -46,6 +48,7 @@ from trakt_tracker.config import (
     ConfigStore,
     normalize_kinopoisk_domain_options,
     normalize_kinopoisk_domain_tail,
+    normalize_catalog_provider_mode,
     resolved_tmdb_api_key,
     resolved_tmdb_read_access_token,
     resolved_trakt_client_id,
@@ -86,6 +89,8 @@ from trakt_tracker.persistence.repositories import (
     TitleRepository,
     UserStateRepository,
 )
+from trakt_tracker.persistence.trakt_outbox import TraktOutboxRepository
+from trakt_tracker.persistence.tmdb_preview import TmdbPreviewRepository
 
 
 @dataclass(slots=True)
@@ -94,6 +99,7 @@ class ServiceContainer:
     auth: "AuthService"
     cache: "CacheService"
     catalog: "CatalogService"
+    tmdb_catalog: TmdbCatalogService
     episode_ratings_matrix: "EpisodeRatingsMatrixService"
     enrich_queue: "EnrichQueueService"
     image_queue: ArtworkQueue
@@ -106,6 +112,7 @@ class ServiceContainer:
     title_aliases: "TitleAliasService"
     notifications: "NotificationService"
     sync: "SyncService"
+    trakt_sync: "TraktOutboxService"
     operations: "OperationLog"
     closers: tuple[Callable[[], None], ...] = ()
 
@@ -123,6 +130,7 @@ class CacheService:
         self._providers = {
             "trakt": ProviderCache(trakt_cache_provider(profile_slug)),
             "tmdb": ProviderCache("tmdb"),
+            "tmdb_catalog": ProviderCache("tmdb/catalog"),
             "images": BinaryCache("images"),
         }
 
@@ -376,6 +384,7 @@ class ProgressService:
         catalog: CatalogService | None = None,
         enrich_queue: EnrichQueueService | None = None,
         notification_repo: NotificationRepository | None = None,
+        trakt_outbox=None,
     ) -> None:
         self._workflow = ProgressSyncWorkflow(
             db,
@@ -392,10 +401,21 @@ class ProgressService:
             history_repo=history_repo,
             catalog=catalog,
             notification_repo=notification_repo,
+            trakt_outbox=trakt_outbox,
         )
 
-    def refresh_show_progress(self, trakt_id: int, *, fresh: bool = False) -> ProgressSnapshot:
-        return self._workflow.refresh_show_progress(trakt_id, fresh=fresh)
+    def refresh_show_progress(
+        self,
+        trakt_id: int,
+        *,
+        fresh: bool = False,
+        enrich_assets: bool = True,
+    ) -> ProgressSnapshot:
+        return self._workflow.refresh_show_progress(
+            trakt_id,
+            fresh=fresh,
+            enrich_assets=enrich_assets,
+        )
 
     def dashboard_progress(
         self,
@@ -507,7 +527,9 @@ class NotificationService:
         sender: NotificationSender,
         release_tracking: ReleaseTrackingService | None = None,
         progress_service: ProgressService | None = None,
+        tmdb_catalog: TmdbCatalogService | None = None,
     ) -> None:
+        self._auth = auth_service
         self._workflow = NotificationRefreshWorkflow(
             db,
             auth_service,
@@ -519,17 +541,59 @@ class NotificationService:
         )
         self._release_tracking = release_tracking
         self._progress_service = progress_service
+        self._tmdb_catalog = tmdb_catalog
         self._activity_lock = Lock()
         self._activity_seq = 0
         self._activity_events: deque[dict] = deque(maxlen=32)
         self._pending_sources: set[str] = set()
 
-    def poll_upcoming(self, *, send_native: bool = True) -> list[dict]:
-        if self._progress_service is not None:
-            self._progress_service.sync_progress(dropped_only=False)
-        items = self._workflow.poll_upcoming(send_native=send_native)
-        if self._release_tracking is not None:
-            items.extend(self._release_tracking.poll(send_native=send_native))
+    def poll_upcoming(
+        self,
+        *,
+        send_native: bool = True,
+        refresh_remote: bool = True,
+    ) -> list[dict]:
+        auth_config = getattr(self._auth, "config", None)
+        preview_mode = normalize_catalog_provider_mode(
+            getattr(auth_config, "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview"
+        auth_status_reader = getattr(self._auth, "is_authorized", None)
+        can_refresh_trakt = bool(
+            refresh_remote and (auth_status_reader() if callable(auth_status_reader) else True)
+        )
+        if can_refresh_trakt and self._progress_service is not None:
+            try:
+                self._progress_service.sync_progress(dropped_only=False)
+            except Exception:
+                can_refresh_trakt = False
+        try:
+            items = self._workflow.poll_upcoming(
+                send_native=send_native,
+                refresh_remote=can_refresh_trakt,
+            )
+        except Exception:
+            # Preserve local episode notifications if an online refresh fails.
+            items = self._workflow.poll_upcoming(send_native=send_native, refresh_remote=False)
+        if self._release_tracking is not None and not preview_mode:
+            try:
+                items.extend(
+                    self._release_tracking.poll(
+                        send_native=send_native,
+                        refresh_remote=can_refresh_trakt,
+                    )
+                )
+            except Exception:
+                items.extend(self._release_tracking.poll(send_native=send_native, refresh_remote=False))
+        if self._tmdb_catalog is not None and preview_mode:
+            try:
+                items.extend(
+                    self._tmdb_catalog.poll_releases(
+                        send_native=send_native,
+                        refresh_remote=refresh_remote,
+                    )
+                )
+            except Exception:
+                pass
         self.refresh_pending_sources()
         return items
 
@@ -575,6 +639,14 @@ class NotificationService:
             pending.add("progress")
         if self._release_tracking is not None and self._release_tracking.has_due_unacknowledged_release():
             pending.add("release")
+        auth_config = getattr(self._auth, "config", None)
+        if (
+            self._tmdb_catalog is not None
+            and normalize_catalog_provider_mode(getattr(auth_config, "catalog_provider_mode", "trakt"))
+            == "tmdb_preview"
+            and self._tmdb_catalog.has_due_unacknowledged_release()
+        ):
+            pending.add("release")
         with self._activity_lock:
             self._pending_sources = pending
             return sorted(self._pending_sources)
@@ -606,6 +678,8 @@ class SyncService:
         imdb_client: IMDbDatasetClient | None = None,
         progress_service: ProgressService | None = None,
         notification_service: NotificationService | None = None,
+        trakt_outbox: TraktOutboxService | None = None,
+        tmdb_catalog: TmdbCatalogService | None = None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -620,6 +694,7 @@ class SyncService:
         self._image_queue = image_queue
         self._progress_service = progress_service
         self._notification_service = notification_service
+        self._tmdb_catalog = tmdb_catalog
         self._image_cache = BinaryCache("images")
         self._image_failure_cache = ProviderCache("image_failures")
         self._workflow = HistorySyncWorkflow(
@@ -635,6 +710,7 @@ class SyncService:
             operations,
             episode_metadata,
             catalog,
+            trakt_outbox=trakt_outbox,
         )
 
     def initial_import(self, *, status_callback=None, defer_enrichment: bool = False) -> None:
@@ -642,9 +718,11 @@ class SyncService:
             status_callback=status_callback,
             defer_enrichment=defer_enrichment,
         )
+        self._reconcile_tmdb_preview_mappings()
 
     def refresh_history(self, *, force_full_assets: bool = False, status_callback=None) -> None:
         self._workflow.refresh_history(force_full_assets=force_full_assets, status_callback=status_callback)
+        self._reconcile_tmdb_preview_mappings()
 
     def sync_assets_full(self, *, status_callback=None) -> None:
         """Compatibility entry point for the normal Trakt data update."""
@@ -720,6 +798,18 @@ class SyncService:
 
     def sync_updates(self) -> None:
         self._workflow.sync_updates()
+        self._reconcile_tmdb_preview_mappings()
+
+    def _reconcile_tmdb_preview_mappings(self) -> None:
+        tmdb_catalog = getattr(self, "_tmdb_catalog", None)
+        if tmdb_catalog is None:
+            return
+        try:
+            tmdb_catalog.reconcile_mapped_intents()
+        except Exception:
+            # A catalog mapping must never make an otherwise successful Trakt
+            # import fail; the next catalog access or sync retries it.
+            return
 
     def sync_imdb_dataset(self, force: bool = False, status_callback=None) -> bool:
         changed = self._imdb_client.sync(force=force, status_callback=status_callback)
@@ -1020,11 +1110,12 @@ class _ManagedTMDbClientFactory:
     closed under an in-flight request.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, cache_provider: str = "tmdb") -> None:
         self._lock = Lock()
         self._client: TMDbClient | None = None
         self._signature: tuple[str, str, int] | None = None
         self._retired_clients: list[TMDbClient] = []
+        self._cache_provider = cache_provider
 
     def __call__(self, config: AppConfig) -> TMDbClient:
         signature = (
@@ -1040,6 +1131,7 @@ class _ManagedTMDbClientFactory:
                     api_key=signature[0],
                     read_access_token=signature[1],
                     cache_ttl_hours=signature[2],
+                    cache_provider=self._cache_provider,
                 )
                 self._signature = signature
             return self._client
@@ -1065,6 +1157,8 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     notification_repo = NotificationRepository()
     release_tracking_repo = ReleaseTrackingRepository()
     title_alias_repo = TitleAliasRepository()
+    trakt_outbox_repo = TraktOutboxRepository()
+    tmdb_preview_repo = TmdbPreviewRepository()
     operations = OperationLog()
 
     def client_factory(config: AppConfig) -> TraktClient:
@@ -1081,8 +1175,10 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         return client
 
     tmdb_factory = _ManagedTMDbClientFactory()
+    tmdb_catalog_factory = _ManagedTMDbClientFactory(cache_provider="tmdb/catalog")
 
     auth = AuthService(config_store, tokens, client_factory)
+    trakt_outbox = TraktOutboxService(db, auth, trakt_outbox_repo, episode_repo, sync_state)
     cache = CacheService(auth.config.active_slug)
     image_queue = ArtworkQueue(BinaryCache("images"), max_workers=4, timeout=8)
     imdb_client = IMDbDatasetClient(cache_ttl_hours=config_store.load().cache_ttl_hours)
@@ -1097,7 +1193,17 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         imdb_reconciliation=imdb_reconciliation,
     )
     history_read_model = HistoryReadModelService(db, history, user_states, titles, episode_repo, episode_metadata)
-    catalog = CatalogService(db, auth, titles, user_states, sync_state, tmdb_factory, imdb_client, history)
+    catalog = CatalogService(
+        db,
+        auth,
+        titles,
+        user_states,
+        sync_state,
+        tmdb_factory,
+        imdb_client,
+        history,
+        trakt_outbox=trakt_outbox,
+    )
     episode_ratings_matrix = EpisodeRatingsMatrixService(
         db,
         auth,
@@ -1107,8 +1213,28 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         imdb_client,
         imdb_reconciliation=imdb_reconciliation,
     )
-    history_service = HistoryService(db, auth, titles, user_states, history, episode_repo, history_read_model, episode_metadata)
-    search_watch = SearchWatchService(db, auth, titles, history, episode_repo, history_service, episode_metadata)
+    history_service = HistoryService(
+        db,
+        auth,
+        titles,
+        user_states,
+        history,
+        episode_repo,
+        history_read_model,
+        episode_metadata,
+        trakt_outbox,
+        progress,
+    )
+    search_watch = SearchWatchService(
+        db,
+        auth,
+        titles,
+        history,
+        episode_repo,
+        history_service,
+        episode_metadata,
+        tmdb_factory=tmdb_catalog_factory,
+    )
     title_aliases = TitleAliasService(db, auth, title_alias_repo)
     enrich_queue = EnrichQueueService(
         {
@@ -1153,6 +1279,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         episode_metadata,
         catalog,
         notification_repo=notification_repo,
+        trakt_outbox=trakt_outbox,
     )
     notification_sender = NotificationSender()
     release_tracking = ReleaseTrackingService(
@@ -1163,7 +1290,24 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         progress,
         notification_sender,
         titles=titles,
+        trakt_outbox=trakt_outbox,
     )
+    tmdb_catalog = TmdbCatalogService(
+        db,
+        auth,
+        tmdb_catalog_factory,
+        titles,
+        tmdb_preview_repo,
+        trakt_outbox=trakt_outbox,
+        imdb_client=imdb_client,
+    )
+    tmdb_catalog.set_legacy_services(
+        catalog=catalog,
+        release_tracking=release_tracking,
+        search_watch=search_watch,
+    )
+    tmdb_catalog.set_notification_sender(notification_sender)
+    trakt_outbox.set_delivery_callback(tmdb_catalog.on_trakt_outbox_delivered)
     notifications = NotificationService(
         db,
         auth,
@@ -1174,6 +1318,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         notification_sender,
         release_tracking,
         progress_service,
+        tmdb_catalog,
     )
 
     def refresh_notification_state() -> None:
@@ -1199,12 +1344,24 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         imdb_client=imdb_client,
         progress_service=progress_service,
         notification_service=notifications,
+        trakt_outbox=trakt_outbox,
+        tmdb_catalog=tmdb_catalog,
     )
+    def _refresh_delivered_history(trakt_id: int) -> None:
+        if trakt_id > 0:
+            progress_service.refresh_show_progress(
+                trakt_id,
+                fresh=True,
+                enrich_assets=False,
+            )
+
+    trakt_outbox.set_history_delivered_callback(_refresh_delivered_history)
     return ServiceContainer(
         database=db,
         auth=auth,
         cache=cache,
         catalog=catalog,
+        tmdb_catalog=tmdb_catalog,
         episode_ratings_matrix=episode_ratings_matrix,
         enrich_queue=enrich_queue,
         image_queue=image_queue,
@@ -1217,6 +1374,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         title_aliases=title_aliases,
         notifications=notifications,
         sync=sync,
+        trakt_sync=trakt_outbox,
         operations=operations,
-        closers=(auth.close, tmdb_factory.close, imdb_client.close),
+        closers=(auth.close, tmdb_factory.close, tmdb_catalog_factory.close, imdb_client.close),
     )

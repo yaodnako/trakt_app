@@ -482,7 +482,7 @@ class ProgressPauseBackendTests(unittest.TestCase):
 
 
 class ProgressPauseMigrationTests(unittest.TestCase):
-    def test_v4_database_migrates_to_v5_with_explicit_paused_column(self) -> None:
+    def test_v4_database_migrates_to_latest_schema_with_explicit_paused_column(self) -> None:
         with TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "legacy.sqlite3"
             connection = sqlite3.connect(path)
@@ -516,12 +516,12 @@ class ProgressPauseMigrationTests(unittest.TestCase):
                 db.close()
 
         self.assertIn("paused", columns)
-        self.assertEqual(version, 5)
-        self.assertEqual(LATEST_SCHEMA_VERSION, 5)
+        self.assertEqual(version, LATEST_SCHEMA_VERSION)
+        self.assertEqual(LATEST_SCHEMA_VERSION, 7)
 
 
 class TraktHiddenClientTests(unittest.TestCase):
-    def test_hidden_show_reads_bypass_cache_and_mutations_use_show_payload(self) -> None:
+    def test_hidden_show_reads_use_cache_and_mutations_use_show_payload(self) -> None:
         client = TraktClient("client-id", "client-secret", "http://localhost")
         calls: list[tuple] = []
         client._request = lambda method, path, **kwargs: calls.append((method, path, kwargs)) or []
@@ -535,10 +535,10 @@ class TraktHiddenClientTests(unittest.TestCase):
 
         self.assertEqual(calls[0][0:2], ("GET", "/users/hidden/progress_watched"))
         self.assertEqual(calls[0][2]["params"], {"type": "show", "limit": 50, "page": 2})
-        self.assertFalse(calls[0][2]["use_cache"])
+        self.assertTrue(calls[0][2]["use_cache"])
         self.assertEqual(calls[1][0:2], ("GET", "/users/hidden/dropped"))
         self.assertEqual(calls[1][2]["params"], {"type": "show", "limit": 25, "page": 3})
-        self.assertFalse(calls[1][2]["use_cache"])
+        self.assertTrue(calls[1][2]["use_cache"])
         self.assertEqual(
             [(method, path, kwargs["json"]) for method, path, kwargs in calls[2:]],
             [

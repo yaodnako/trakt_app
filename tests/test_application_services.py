@@ -30,11 +30,13 @@ import trakt_tracker.application.episode_metadata as episode_metadata_module
 import trakt_tracker.application.history_sync as history_sync_module
 import trakt_tracker.application.services as services_module
 from trakt_tracker.application.services import NotificationService, SyncService, build_services
+from trakt_tracker.application.trakt_outbox import TraktOutboxService
 from trakt_tracker.config import AppConfig, ConfigStore
 from trakt_tracker.domain import EpisodeSummary, ExploreResultPage, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
 from trakt_tracker.infrastructure.trakt.client import TraktClient
 from trakt_tracker.persistence.database import Database
 from trakt_tracker.persistence.repositories import EpisodeRepository, HistoryRepository, ProgressRepository, SyncStateRepository, TitleRepository, UserStateRepository
+from trakt_tracker.persistence.trakt_outbox import TraktOutboxRepository
 
 
 class _FakeConfig:
@@ -325,6 +327,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.user_states = UserStateRepository()
         self.history_repo = HistoryRepository()
         self.sync_state = SyncStateRepository()
+        self.trakt_outbox_repo = TraktOutboxRepository()
         self.episode_repo = EpisodeRepository()
         self.trakt_client = _FakeTraktClient()
         self.auth = _FakeAuthService(self.trakt_client)
@@ -884,7 +887,7 @@ class ApplicationServiceTests(unittest.TestCase):
             [path for path, _kwargs in calls],
             ["/shows/anticipated", "/movies/trending", "/shows/popular"],
         )
-        self.assertTrue(all(call[1]["use_cache"] is False for call in calls))
+        self.assertTrue(all(call[1].get("use_cache", True) for call in calls))
         self.assertTrue(all(call[1]["include_headers"] is True for call in calls))
         self.assertEqual(calls[1][1]["params"]["ratings"], "75-100")
         self.assertNotIn("ratings", calls[0][1]["params"])
@@ -915,7 +918,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(result.items[0].released_at, datetime(2027, 1, 1))
         self.assertEqual(calls[0][0], "/search/movie,show")
         self.assertNotIn("ratings", calls[0][1]["params"])
-        self.assertFalse(calls[0][1]["use_cache"])
+        self.assertTrue(calls[0][1].get("use_cache", True))
 
     def test_catalog_search_imdb_filter_fills_page_from_additional_provider_pages(self) -> None:
         calls = []
@@ -1169,6 +1172,76 @@ class ApplicationServiceTests(unittest.TestCase):
         with self.db.session() as session:
             self.assertEqual(progress_repo.list_sync_show_ids(session), [])
 
+    def test_progress_dashboard_overlays_local_watches_while_remote_refresh_is_pending(self) -> None:
+        progress_repo = ProgressRepository()
+        now = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            self.episode_repo.replace_show_episodes(
+                session,
+                5,
+                [
+                    EpisodeSummary(trakt_id=501, season=1, number=1, title="One"),
+                    EpisodeSummary(trakt_id=502, season=1, number=2, title="Two"),
+                    EpisodeSummary(trakt_id=503, season=1, number=3, title="Three"),
+                ],
+            )
+            progress_repo.upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=5,
+                    title="Example",
+                    completed=1,
+                    aired=3,
+                    percent_completed=33.3,
+                    next_episode=EpisodeSummary(
+                        trakt_id=502,
+                        season=1,
+                        number=2,
+                        title="Two",
+                    ),
+                ),
+            )
+            for episode in (1, 2):
+                self.history_repo.add_event(
+                    session,
+                    trakt_history_id=None,
+                    title_trakt_id=5,
+                    title="Example",
+                    title_type="show",
+                    action="watched",
+                    watched_at=now,
+                    season=1,
+                    episode=episode,
+                )
+        workflow = ProgressSyncWorkflow(
+            self.db,
+            self.auth,
+            progress_repo,
+            self.episode_repo,
+            self.titles,
+            self.user_states,
+            self.sync_state,
+            lambda _config: _FakeTmdbClient(),
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+            history_repo=self.history_repo,
+        )
+
+        progress = workflow.dashboard_progress()[0]
+
+        self.assertEqual(progress.completed, 2)
+        self.assertAlmostEqual(progress.percent_completed, 66.7, places=1)
+        self.assertIsNotNone(progress.next_episode)
+        self.assertEqual(
+            (
+                progress.next_episode.trakt_id,
+                progress.next_episode.season,
+                progress.next_episode.number,
+            ),
+            (503, 1, 3),
+        )
+
     def test_history_service_add_and_rate_movie_updates_display_rating(self) -> None:
         service = HistoryService(
             self.db,
@@ -1202,6 +1275,48 @@ class ApplicationServiceTests(unittest.TestCase):
             9,
         )
         self.assertEqual(service.history_titles(title_type="movie"), ["Arrival"])
+
+    def test_history_service_keeps_local_watch_when_trakt_is_offline(self) -> None:
+        trakt_outbox = TraktOutboxService(
+            self.db,
+            self.auth,
+            self.trakt_outbox_repo,
+            self.episode_repo,
+            self.sync_state,
+        )
+        service = HistoryService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            self.episode_repo,
+            self.history_read_model,
+            self.episode_metadata,
+            trakt_outbox,
+        )
+        watched_at = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+        original_add = self.trakt_client.add_history_items
+        self.trakt_client.add_history_items = lambda _items: (_ for _ in ()).throw(RuntimeError("offline"))
+        try:
+            service.add_history_item(
+                HistoryItemInput(
+                    title_type="movie",
+                    trakt_id=77,
+                    watched_at=watched_at,
+                    title="Arrival",
+                )
+            )
+        finally:
+            self.trakt_client.add_history_items = original_add
+
+        rows = service.history(title_type="movie")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "Arrival")
+        self.assertEqual(rows[0]["watched_at"], watched_at.replace(tzinfo=None))
+        status = trakt_outbox.status()
+        self.assertEqual(status["pending"], 1)
+        self.assertEqual(status["items"][0]["operation_type"], "history")
 
     def test_history_service_allows_undated_watch_and_sorts_it_last(self) -> None:
         service = HistoryService(
@@ -1368,6 +1483,89 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(panel.seasons[0].episodes[0].still_url, "")
         self.assertEqual(panel.seasons[0].episodes[0].imdb_season, 2)
         self.assertEqual(panel.seasons[0].episodes[0].imdb_episode, 1)
+
+    def test_search_watch_panel_hydrates_from_tmdb_without_trakt_authorization(self) -> None:
+        class _UnauthorizedAuth:
+            config = _FakeConfig()
+
+            @staticmethod
+            def is_authorized() -> bool:
+                return False
+
+            @staticmethod
+            def get_client():
+                raise AssertionError("Trakt must not be called without authorization")
+
+        class _PanelTmdbClient:
+            @staticmethod
+            def is_configured() -> bool:
+                return True
+
+            @staticmethod
+            def get_catalog_details(_title_type: str, tmdb_id: int) -> dict:
+                self.assertEqual(tmdb_id, 5920)
+                return {
+                    "seasons": [
+                        {"season_number": 0, "episode_count": 1},
+                        {"season_number": 1, "episode_count": 2},
+                    ]
+                }
+
+            @staticmethod
+            def get_catalog_season(tmdb_id: int, season: int) -> dict:
+                self.assertEqual(tmdb_id, 5920)
+                return {
+                    "episodes": [
+                        {
+                            "id": 9000 + season,
+                            "season_number": season,
+                            "episode_number": 1,
+                            "name": "Special" if season == 0 else "Pilot",
+                            "air_date": "2008-09-23",
+                            "still_path": f"/season-{season}.jpg",
+                            "overview": "Episode overview.",
+                            "runtime": 43,
+                        }
+                    ]
+                }
+
+        history_service = HistoryService(
+            self.db,
+            _UnauthorizedAuth(),
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            self.episode_repo,
+            self.history_read_model,
+            self.episode_metadata,
+        )
+        service = SearchWatchService(
+            self.db,
+            _UnauthorizedAuth(),
+            self.titles,
+            self.history_repo,
+            self.episode_repo,
+            history_service,
+            tmdb_factory=lambda _config: _PanelTmdbClient(),
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=5882,
+                    title_type="show",
+                    title="The Mentalist",
+                    tmdb_id=5920,
+                ),
+            )
+
+        self.assertTrue(service.hydrate_show_episodes(5882))
+        panel = service.load_show_panel(5882)
+
+        self.assertEqual([season.season for season in panel.seasons], [0, 1])
+        self.assertEqual(panel.seasons[1].episodes[0].title, "Pilot")
+        self.assertEqual(panel.seasons[1].episodes[0].still_url, "https://image.tmdb.org/t/p/w780/season-1.jpg")
+        self.assertEqual(panel.seasons[1].episodes[0].first_aired, datetime(2008, 9, 23))
 
     def test_search_watch_still_enrichment_is_singleflight_per_season(self) -> None:
         class _BlockingEpisodeMetadata:
@@ -2447,6 +2645,71 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(rated_rows, [])
         self.assertIsNone(state.rating)
 
+    def test_history_sync_reapplies_pending_history_and_rating_intents(self) -> None:
+        outbox = TraktOutboxService(
+            self.db,
+            self.auth,
+            self.trakt_outbox_repo,
+            self.episode_repo,
+            self.sync_state,
+        )
+        local_history = HistoryService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            self.episode_repo,
+            self.history_read_model,
+            self.episode_metadata,
+            outbox,
+            ProgressRepository(),
+        )
+        watched_at = datetime(2026, 7, 31, 12, tzinfo=UTC)
+        local_history.add_history_item(
+            HistoryItemInput(
+                title_type="movie",
+                trakt_id=77,
+                watched_at=watched_at,
+                title="Arrival",
+            )
+        )
+        local_history.set_rating(
+            RatingInput(title_type="movie", trakt_id=77, rating=9),
+            title="Arrival",
+        )
+        workflow = HistorySyncWorkflow(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            ProgressRepository(),
+            self.episode_repo,
+            self.sync_state,
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+            trakt_outbox=outbox,
+        )
+
+        workflow._sync_history_and_ratings(
+            [],
+            [],
+            reconciliation_scopes=[
+                _HistoryReconciliationScope(
+                    title_type="movie",
+                    present_history_ids=set(),
+                    watched_at_cutoff=None,
+                )
+            ],
+            run_enrichment=False,
+        )
+
+        watched = local_history.history(title_type="movie")
+        self.assertEqual([row["title"] for row in watched], ["Arrival"])
+        self.assertEqual(local_history.displayed_history_rating(title_type="movie", trakt_id=77), 9)
+
     def test_recent_history_reconciliation_only_covers_scanned_time_window(self) -> None:
         now = datetime.now(tz=UTC)
 
@@ -2662,7 +2925,49 @@ class ApplicationServiceTests(unittest.TestCase):
             calls,
             [
                 ("progress", {"dropped_only": False}),
-                ("notifications", {"send_native": False}),
+                (
+                    "notifications",
+                    {"send_native": False, "refresh_remote": True},
+                ),
+            ],
+        )
+
+    def test_notification_poll_uses_local_state_without_remote_progress_refresh(self) -> None:
+        calls: list[tuple[str, dict]] = []
+        progress = SimpleNamespace(
+            sync_progress=lambda **kwargs: calls.append(("progress", kwargs))
+        )
+        service = NotificationService(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            progress_service=progress,
+        )
+        service._workflow = SimpleNamespace(
+            poll_upcoming=lambda **kwargs: calls.append(("notifications", kwargs)) or []
+        )
+        service._release_tracking = SimpleNamespace(
+            poll=lambda **kwargs: calls.append(("release_tracking", kwargs)) or []
+        )
+        service.refresh_pending_sources = lambda: []
+
+        service.poll_upcoming(send_native=False, refresh_remote=False)
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "notifications",
+                    {"send_native": False, "refresh_remote": False},
+                ),
+                (
+                    "release_tracking",
+                    {"send_native": False, "refresh_remote": False},
+                ),
             ],
         )
 

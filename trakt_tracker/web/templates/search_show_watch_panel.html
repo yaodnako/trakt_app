@@ -46,6 +46,9 @@
             type="button"
             class="search-watch-season-tab{% if season.is_default %} is-active{% endif %}"
             data-search-watch-season-tab="{{ season.season }}"
+            data-search-watch-season-label="{{ season.label }}"
+            data-search-watch-season-can-mark="{{ '1' if season.bulk_allowed and season.action_released_count > season.action_released_watched_count else '0' }}"
+            data-search-watch-season-can-unwatch="{{ '1' if season.bulk_allowed and season.action_watched_count > 0 else '0' }}"
             id="search-watch-tab-{{ panel.trakt_id }}-{{ season.season }}"
             role="tab"
             aria-selected="{{ 'true' if season.is_default else 'false' }}"
@@ -55,51 +58,6 @@
             {{ season.label }}
             <span>{{ season.released_watched_count }}/{{ season.released_count }}</span>
         </button>
-        {% endfor %}
-    </div>
-    <div class="search-watch-bulk-actions">
-        {% for season in panel.seasons %}
-        {% if season.bulk_allowed and season.action_released_count > season.action_released_watched_count %}
-        <button
-            type="button"
-            class="search-watch-scope-button search-watch-season-action{% if not season.is_default %} is-hidden{% endif %}"
-            data-search-watch-action
-            data-title-type="show"
-            data-trakt-id="{{ panel.trakt_id }}"
-            data-title="{{ panel.title }}"
-            data-scope="season"
-            data-season="{{ season.season }}"
-            data-season-layout="{{ panel.season_layout }}"
-            data-search-watch-season-action="{{ season.season }}"
-            title="Mark all released episodes in {{ season.label }} watched"
-            aria-label="Mark all released episodes in {{ season.label }} watched"
-        >
-            <img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true">
-            <span>{{ season.label }}</span>
-        </button>
-        {% endif %}
-        {% if season.bulk_allowed and season.action_watched_count > 0 %}
-        <button
-            type="button"
-            class="search-watch-scope-button is-danger search-watch-season-action{% if not season.is_default %} is-hidden{% endif %}"
-            data-search-unwatch-action
-            data-title-type="show"
-            data-trakt-id="{{ panel.trakt_id }}"
-            data-title="{{ panel.title }}"
-            data-scope="season"
-            data-season="{{ season.season }}"
-            data-season-layout="{{ panel.season_layout }}"
-            data-search-watch-season-action="{{ season.season }}"
-            title="Remove watched history for {{ season.label }}"
-            aria-label="Remove watched history for {{ season.label }}"
-        >
-            <span class="search-watch-action-glyphs" aria-hidden="true">
-                <img class="icon-glyph icon-glyph-seen" src="{{ request.url_for('static', path='seen.svg') }}" alt="">
-                <img class="icon-glyph icon-glyph-cancel" src="{{ request.url_for('static', path='cancel.svg') }}" alt="">
-            </span>
-            <span>{{ season.label }}</span>
-        </button>
-        {% endif %}
         {% endfor %}
     </div>
     {% for season in panel.seasons %}
@@ -185,15 +143,16 @@
                 {% if episode.is_watched %}
                 <button
                     type="button"
-                    class="{% if episode.user_rating is not none %}history-rating-badge{% else %}history-rate-chip{% endif %} search-watch-user-rating"
+                    class="{% if episode.user_rating is not none %}history-rating-badge user-rating-badge episode-user-rating-badge{% else %}history-rate-chip{% endif %} search-watch-user-rating"
                     data-rating-trigger
                     data-rating-title-type="show"
                     data-rating-trakt-id="{{ panel.trakt_id }}"
                     data-rating-title="{{ panel.title }}"
                     data-rating-season="{{ episode.season }}"
                     data-rating-episode="{{ episode.number }}"
+                    {% if episode.user_rating is not none %}data-user-rating="{{ episode.user_rating|int }}"{% endif %}
                     aria-label="{% if episode.user_rating is not none %}Change rating for{% else %}Rate{% endif %} {{ panel.title }} S{{ "%02d"|format(episode.season) }}E{{ "%02d"|format(episode.number) }}"
-                >{% if episode.user_rating is not none %}{{ episode.user_rating }} &#9733;{% else %}Rate{% endif %}</button>
+                >{% if episode.user_rating is not none %}<span class="user-rating-value">{{ episode.user_rating }}</span><span class="user-rating-star">&#9733;</span>{% else %}Rate{% endif %}</button>
                 {% endif %}
             </div>
             <div class="search-watch-episode-copy">

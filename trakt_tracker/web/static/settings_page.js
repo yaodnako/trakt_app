@@ -34,6 +34,62 @@
     const providerHealthNode = refreshRoot ? refreshRoot.querySelector("[data-provider-health]") : null;
     const queueHealthNode = refreshRoot ? refreshRoot.querySelector("[data-queue-health]") : null;
     const artworkHealthNode = refreshRoot ? refreshRoot.querySelector("[data-artwork-health]") : null;
+    const traktSyncRoot = document.querySelector("[data-trakt-sync-settings]");
+    const traktSyncMode = traktSyncRoot?.querySelector("[data-trakt-sync-mode]");
+    const traktSyncPending = traktSyncRoot?.querySelector("[data-trakt-sync-pending]");
+    const traktSyncBlocked = traktSyncRoot?.querySelector("[data-trakt-sync-blocked]");
+    const traktSyncSuccess = traktSyncRoot?.querySelector("[data-trakt-sync-success]");
+    const traktSyncCache = traktSyncRoot?.querySelector("[data-trakt-sync-cache]");
+    const traktSyncError = traktSyncRoot?.querySelector("[data-trakt-sync-error]");
+    const traktSyncItems = traktSyncRoot?.querySelector("[data-trakt-sync-items]");
+    const traktSyncRetry = traktSyncRoot?.querySelector("[data-trakt-sync-retry]");
+
+    function renderTraktQueue(payload) {
+        if (!traktSyncRoot || !payload) return;
+        if (traktSyncMode) traktSyncMode.textContent = payload.mode || "local";
+        if (traktSyncPending) traktSyncPending.textContent = String(payload.pending || 0);
+        if (traktSyncBlocked) traktSyncBlocked.textContent = String(payload.blocked || 0);
+        if (traktSyncSuccess) traktSyncSuccess.textContent = payload.last_success_at || "n/a";
+        if (traktSyncCache) traktSyncCache.textContent = payload.last_cache_at || "n/a";
+        if (traktSyncError) {
+            traktSyncError.textContent = payload.last_error || "";
+            traktSyncError.hidden = !payload.last_error;
+        }
+        if (!traktSyncItems) return;
+        traktSyncItems.replaceChildren();
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        if (!items.length) {
+            const line = document.createElement("div");
+            line.className = "settings-sync-log-line";
+            line.textContent = "No queued Trakt changes.";
+            traktSyncItems.appendChild(line);
+            return;
+        }
+        for (const item of items) {
+            const line = document.createElement("div");
+            line.className = "settings-sync-log-line settings-trakt-queue-line";
+            const text = document.createElement("span");
+            text.textContent = `${item.operation_key} — ${item.status}${item.last_error ? `: ${item.last_error}` : ""}`;
+            line.appendChild(text);
+            if (item.status === "blocked") {
+                const discard = document.createElement("button");
+                discard.type = "button";
+                discard.className = "button ghost";
+                discard.dataset.traktSyncDiscard = String(item.id);
+                discard.textContent = "Discard";
+                line.appendChild(discard);
+            }
+            traktSyncItems.appendChild(line);
+        }
+    }
+
+    async function refreshTraktQueue() {
+        try {
+            const response = await fetch("/trakt-sync/status", {headers: {"Accept": "application/json"}, cache: "no-store"});
+            if (response.ok) renderTraktQueue(await response.json());
+        } catch (_error) {
+        }
+    }
 
     function renderLog() {
         if (!logNode) {
@@ -298,7 +354,54 @@
         });
     }
 
+    window.addEventListener("trakt-sync-status", (event) => renderTraktQueue(event.detail));
+    traktSyncRetry?.addEventListener("click", async () => {
+        traktSyncRetry.disabled = true;
+        try {
+            const response = await fetch("/trakt-sync/retry", {
+                method: "POST",
+                headers: {"Accept": "application/json", "Content-Type": "application/json"},
+                body: "{}",
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.message || "Trakt retry failed.");
+            renderTraktQueue(payload);
+            window.refreshTraktSyncStatus?.();
+        } catch (error) {
+            window.pushFlashToast?.(error.message || "Trakt retry failed.", 4200);
+        } finally {
+            traktSyncRetry.disabled = false;
+        }
+    });
+    traktSyncItems?.addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-trakt-sync-discard]");
+        if (!button) return;
+        const accepted = await window.traktConfirm?.({
+            title: "Discard blocked Trakt change?",
+            message: "The local state will stay as shown, but this queued Trakt change will no longer be synchronized.",
+            confirmLabel: "Discard change",
+            danger: true,
+        });
+        if (!accepted) return;
+        button.disabled = true;
+        try {
+            const response = await fetch(`/trakt-sync/blocked/${button.dataset.traktSyncDiscard}/discard`, {
+                method: "POST",
+                headers: {"Accept": "application/json", "Content-Type": "application/json"},
+                body: JSON.stringify({confirm: true}),
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.message || "Could not discard queue item.");
+            renderTraktQueue(payload);
+            window.refreshTraktSyncStatus?.();
+        } catch (error) {
+            button.disabled = false;
+            window.pushFlashToast?.(error.message || "Could not discard queue item.", 4200);
+        }
+    });
+
     renderLog();
+    refreshTraktQueue();
     pollStatus();
     pollRefreshStatus();
     window.setInterval(pollStatus, 1200);

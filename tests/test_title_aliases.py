@@ -101,7 +101,7 @@ class TitleAliasTests(unittest.TestCase):
         self.assertEqual(due_result.attempted, 1)
         self.assertEqual(client.calls, [(456, "show", "ru"), (456, "show", "ru")])
 
-    def test_trakt_client_uses_title_translation_endpoint_without_http_cache(self) -> None:
+    def test_trakt_client_uses_cached_title_translation_endpoint(self) -> None:
         client = TraktClient("client-id", "client-secret", "http://127.0.0.1/callback")
         request = Mock(return_value=[{"title": "Дюна", "language": "ru"}])
         client._request = request
@@ -110,7 +110,7 @@ class TitleAliasTests(unittest.TestCase):
         translations = client.get_title_translations(11, "movie", "RU")
 
         self.assertEqual(translations, [{"title": "Дюна", "language": "ru"}])
-        request.assert_called_once_with("GET", "/movies/11/translations/ru", use_cache=False)
+        request.assert_called_once_with("GET", "/movies/11/translations/ru")
 
 
 if __name__ == "__main__":

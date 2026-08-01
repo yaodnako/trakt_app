@@ -48,7 +48,7 @@ class WebSystemRouteTests(unittest.TestCase):
             ),
             sync=SimpleNamespace(imdb_dataset_status=lambda: "ready", sync_assets_repair=lambda: None),
             notifications=SimpleNamespace(
-                poll_upcoming=lambda send_native=False: [],
+                poll_upcoming=lambda send_native=False, refresh_remote=True: [],
                 record_activity=lambda items: 7,
                 activity_after=lambda after=0: (
                     [{"seq": 7, "sources": ["progress"]}] if after < 7 else []
@@ -96,6 +96,8 @@ class WebSystemRouteTests(unittest.TestCase):
         self.assertEqual(self.image_jobs, [(target_url, 1)])
 
     def test_notification_activity_exposes_only_new_local_delivery_events(self) -> None:
+        self.app.state.services.auth.is_authorized = lambda: False
+
         response = self.client.get("/notifications/activity", params={"after": 6})
 
         self.assertEqual(
@@ -108,15 +110,19 @@ class WebSystemRouteTests(unittest.TestCase):
         )
 
     def test_browser_notification_poll_returns_recorded_activity_sequence(self) -> None:
-        self.app.state.services.notifications.poll_upcoming = lambda send_native=False: [
-            {"show_title": "Show", "message": "S01E02", "source": "progress"}
-        ]
+        calls: list[dict] = []
+        self.app.state.services.auth.is_authorized = lambda: False
+        self.app.state.services.notifications.poll_upcoming = (
+            lambda **kwargs: calls.append(kwargs)
+            or [{"show_title": "Show", "message": "S01E02", "source": "progress"}]
+        )
 
         response = self.client.get("/notifications/poll")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["activity_seq"], 7)
         self.assertEqual(response.json()["items"][0]["source"], "progress")
+        self.assertEqual(calls, [{"send_native": False, "refresh_remote": False}])
 
     def test_notification_nav_state_is_not_cleared_by_navigation(self) -> None:
         script = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "ui_core.js").read_text(

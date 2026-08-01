@@ -98,7 +98,99 @@ def test_release_tracking_acknowledgement_stops_repeats_and_badges_ignore_it() -
         db.close()
 
 
-def test_progress_badge_counts_released_next_titles_not_seen_state() -> None:
+def test_release_tracking_poll_uses_local_snapshot_without_trakt() -> None:
+    with TemporaryDirectory() as directory:
+        db = Database(Path(directory) / "test.sqlite3")
+        db.create_schema()
+        release_repo = ReleaseTrackingRepository()
+        item = TitleSummary(
+            1,
+            "movie",
+            "Released movie",
+            released_at=datetime.now(tz=UTC) - timedelta(days=10),
+        )
+        auth = SimpleNamespace(
+            get_client=lambda: SimpleNamespace(get_release_tracking=lambda: [item])
+        )
+        sender = _Sender()
+        service = ReleaseTrackingService(
+            db,
+            auth,
+            SimpleNamespace(
+                load=lambda: AppConfig(
+                    movie_release_notification_delay_minutes=0,
+                    notification_repeat_minutes=1,
+                )
+            ),
+            release_repo,
+            ProgressRepository(),
+            sender,
+            titles=TitleRepository(),
+        )
+        service.refresh()
+        auth.get_client = lambda: (_ for _ in ()).throw(
+            AssertionError("Offline release polling must not contact Trakt")
+        )
+
+        sent = service.poll(refresh_remote=False)
+
+        assert sent == [
+            {
+                "show_title": "Released movie",
+                "message": "Movie is now available",
+                "source": "release",
+            }
+        ]
+        assert len(sender.messages) == 1
+        db.close()
+
+
+def test_release_tracking_local_poll_honors_movie_notification_delay() -> None:
+    with TemporaryDirectory() as directory:
+        db = Database(Path(directory) / "test.sqlite3")
+        db.create_schema()
+        release_repo = ReleaseTrackingRepository()
+        sender = _Sender()
+        service = ReleaseTrackingService(
+            db,
+            SimpleNamespace(
+                get_client=lambda: (_ for _ in ()).throw(
+                    AssertionError("Offline release polling must not contact Trakt")
+                )
+            ),
+            SimpleNamespace(
+                load=lambda: AppConfig(movie_release_notification_delay_minutes=120)
+            ),
+            release_repo,
+            ProgressRepository(),
+            sender,
+        )
+        with db.session() as session:
+            release_repo.sync_items(
+                session,
+                [
+                    TitleSummary(
+                        1,
+                        "movie",
+                        "Recent movie",
+                        released_at=datetime.now(tz=UTC) - timedelta(minutes=30),
+                    )
+                ],
+            )
+
+        sent = service.poll(refresh_remote=False)
+
+        assert sent == []
+        assert sender.messages == []
+        with db.session() as session:
+            row = release_repo.get(session, "movie", 1)
+            assert row is not None
+            assert row.last_sent_at is None
+            assert row.notify_count == 0
+        db.close()
+
+
+def test_progress_badge_counts_released_next_titles_and_ignores_removed_year_filter_config() -> None:
     with TemporaryDirectory() as directory:
         db = Database(Path(directory) / "test.sqlite3")
         db.create_schema()
@@ -124,7 +216,12 @@ def test_progress_badge_counts_released_next_titles_not_seen_state() -> None:
         service = ReleaseTrackingService(
             db,
             SimpleNamespace(),
-            SimpleNamespace(load=lambda: AppConfig()),
+            SimpleNamespace(
+                load=lambda: AppConfig(
+                    web_progress_min_year=3000,
+                    web_progress_year_filter_enabled=True,
+                )
+            ),
             ReleaseTrackingRepository(),
             progress_repo,
             _Sender(),
@@ -254,12 +351,15 @@ def test_release_notification_source_requires_unacknowledged_item_past_delay() -
             )
 
         assert service.has_due_unacknowledged_release() is False
+        assert service.matured_release_keys() == set()
         with db.session() as session:
             row = release_repo.get(session, "movie", 1)
             row.release_at = (datetime.now(tz=UTC) - timedelta(minutes=121)).replace(tzinfo=None)
         assert service.has_due_unacknowledged_release() is True
+        assert service.matured_release_keys() == {("movie", 1)}
         assert service.set_acknowledged("movie", 1, acknowledged=True) is True
         assert service.has_due_unacknowledged_release() is False
+        assert service.matured_release_keys() == {("movie", 1)}
         db.close()
 
 

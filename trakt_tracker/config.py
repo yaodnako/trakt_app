@@ -32,6 +32,7 @@ class AppConfig:
     redirect_uri: str = "http://127.0.0.1:8765/callback"
     tmdb_api_key: str = ""
     tmdb_read_access_token: str = ""
+    catalog_provider_mode: str = "trakt"
     kinopoisk_api_key: str = ""
     kinopoisk_domain_tail: str = "net"
     kinopoisk_domain_options: str = "net,ru"
@@ -100,6 +101,7 @@ class ConfigStore:
         if "imdb_auto_sync_interval_hours" not in raw:
             raw["imdb_auto_sync_interval_hours"] = max(1, int(raw["imdb_auto_sync_interval_minutes"]) // 60 or 1)
         config = AppConfig(**raw)
+        config.catalog_provider_mode = normalize_catalog_provider_mode(config.catalog_provider_mode)
         active_slug = config.active_profile_slug.strip() or config.last_user_slug.strip()
         config.active_profile_slug = active_slug
         config.last_user_slug = active_slug
@@ -109,6 +111,7 @@ class ConfigStore:
         return config
 
     def save(self, config: AppConfig) -> None:
+        config.catalog_provider_mode = normalize_catalog_provider_mode(config.catalog_provider_mode)
         active_slug = config.active_profile_slug.strip() or config.last_user_slug.strip()
         config.active_profile_slug = active_slug
         config.last_user_slug = active_slug
@@ -244,6 +247,13 @@ def normalize_kinopoisk_domain_tail(value: str | None, fallback: str = "net") ->
     elif raw.startswith("kinopoisk."):
         raw = raw[len("kinopoisk.") :]
     return raw or fallback
+
+
+def normalize_catalog_provider_mode(value: str | None, fallback: str = "trakt") -> str:
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"trakt", "tmdb_preview"}:
+        return normalized
+    return fallback
 
 
 def normalize_kinopoisk_domain_options(value: str | None, fallback: tuple[str, ...] = ("net", "ru")) -> list[str]:

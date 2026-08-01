@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.testclient import TestClient
 
+from trakt_tracker.application.episode_ratings_matrix import rating_bucket_color
 from trakt_tracker.application.enrich_queue import TASK_STATUS_COMPLETED
 from trakt_tracker.application.metadata_refresh_policy import (
     ASSET_KIND_STILL,
@@ -37,6 +38,7 @@ class _FakeProgressService:
         self.items = items
         self.dashboard_calls: list[dict] = []
         self.sync_calls: list[dict] = []
+        self.refresh_calls: list[tuple[int, bool, bool]] = []
 
     def dashboard_progress(
         self,
@@ -121,6 +123,16 @@ class _FakeProgressService:
         )
         return []
 
+    def refresh_show_progress(
+        self,
+        trakt_id: int,
+        *,
+        fresh: bool = False,
+        enrich_assets: bool = True,
+    ):
+        self.refresh_calls.append((trakt_id, fresh, enrich_assets))
+        return None
+
 
 class _FakeInteractionService:
     def __init__(self) -> None:
@@ -181,13 +193,25 @@ class _FakeEnrichQueueService:
 class _FakeBackgroundTaskManager:
     def __init__(self) -> None:
         self.running: set[str] = set()
+        self.calls: list[dict] = []
 
     def is_running(self, key: str) -> bool:
         return key in self.running
 
     def start(self, key: str, *, source: str, operations, fn) -> bool:
+        self.calls.append(
+            {
+                "key": key,
+                "source": source,
+                "operations": operations,
+                "fn": fn,
+            }
+        )
         self.running.add(key)
         return True
+
+    def start_coalesced(self, key: str, *, source: str, operations, fn) -> bool:
+        return self.start(key, source=source, operations=operations, fn=fn)
 
 
 class ProgressRouteTests(unittest.TestCase):
@@ -197,6 +221,7 @@ class ProgressRouteTests(unittest.TestCase):
         static_dir = PROJECT_ROOT / "trakt_tracker" / "web" / "static"
         self.templates = Jinja2Templates(directory=str(templates_dir))
         self.templates.env.filters["dt"] = lambda value: value.isoformat() if value else ""
+        self.templates.env.filters["rating_bucket_color"] = rating_bucket_color
         self.templates.env.filters["episode_label"] = lambda season, episode, imdb_season=None, imdb_episode=None: (
             f"S{int(season):02d}E{int(episode):02d}"
             + (
@@ -264,6 +289,13 @@ class ProgressRouteTests(unittest.TestCase):
         self.unseen_episode_ids: set[int] = set()
         self.watchlist_calls: list[dict] = []
         self.watchlist_keys = {("show", 1)}
+        self.watchlist_snapshot_available = True
+        self.watchlist_snapshot_refreshes = 0
+
+        def refresh_watchlist_snapshot() -> None:
+            self.watchlist_snapshot_available = True
+            self.watchlist_snapshot_refreshes += 1
+
         self.app.state.services = SimpleNamespace(
             progress=self.progress,
             enrich_queue=self.queue,
@@ -283,6 +315,8 @@ class ProgressRouteTests(unittest.TestCase):
             ),
             interactions=self.interactions,
             catalog=SimpleNamespace(
+                has_watchlist_snapshot=lambda: self.watchlist_snapshot_available,
+                refresh_watchlist_snapshot=refresh_watchlist_snapshot,
                 watchlist_keys=lambda *, title_type=None: {
                     key for key in self.watchlist_keys if title_type is None or key[0] == title_type
                 },
@@ -353,6 +387,11 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertIn("pause.svg", html)
         self.assertLess(html.index("/progress/1/pause-toggle"), html.index("more_options.svg"))
         self.assertLess(html.index("more_options.svg"), html.index("/progress/1/drop-toggle"))
+        more_options_svg = (
+            PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "more_options.svg"
+        ).read_text(encoding="utf-8")
+        self.assertIn('fill="rgb(55,65,81)"', more_options_svg)
+        self.assertNotIn('fill="rgb(0,0,0)"', more_options_svg)
         self.assertIn('<option value="episode_release" selected>Episode release</option>', html)
         self.assertIn("data-progress-sort-direction", html)
         footer_start = html.index('<div class="progress-actions">')
@@ -362,6 +401,17 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertNotIn("return confirm(", html)
         self.assertNotIn("scheduleWatchPanelRefreshIfPending", html)
         self.assertIn("refreshWatchPanel", watch_script)
+
+    def test_progress_show_average_rating_uses_imdb_palette_with_white_star(self) -> None:
+        self.progress.items[0].title_episode_avg_rating = 7.4
+
+        response = self.client.get("/progress")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="history-rating-badge user-rating-badge poster-average-rating-badge"', response.text)
+        self.assertIn('style="--user-rating-color: rgb(244, 208, 63);"', response.text)
+        self.assertIn('<span class="user-rating-value">7.4</span>', response.text)
+        self.assertIn('<span class="user-rating-star">&#9733;</span>', response.text)
 
     def test_progress_spoilers_blur_only_real_next_episode_stills(self) -> None:
         config = self.app.state.services.auth.config
@@ -381,14 +431,95 @@ class ProgressRouteTests(unittest.TestCase):
         unprotected = self.client.get("/progress").text
         self.assertNotIn("data-spoiler-key", unprotected)
 
-    def test_progress_episode_watch_removes_watchlisted_show(self) -> None:
+    def test_progress_episode_watch_queues_post_watch_work_without_blocking_response(self) -> None:
         response = self.client.post("/progress/1/watch", data={}, follow_redirects=False)
 
         self.assertEqual(response.status_code, 303)
         self.assertEqual(len(self.interactions.watch_calls), 1)
+        self.assertEqual(self.watchlist_calls, [])
+        self.assertEqual(self.progress.sync_calls, [])
+        tasks = {call["key"]: call for call in self.app.state.bg_tasks.calls}
+        self.assertEqual(
+            set(tasks),
+            {
+                "watchlist_remove_after_watch_show_1",
+                "progress_refresh_after_watch_1",
+            },
+        )
+        tasks["watchlist_remove_after_watch_show_1"]["fn"]()
+        tasks["progress_refresh_after_watch_1"]["fn"]()
         self.assertEqual(
             self.watchlist_calls,
             [{"title_type": "show", "trakt_id": 1, "watchlisted": False}],
+        )
+        self.assertEqual(self.progress.refresh_calls, [(1, True, False)])
+
+    def test_progress_episode_watch_reconciles_missing_watchlist_snapshot_in_background(self) -> None:
+        self.watchlist_snapshot_available = False
+
+        response = self.client.post("/progress/1/watch", data={}, follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(self.watchlist_snapshot_refreshes, 0)
+        tasks = {call["key"]: call for call in self.app.state.bg_tasks.calls}
+        tasks["watchlist_remove_after_watch_show_1"]["fn"]()
+        self.assertEqual(self.watchlist_snapshot_refreshes, 1)
+        self.assertEqual(
+            self.watchlist_calls,
+            [{"title_type": "show", "trakt_id": 1, "watchlisted": False}],
+        )
+
+    def test_progress_episode_watch_provider_failure_does_not_return_internal_server_error(self) -> None:
+        def fail_watch(_progress, *, watched_at) -> None:
+            raise RuntimeError("Trakt history write failed.")
+
+        self.interactions.mark_progress_episode_watched = fail_watch
+        client = TestClient(self.app, raise_server_exceptions=False)
+
+        response = client.post("/progress/1/watch", data={}, follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("Trakt+history+write+failed.", response.headers["location"])
+        self.assertEqual(self.watchlist_calls, [])
+        self.assertEqual(self.app.state.bg_tasks.calls, [])
+
+    def test_progress_episode_watch_watchlist_failure_does_not_hide_success(self) -> None:
+        def fail_watchlist(*, title_type=None):
+            raise RuntimeError("Trakt watchlist read failed.")
+
+        self.app.state.services.catalog.watchlist_keys = fail_watchlist
+        client = TestClient(self.app, raise_server_exceptions=False)
+
+        response = client.post("/progress/1/watch", data={}, follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("Marked+Severance+02x03+watched.", response.headers["location"])
+        self.assertEqual(len(self.interactions.watch_calls), 1)
+        self.assertEqual(self.progress.sync_calls, [])
+        self.assertEqual(
+            [call["key"] for call in self.app.state.bg_tasks.calls],
+            [
+                "watchlist_remove_after_watch_show_1",
+                "progress_refresh_after_watch_1",
+            ],
+        )
+
+    def test_progress_episode_watch_background_refresh_failure_cannot_change_response(self) -> None:
+        def fail_progress_refresh(*args, **kwargs):
+            raise RuntimeError("Trakt progress refresh failed.")
+
+        self.watchlist_keys.clear()
+        self.progress.refresh_show_progress = fail_progress_refresh
+        client = TestClient(self.app, raise_server_exceptions=False)
+
+        response = client.post("/progress/1/watch", data={}, follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("Marked+Severance+02x03+watched.", response.headers["location"])
+        self.assertEqual(len(self.interactions.watch_calls), 1)
+        self.assertEqual(
+            [call["key"] for call in self.app.state.bg_tasks.calls],
+            ["progress_refresh_after_watch_1"],
         )
 
     def test_progress_toolbar_uses_compact_state_and_sort_controls(self) -> None:
@@ -404,16 +535,47 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertIn("<span>Dropped</span>", toolbar)
         self.assertNotIn("Show Paused", toolbar)
         self.assertNotIn("Show Dropped", toolbar)
+        self.assertNotIn("Year Filter", toolbar)
+        self.assertNotIn('name="min_year"', toolbar)
+        self.assertNotIn("data-progress-year-toggle", toolbar)
         self.assertIn('data-progress-sort-mode="episode_release"', toolbar)
 
         css = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "style.css").read_text(encoding="utf-8")
         self.assertNotIn("field-sizing: content;", css)
         self.assertIn('select[data-progress-sort-mode="episode_release"] {\n    width: 136px;', css)
-        self.assertIn("width: 58px;\n    min-width: 58px;", css)
+        self.assertNotIn(".year-filter-box", css)
+        self.assertNotIn(".year-input", css)
         self.assertIn("gap: 3px;", css)
         self.assertIn(".progress-filter-icon-pause {\n    width: 12px;", css)
         self.assertIn(".progress-filter-icon-drop {\n    width: 17.142857px;", css)
         self.assertIn("margin-inline: -2.571429px;", css)
+        progress_script = (
+            PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "progress_page.js"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("use_year_filter", progress_script)
+        self.assertNotIn("min_year", progress_script)
+        self.assertNotIn("data-progress-year-toggle", progress_script)
+        ui_script = (
+            PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "ui_core.js"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("playUseYearFilter", ui_script)
+        self.assertNotIn("playMinYear", ui_script)
+
+    def test_progress_ignores_removed_year_filter_config_and_query(self) -> None:
+        config = self.app.state.services.auth.config
+        config.web_progress_min_year = 3000
+        config.web_progress_year_filter_enabled = True
+
+        response = self.client.get("/progress?min_year=3000&use_year_filter=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-progress-card-key="progress:1"', response.text)
+        self.assertIn('data-progress-card-key="progress:2"', response.text)
+        self.assertNotIn("Year Filter", response.text)
+        self.assertNotIn("data-min-year", response.text)
+        self.assertNotIn("data-use-year-filter", response.text)
+        self.assertNotIn('name="min_year"', response.text)
+        self.assertNotIn('name="use_year_filter"', response.text)
 
     def test_progress_filters_normalize_to_dropped_and_forward_sort_state(self) -> None:
         self.progress.items = [
@@ -499,7 +661,8 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertIn("show_paused=0", location)
         self.assertIn("sort=last_watched", location)
         self.assertIn("direction=asc", location)
-        self.assertIn("min_year=2020", location)
+        self.assertNotIn("min_year", location)
+        self.assertNotIn("use_year_filter", location)
 
     def test_progress_resume_toggle_uses_paused_bucket(self) -> None:
         self.progress.items[0].is_paused = True
@@ -573,8 +736,8 @@ class ProgressRouteTests(unittest.TestCase):
             json={
                 "hide_upcoming": "0",
                 "show_dropped": "0",
-                "min_year": "",
-                "use_year_filter": "0",
+                "min_year": "3000",
+                "use_year_filter": "1",
                 "viewport_card_keys": ["progress:1"],
                 "nearby_card_keys": [],
                 "page_card_keys": ["progress:1", "progress:2"],
@@ -630,8 +793,6 @@ class ProgressRouteTests(unittest.TestCase):
             json={
                 "hide_upcoming": "0",
                 "show_dropped": "0",
-                "min_year": "",
-                "use_year_filter": "0",
                 "viewport_card_keys": ["progress:1"],
                 "nearby_card_keys": [],
                 "page_card_keys": ["progress:1"],
@@ -674,8 +835,6 @@ class ProgressRouteTests(unittest.TestCase):
             json={
                 "hide_upcoming": "0",
                 "show_dropped": "0",
-                "min_year": "",
-                "use_year_filter": "0",
                 "viewport_card_keys": [],
                 "nearby_card_keys": [],
                 "page_card_keys": ["progress:1", "progress:2"],
@@ -723,8 +882,6 @@ class ProgressRouteTests(unittest.TestCase):
             json={
                 "hide_upcoming": "0",
                 "show_dropped": "0",
-                "min_year": "",
-                "use_year_filter": "0",
                 "viewport_card_keys": ["progress:139960"],
                 "nearby_card_keys": [],
                 "page_card_keys": ["progress:139960"],
@@ -742,8 +899,6 @@ class ProgressRouteTests(unittest.TestCase):
             json={
                 "hide_upcoming": "0",
                 "show_dropped": "0",
-                "min_year": "",
-                "use_year_filter": "0",
                 "viewport_card_keys": [],
                 "nearby_card_keys": ["progress:1"],
                 "page_card_keys": ["progress:1"],

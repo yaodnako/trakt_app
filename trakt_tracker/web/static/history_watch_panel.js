@@ -145,7 +145,7 @@
         mappingRefreshAttempts = 0;
         cancelWatchPanelRequests();
         if (watchTitle) watchTitle.textContent = trigger.dataset.title || "Episodes";
-        window.traktShowWatchPanel?.configureTitleRatings(watchOverlay, null);
+        window.traktShowWatchPanel?.configureScopeActions(watchOverlay, trigger, null);
         window.traktShowWatchPanel?.configurePlayAction(watchOverlay, trigger);
         setOverlayOpen(watchOverlay, true);
         loadWatchPanel("", {focusDefault: true});

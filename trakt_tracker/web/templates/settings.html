@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
+{% set queue_status = trakt_sync_status|default({}) %}
 <section class="panel">
     <section class="settings-accounts">
         <div class="settings-accounts-head">
@@ -78,6 +79,14 @@
                         <input type="checkbox" name="debug_mode" value="1" {% if config.debug_mode %}checked{% endif %}>
                         <span>Enable debug toasts</span>
                     </label>
+                    <label>
+                        <span>Catalog source</span>
+                        <select name="catalog_provider_mode">
+                            <option value="trakt" {% if catalog_provider_mode == 'trakt' %}selected{% endif %}>Trakt (current)</option>
+                            <option value="tmdb_preview" {% if catalog_provider_mode == 'tmdb_preview' %}selected{% endif %}>TMDb preview</option>
+                        </select>
+                    </label>
+                    <p class="settings-hint settings-field-span">TMDb preview changes Search, Explore and Releases only. History, Progress and Watchlist remain Trakt/local.</p>
                 </div>
             </section>
 
@@ -171,6 +180,24 @@
         </div>
     </form>
 
+    <section class="settings-card settings-data-update" data-trakt-sync-settings>
+        <div class="settings-card-head">
+            <div><p class="eyebrow">Trakt</p><h2>Synchronization queue</h2></div>
+            <span class="settings-sync-pill" data-trakt-sync-mode>{{ queue_status.get('mode', 'local') }}</span>
+        </div>
+        <div class="settings-sync-meta">
+            <span>Waiting</span><strong data-trakt-sync-pending>{{ queue_status.get('pending', 0) }}</strong>
+            <span>Needs attention</span><strong data-trakt-sync-blocked>{{ queue_status.get('blocked', 0) }}</strong>
+            <span>Last success</span><strong data-trakt-sync-success>{{ queue_status.get('last_success_at') or 'n/a' }}</strong>
+            <span>Last Trakt cache</span><strong data-trakt-sync-cache>{{ queue_status.get('last_cache_at') or 'n/a' }}</strong>
+        </div>
+        <p class="settings-hint" data-trakt-sync-error{% if not queue_status.get('last_error') %} hidden{% endif %}>{{ queue_status.get('last_error', '') }}</p>
+        <div class="settings-inline-actions">
+            <button type="button" class="button ghost" data-trakt-sync-retry>Retry Trakt sync</button>
+        </div>
+        <div class="settings-sync-log" data-trakt-sync-items></div>
+    </section>
+
     <section class="settings-card settings-data-update">
         <div class="settings-card-head">
             <div><p class="eyebrow">Local data</p><h2>Data update</h2></div>
@@ -182,6 +209,18 @@
             </form>
         </div>
         <p class="settings-hint">Updates history, ratings, and progress. Images continue downloading independently in the background.</p>
+    </section>
+
+    <section class="settings-card settings-data-update">
+        <div class="settings-card-head">
+            <div><p class="eyebrow">TMDb preview</p><h2>Local preview data</h2></div>
+            <span class="settings-sync-pill">{{ 'Configured' if tmdb_configured else 'Credentials missing' }}</span>
+        </div>
+        <p class="settings-hint">Preview actions stay in the profile database until a Trakt identity is known. Clearing this removes only TMDb preview state and catalog cache.</p>
+        <form method="post" action="/settings/tmdb-preview/reset" onsubmit="return window.confirm('Clear TMDb preview state and cache?');">
+            <input type="hidden" name="confirm" value="1">
+            <button type="submit" class="button ghost">Clear TMDb preview data</button>
+        </form>
     </section>
 
     <details class="settings-provider-details settings-collapsible settings-maintenance">
