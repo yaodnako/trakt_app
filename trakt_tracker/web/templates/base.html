@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+{% set tmdb_mode = catalog_provider_mode|default('trakt') == 'tmdb_preview' %}
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -14,16 +15,16 @@
     <meta name="trakt-icon-seen" content="{{ request.url_for('static', path='seen.svg') }}">
     <meta name="trakt-icon-cancel" content="{{ request.url_for('static', path='cancel.svg') }}">
     <meta name="trakt-icon-watched" content="{{ request.url_for('static', path='watched_check.svg') }}">
-    <title>{{ page_title }} | Trakt Tracker Web</title>
-    <link rel="icon" type="image/svg+xml" href="{{ request.url_for('static', path='trakt_logo_bw.svg') }}">
+    <title>{{ page_title }} | {{ 'Media Tracker' if tmdb_mode else 'Trakt Tracker Web' }}</title>
+    <link rel="icon" type="{{ 'image/png' if tmdb_mode else 'image/svg+xml' }}" href="{{ request.url_for('static', path='tmdb.png' if tmdb_mode else 'trakt_logo_bw.svg') }}">
     <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}?v={{ style_css_version }}">
 </head>
 <body>
     <div class="shell">
         <header class="topbar">
             <div class="brand">
-                <img class="brand-logo" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="Trakt Tracker logo" width="48" height="48">
-                <h1>Trakt Tracker</h1>
+                <img class="brand-logo" src="{{ request.url_for('static', path='tmdb.png' if tmdb_mode else 'trakt_logo_bw.svg') }}" alt="{{ 'Media Tracker' if tmdb_mode else 'Trakt Tracker' }} logo" width="48" height="48">
+                <h1>{{ 'Media Tracker' if tmdb_mode else 'Trakt Tracker' }}</h1>
             </div>
             {% if not setup_mode|default(false) %}<nav class="nav">
                 <a href="/progress" class="{% if current_path == '/progress' %}active{% endif %}"{% if current_path == '/progress' %} aria-current="page"{% endif %} data-notification-source="progress" data-notification-label="Up next">Up next{% if progress_waiting_title_count %}<span class="nav-badge">{{ progress_waiting_title_count }}</span>{% endif %}</a>
@@ -36,7 +37,7 @@
             </nav>{% endif %}
         </header>
 
-        {% if not setup_mode|default(false) and not suppress_auth_banner|default(false) %}
+        {% if catalog_provider_mode|default('trakt') == 'trakt' and not setup_mode|default(false) and not suppress_auth_banner|default(false) %}
         {% set sync_status = trakt_sync_status|default({}) %}
         {% set trakt_waiting = sync_status.get('pending', 0) + sync_status.get('blocked', 0) %}
         <section
@@ -80,8 +81,15 @@
                 </div>
                 <div class="poster-chip title-matrix-title-ratings" data-title-matrix-title-ratings aria-label="Title ratings" hidden>
                     <span class="poster-chip-part">
-                        <img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt">
-                        <span data-title-matrix-trakt-rating></span>
+                        <img
+                            class="poster-chip-icon"
+                            src="{{ request.url_for('static', path='tmdb.png' if tmdb_mode else 'trakt_logo_bw.svg') }}"
+                            data-title-matrix-primary-icon
+                            {% if not tmdb_mode %}data-trakt-src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"{% endif %}
+                            data-tmdb-src="{{ request.url_for('static', path='tmdb.png') }}"
+                            alt="{{ 'tmdb' if tmdb_mode else 'trakt' }}"
+                        >
+                        <span data-title-matrix-primary-rating data-title-matrix-trakt-rating></span>
                     </span>
                     <span class="poster-chip-part">
                         <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="IMDb">

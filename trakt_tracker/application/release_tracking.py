@@ -22,6 +22,7 @@ class ReleaseTrackingService:
         *,
         titles=None,
         trakt_outbox=None,
+        episode_schedule_overlay=None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -31,6 +32,7 @@ class ReleaseTrackingService:
         self._sender = sender
         self._titles = titles
         self._trakt_outbox = trakt_outbox
+        self._episode_schedule_overlay = episode_schedule_overlay
         self._list_count_refresh_lock = Lock()
         self._list_count_refreshed_at = 0.0
         self._notification_state_callback: Callable[[], None] | None = None
@@ -301,6 +303,14 @@ class ReleaseTrackingService:
                 and now >= release_at + self._notification_delay(config, row.title_type)
             }
 
+    def notified_release_keys(self) -> set[tuple[str, int]]:
+        with self._db.session() as session:
+            return {
+                (str(row.title_type), int(row.trakt_id))
+                for row in self._repository.list_all(session)
+                if row.last_sent_at is not None and row.acknowledged_at is None
+            }
+
     def progress_waiting_count(self) -> int:
         now = datetime.now(tz=UTC)
         config = self._config_store.load()
@@ -310,6 +320,8 @@ class ReleaseTrackingService:
                 view=ProgressView.ACTIVE,
                 limit=None,
             )
+            if self._episode_schedule_overlay is not None:
+                self._episode_schedule_overlay(items)
             if bool(getattr(config, "hide_upcoming_in_progress", False)):
                 items = [
                     item for item in items

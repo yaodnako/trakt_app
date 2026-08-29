@@ -20,8 +20,19 @@ function makeActionButton() {
         querySelector(selector) {
             return selector === "[data-search-watch-header-season-label]" ? label : null;
         },
+        removeAttribute(name) {
+            if (name.startsWith("data-")) {
+                const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+                delete this.dataset[key];
+            }
+        },
         setAttribute(name, value) {
             if (name === "aria-label") this.ariaLabel = value;
+        },
+        toggleAttribute(name, enabled) {
+            const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+            if (enabled) this.dataset[key] = "";
+            else delete this.dataset[key];
         },
     };
 }

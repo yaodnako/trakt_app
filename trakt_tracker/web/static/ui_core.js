@@ -24,9 +24,17 @@
         return Boolean(toggle.checked);
     }
 
+    function readTitleMatrixLayoutState(fragmentRoot, toggle) {
+        if (toggle) {
+            return readImdbSeasonsControlState(toggle) === true;
+        }
+        return Boolean(fragmentRoot && fragmentRoot.getAttribute("data-imdb-layout-available") !== "0");
+    }
+
     if (typeof module !== "undefined" && module.exports && typeof document === "undefined") {
         module.exports = Object.freeze({
             readImdbSeasonsControlState,
+            readTitleMatrixLayoutState,
             syncImdbSeasonsToggle,
         });
         return;
@@ -682,7 +690,7 @@
         renderPlayPrompts();
         const form = document.createElement("form");
         form.method = "post";
-        form.action = `/progress/${prompt.traktId}/watch`;
+        form.action = prompt.watchUrl || `/progress/${prompt.traktId}/watch`;
         form.style.display = "none";
         [
             ["hide_upcoming", prompt.hideUpcoming || "0"],
@@ -791,6 +799,7 @@
                 upsertPlayPrompt({
                     key,
                     traktId: link.dataset.playTraktId || "",
+                    watchUrl: link.dataset.playWatchUrl || "",
                     title: link.dataset.playTitle || "",
                     season: link.dataset.playSeason || "0",
                     episode: link.dataset.playEpisode || "0",
@@ -895,7 +904,12 @@
     function findRatingTrigger(context) {
         const matchesContext = (node) => (
             node.dataset.ratingTitleType === String(context.titleType)
-            && node.dataset.ratingTraktId === String(context.traktId)
+            && (node.dataset.ratingProvider || "trakt") === String(context.provider || "trakt")
+            && (
+                context.provider === "tmdb"
+                    ? node.dataset.ratingTmdbId === String(context.tmdbId)
+                    : node.dataset.ratingTraktId === String(context.traktId)
+            )
             && node.dataset.ratingSeason === String(context.season)
             && node.dataset.ratingEpisode === String(context.episode)
         );
@@ -911,8 +925,10 @@
             return;
         }
         ratingContext = {
+            provider: context.provider || context.ratingProvider || "trakt",
             titleType: context.titleType || context.title_type || context.ratingTitleType || "movie",
             traktId: context.traktId || context.trakt_id || context.ratingTraktId || "",
+            tmdbId: context.tmdbId || context.tmdb_id || context.ratingTmdbId || "",
             title: context.title || context.ratingTitle || "",
             season: context.season || context.ratingSeason || "",
             episode: context.episode || context.ratingEpisode || "",
@@ -944,8 +960,10 @@
     function openRatingModalFromTrigger(trigger) {
         openRatingModal(
             {
+                provider: trigger.dataset.ratingProvider || "trakt",
                 titleType: trigger.dataset.ratingTitleType || "movie",
                 traktId: trigger.dataset.ratingTraktId || "",
+                tmdbId: trigger.dataset.ratingTmdbId || "",
                 title: trigger.dataset.ratingTitle || "",
                 season: trigger.dataset.ratingSeason || "",
                 episode: trigger.dataset.ratingEpisode || "",
@@ -984,7 +1002,9 @@
             badge.className = "history-rating-badge user-rating-badge search-watch-user-rating";
             badge.setAttribute("data-rating-trigger", "");
             badge.dataset.ratingTitleType = ratingContext.titleType;
+            badge.dataset.ratingProvider = ratingContext.provider;
             badge.dataset.ratingTraktId = ratingContext.traktId;
+            badge.dataset.ratingTmdbId = ratingContext.tmdbId;
             badge.dataset.ratingTitle = ratingContext.title;
             badge.dataset.ratingSeason = ratingContext.season;
             badge.dataset.ratingEpisode = ratingContext.episode;
@@ -1016,8 +1036,10 @@
                 },
                 cache: "no-store",
                 body: JSON.stringify({
+                    provider: ratingContext.provider,
                     title_type: ratingContext.titleType,
                     trakt_id: ratingContext.traktId,
+                    tmdb_id: ratingContext.tmdbId,
                     title: ratingContext.title,
                     season: ratingContext.season,
                     episode: ratingContext.episode,
@@ -1073,10 +1095,18 @@
             titleMatrixTitleRatings.hidden = true;
             return;
         }
-        const traktRating = titleMatrixTitleRatings.querySelector("[data-title-matrix-trakt-rating]");
+        const primaryRating = titleMatrixTitleRatings.querySelector("[data-title-matrix-primary-rating]");
+        const primaryIcon = titleMatrixTitleRatings.querySelector("[data-title-matrix-primary-icon]");
         const imdbRating = titleMatrixTitleRatings.querySelector("[data-title-matrix-imdb-rating]");
-        if (traktRating) {
-            traktRating.textContent = data.dataset.titleTraktRating || "Loading";
+        const primaryProvider = data.dataset.titlePrimaryProvider === "tmdb" ? "tmdb" : "trakt";
+        if (primaryRating) {
+            primaryRating.textContent = data.dataset.titlePrimaryRating || "Loading";
+        }
+        if (primaryIcon) {
+            primaryIcon.src = primaryProvider === "tmdb"
+                ? primaryIcon.dataset.tmdbSrc
+                : primaryIcon.dataset.traktSrc;
+            primaryIcon.alt = primaryProvider;
         }
         if (imdbRating) {
             imdbRating.textContent = data.dataset.titleImdbRating || "Loading";
@@ -1299,7 +1329,7 @@
         const imdbLayoutAvailable = fragmentRoot.getAttribute("data-imdb-layout-available") !== "0";
         applyImdbSeasonLayout(
             fragmentRoot,
-            Boolean(imdbLayoutAvailable && imdbSeasonsToggle && imdbSeasonsToggle.checked),
+            Boolean(imdbLayoutAvailable && readTitleMatrixLayoutState(fragmentRoot, imdbSeasonsToggle)),
         );
         applySeasonZeroVisibility(fragmentRoot, Boolean(hideToggle && hideToggle.checked));
         applyTitleMatrixMode(fragmentRoot, getSelectedTitleMatrixMode(fragmentRoot));
@@ -1372,7 +1402,7 @@
             restoreTitleMatrixControlState(controlState);
             applyImdbSeasonLayout(
                 fragmentRoot,
-                readImdbSeasonsControlState(titleMatrixBody.querySelector("[data-imdb-seasons-toggle]")) === true,
+                readTitleMatrixLayoutState(fragmentRoot, titleMatrixBody.querySelector("[data-imdb-seasons-toggle]")),
             );
             applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
             applyTitleMatrixMode(fragmentRoot, normalizedProvider);
@@ -1417,7 +1447,7 @@
             restoreTitleMatrixControlState(controlState);
             applyImdbSeasonLayout(
                 fragmentRoot,
-                readImdbSeasonsControlState(titleMatrixBody.querySelector("[data-imdb-seasons-toggle]")) === true,
+                readTitleMatrixLayoutState(fragmentRoot, titleMatrixBody.querySelector("[data-imdb-seasons-toggle]")),
             );
             applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
             applyTitleMatrixMode(fragmentRoot, normalizedProvider);
@@ -1626,7 +1656,7 @@
                 restoreTitleMatrixControlState(controlState);
                 applyImdbSeasonLayout(
                     fragmentRoot,
-                    readImdbSeasonsControlState(titleMatrixBody.querySelector("[data-imdb-seasons-toggle]")) === true,
+                    readTitleMatrixLayoutState(fragmentRoot, titleMatrixBody.querySelector("[data-imdb-seasons-toggle]")),
                 );
                 applySeasonZeroVisibility(fragmentRoot, Boolean(controlState.hideSeasonZero));
                 applyTitleMatrixMode(fragmentRoot, provider);

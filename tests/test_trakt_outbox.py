@@ -119,6 +119,37 @@ def _outbox_service(db: Database, auth: _Auth) -> tuple[TraktOutboxService, Trak
     )
 
 
+def test_tmdb_local_mode_does_not_create_or_deliver_trakt_outbox_rows(tmp_path: Path) -> None:
+    db = _database(tmp_path / "local-mode.sqlite3")
+    auth = _Auth(_DeliveryClient())
+    auth.config.catalog_provider_mode = "tmdb_preview"
+    service, repository = _outbox_service(db, auth)
+    woke = []
+    service.set_wake_callback(lambda: woke.append(True))
+
+    with db.session() as session:
+        key = service.enqueue_history(
+            session,
+            title_type="show",
+            trakt_id=197270,
+            title="Kaiju No. 8",
+            desired_watched=True,
+            base_watched=False,
+            watched_at=datetime.now(tz=UTC),
+            season=1,
+            episode=20,
+        )
+    service.wake()
+    result = service.drain()
+
+    with db.session() as session:
+        rows = repository.list_items(session)
+    assert key is None
+    assert rows == []
+    assert woke == []
+    assert (result.processed, result.delivered, result.waiting, result.blocked) == (0, 0, 0, 0)
+
+
 def _enqueue_movie_watch(service: TraktOutboxService, db: Database, trakt_id: int, watched_at: datetime) -> str:
     with db.session() as session:
         key = service.enqueue_history(

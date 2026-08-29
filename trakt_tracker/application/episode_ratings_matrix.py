@@ -17,6 +17,7 @@ from trakt_tracker.application.metadata_refresh_policy import (
     TRIGGER_VISIBLE_RATINGS_REFRESH,
     metadata_refresh_due,
 )
+from trakt_tracker.config import normalize_catalog_provider_mode
 
 
 LEGEND_BUCKETS = (
@@ -102,6 +103,9 @@ class EpisodeRatingsMatrixViewModel:
     title_imdb_rating: float | None = None
     title_imdb_votes: int | None = None
     title_ratings_status: str = ""
+    title_primary_provider: str = "trakt"
+    title_primary_rating: float | None = None
+    title_primary_votes: int | None = None
     seasons: list[EpisodeMatrixSeason] = field(default_factory=list)
     rows: list[EpisodeMatrixRow] = field(default_factory=list)
     imdb_seasons: list[EpisodeMatrixSeason] = field(default_factory=list)
@@ -111,11 +115,14 @@ class EpisodeRatingsMatrixViewModel:
     has_episodes: bool = False
     error_message: str = ""
     provider: str = "imdb"
+    supports_my_ratings: bool = True
 
 
 def rating_bucket_color(rating: float | None) -> str:
     if rating is None:
         return ""
+    # Keep the palette in sync with the one-decimal rating shown in the UI.
+    rating = round(rating, 1)
     for _label, threshold, color in LEGEND_BUCKETS:
         if threshold is None or rating >= threshold:
             return color
@@ -123,7 +130,16 @@ def rating_bucket_color(rating: float | None) -> str:
 
 
 class EpisodeRatingsMatrixService:
-    def __init__(self, db, auth_service, titles_repo, history_repo, episode_repo, imdb_client, imdb_reconciliation=None) -> None:
+    def __init__(
+        self,
+        db,
+        auth_service,
+        titles_repo,
+        history_repo,
+        episode_repo,
+        imdb_client,
+        imdb_reconciliation=None,
+    ) -> None:
         self._db = db
         self._auth = auth_service
         self._titles = titles_repo
@@ -141,7 +157,10 @@ class EpisodeRatingsMatrixService:
         refresh_missing: bool = False,
         allow_network_refresh: bool = True,
     ) -> EpisodeRatingsMatrixViewModel:
-        normalized_provider = self._normalize_provider(provider)
+        tmdb_mode = normalize_catalog_provider_mode(
+            getattr(self._auth.config, "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview"
+        normalized_provider = "imdb" if tmdb_mode else self._normalize_provider(provider)
         title = self._load_title(trakt_id)
         error_message = ""
         with self._db.session() as session:
@@ -192,10 +211,49 @@ class EpisodeRatingsMatrixService:
             title_imdb_rating=title.get("imdb_rating"),
             title_imdb_votes=title.get("imdb_votes"),
             title_ratings_status=title.get("ratings_status", ""),
+            title_primary_provider="tmdb" if tmdb_mode else "trakt",
+            title_primary_rating=title.get("tmdb_rating") if tmdb_mode else title.get("trakt_rating"),
+            title_primary_votes=title.get("tmdb_votes") if tmdb_mode else title.get("trakt_votes"),
             episode_rows=episode_rows,
             my_ratings=my_ratings,
             error_message=error_message,
             provider=normalized_provider,
+        )
+
+    def load_imdb_show_matrix(
+        self,
+        *,
+        title: str,
+        imdb_id: str,
+        title_tmdb_rating: float | None = None,
+        title_tmdb_votes: int | None = None,
+        title_imdb_rating: float | None = None,
+        title_imdb_votes: int | None = None,
+        title_ratings_status: str = "",
+        my_ratings: dict[tuple[int, int], int] | None = None,
+    ) -> EpisodeRatingsMatrixViewModel:
+        error_message = ""
+        try:
+            loader = getattr(self._imdb_client, "list_show_episode_metadata", None)
+            episode_rows = list(loader(imdb_id)) if callable(loader) and imdb_id else []
+        except Exception as exc:
+            episode_rows = []
+            error_message = str(exc)
+        return self._build_matrix(
+            0,
+            title=title,
+            title_trakt_rating=None,
+            title_trakt_votes=None,
+            title_imdb_rating=title_imdb_rating,
+            title_imdb_votes=title_imdb_votes,
+            title_ratings_status=title_ratings_status,
+            title_primary_provider="tmdb",
+            title_primary_rating=title_tmdb_rating,
+            title_primary_votes=title_tmdb_votes,
+            episode_rows=episode_rows,
+            my_ratings=my_ratings or {},
+            error_message=error_message,
+            provider="imdb",
         )
 
     def select_trakt_rating_refresh_keys(self, trakt_id: int, *, force_refresh: bool = False) -> list[tuple[int, int]]:
@@ -234,8 +292,12 @@ class EpisodeRatingsMatrixService:
             return {
                 "title": title_row.title if title_row is not None and title_row.title else f"Show {trakt_id}",
                 "imdb_id": title_row.imdb_id if title_row is not None else "",
+                "tmdb_id": title_row.tmdb_id if title_row is not None else None,
+                "year": title_row.year if title_row is not None else None,
                 "trakt_rating": title_row.trakt_rating if title_row is not None else None,
                 "trakt_votes": title_row.trakt_votes if title_row is not None else None,
+                "tmdb_rating": title_row.tmdb_rating if title_row is not None else None,
+                "tmdb_votes": title_row.tmdb_votes if title_row is not None else None,
                 "imdb_rating": title_row.imdb_rating if title_row is not None else None,
                 "imdb_votes": title_row.imdb_votes if title_row is not None else None,
                 "ratings_status": title_row.ratings_status if title_row is not None else "",
@@ -322,6 +384,9 @@ class EpisodeRatingsMatrixService:
         title_imdb_rating: float | None,
         title_imdb_votes: int | None,
         title_ratings_status: str,
+        title_primary_provider: str,
+        title_primary_rating: float | None,
+        title_primary_votes: int | None,
         episode_rows: list[dict],
         my_ratings: dict[tuple[int, int], int],
         error_message: str,
@@ -338,6 +403,9 @@ class EpisodeRatingsMatrixService:
                 title_imdb_rating=title_imdb_rating,
                 title_imdb_votes=title_imdb_votes,
                 title_ratings_status=title_ratings_status,
+                title_primary_provider=title_primary_provider,
+                title_primary_rating=title_primary_rating,
+                title_primary_votes=title_primary_votes,
                 legend=self._legend_items(),
                 has_episodes=False,
                 error_message=error_message,
@@ -552,6 +620,9 @@ class EpisodeRatingsMatrixService:
             title_imdb_rating=title_imdb_rating,
             title_imdb_votes=title_imdb_votes,
             title_ratings_status=title_ratings_status,
+            title_primary_provider=title_primary_provider,
+            title_primary_rating=title_primary_rating,
+            title_primary_votes=title_primary_votes,
             seasons=seasons,
             rows=matrix_rows,
             imdb_seasons=imdb_seasons,

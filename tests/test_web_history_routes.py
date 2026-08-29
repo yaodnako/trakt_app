@@ -22,6 +22,7 @@ from trakt_tracker.application.operations import OperationLog
 from trakt_tracker.domain import RatingInput
 from trakt_tracker.web.routes_history import register_history_routes
 from trakt_tracker.web.routes_ratings import register_rating_routes
+from trakt_tracker.web.viewmodels import HISTORY_PAGE_SIZE
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = PROJECT_ROOT / "trakt_tracker" / "web" / "static"
@@ -32,8 +33,11 @@ class _FakeHistoryService:
         self.rows = rows
         self.episode_missing = False
         self.ratings: list[tuple[RatingInput, str]] = []
+        self.history_requests: list[dict] = []
+        self.title_summary_requests: list[dict] = []
 
     def history(self, *, title_type=None, title_filter=None, rated_only=False, limit=None, offset=0):
+        self.history_requests.append({"limit": limit, "offset": offset})
         rows = list(self.rows)
         if title_type:
             rows = [row for row in rows if row.get("type") == title_type]
@@ -66,6 +70,7 @@ class _FakeHistoryService:
         limit=None,
         offset=0,
     ):
+        self.title_summary_requests.append({"limit": limit, "offset": offset})
         rows = self.history(title_type=title_type, title_filter=title_filter, rated_only=False, limit=None, offset=0)
         groups = {}
         for row in rows:
@@ -74,6 +79,8 @@ class _FakeHistoryService:
             if group is None:
                 group = {
                     "title_key": f"{row.get('type')}:{row.get('title_trakt_id')}",
+                    "provider": row.get("provider", "trakt"),
+                    "tmdb_id": row.get("tmdb_id"),
                     "title_trakt_id": row.get("title_trakt_id"),
                     "title": row.get("title", ""),
                     "title_slug": row.get("title_slug", ""),
@@ -81,6 +88,8 @@ class _FakeHistoryService:
                     "title_poster_status": row.get("title_poster_status", "unknown"),
                     "title_trakt_rating": row.get("title_trakt_rating"),
                     "title_trakt_votes": row.get("title_trakt_votes"),
+                    "title_tmdb_rating": row.get("title_tmdb_rating"),
+                    "title_tmdb_votes": row.get("title_tmdb_votes"),
                     "title_imdb_rating": row.get("title_imdb_rating"),
                     "title_imdb_votes": row.get("title_imdb_votes"),
                     "title_ratings_status": row.get("title_ratings_status", "unknown"),
@@ -308,7 +317,7 @@ class HistoryRouteTests(unittest.TestCase):
             operations=self.operations,
             interactions=self.interactions,
             auth=SimpleNamespace(
-                config=SimpleNamespace(utc_offset="+03:00"),
+                config=SimpleNamespace(utc_offset="+03:00", catalog_provider_mode="trakt"),
                 is_authorized=lambda: True,
                 is_configured=lambda: True,
             ),
@@ -322,6 +331,7 @@ class HistoryRouteTests(unittest.TestCase):
                 "authorized": True,
                 "configured": True,
                 "settings_utc_offset": "+03:00",
+                "catalog_provider_mode": self.app.state.services.auth.config.catalog_provider_mode,
                 "notification_sound_url": "",
                 "debug_mode": False,
                 "debug_initial_seq": self.operations.current_seq(),
@@ -330,13 +340,30 @@ class HistoryRouteTests(unittest.TestCase):
             return self.templates.TemplateResponse(request, template_name, base_context, status_code=status_code)
 
         def render_fragment(request: Request, template_name: str, context: dict) -> str:
-            fragment_context = {"request": request, "current_path": request.url.path}
+            fragment_context = {
+                "request": request,
+                "current_path": request.url.path,
+                "catalog_provider_mode": self.app.state.services.auth.config.catalog_provider_mode,
+            }
             fragment_context.update(context)
             return self.templates.get_template(template_name).render(fragment_context)
 
         register_rating_routes(self.app)
         register_history_routes(self.app, render=render, render_fragment=render_fragment)
         self.client = TestClient(self.app)
+
+    def test_tmdb_mode_history_auto_sync_does_not_start_trakt_work(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        self.app.state.services.tmdb_catalog = SimpleNamespace(
+            local_history_rows=lambda **_kwargs: [],
+            local_history_title_summaries=lambda **_kwargs: [],
+        )
+
+        response = self.client.get("/history/auto-sync")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["started"])
+        self.assertEqual(self.app.state.bg_tasks.started_keys, [])
 
     def test_history_refresh_returns_only_requested_visible_title_keys(self) -> None:
         show_key = "03.04.2026:show:1"
@@ -468,12 +495,123 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertNotIn("reloadGuardKey", history_script)
         self.assertEqual(self.app.state.bg_tasks.started_keys, [])
 
+    def test_history_pager_scrolls_new_page_to_list_start(self) -> None:
+        history_script = (STATIC_DIR / "history_page.js").read_text(encoding="utf-8")
+
+        self.assertIn("scrollToPageStart = false", history_script)
+        self.assertIn(
+            'const scrollToPageStart = Boolean(link.closest(".history-pager"));',
+            history_script,
+        )
+        self.assertIn(
+            "navigateHistory(new URL(link.href, window.location.href), {scrollToPageStart});",
+            history_script,
+        )
+        self.assertIn(
+            'pageRoot?.scrollIntoView({block: "start", behavior: "auto"});',
+            history_script,
+        )
+
     def test_history_rate_query_accepts_empty_season_episode(self) -> None:
         response = self.client.get(
             "/history?rate_trakt_id=2&rate_type=movie&rate_season=&rate_episode=&rate_title=Dune"
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-rating-autopen", response.text)
+
+    def test_tmdb_mode_history_includes_local_episode_and_rating(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        watched_at = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+        local_row = {
+            "provider": "tmdb",
+            "tmdb_id": 43125,
+            "title_trakt_id": 0,
+            "title": "Guilty Crown",
+            "title_slug": "",
+            "poster_url": "https://poster.example/guilty-crown.jpg",
+            "title_poster_status": "ready",
+            "backdrop_url": "",
+            "title_backdrop_status": "checked_no_data",
+            "title_tmdb_rating": 7.4,
+            "title_tmdb_votes": 2300,
+            "title_trakt_rating": None,
+            "title_trakt_votes": None,
+            "title_imdb_rating": 7.0,
+            "title_imdb_votes": 18100,
+            "title_ratings_status": "ready",
+            "title_episode_avg_rating": 9.0,
+            "title_episode_rated_count": 1,
+            "type": "show",
+            "action": "watched",
+            "watched_at": watched_at,
+            "watched_at_known": True,
+            "season": 1,
+            "episode": 1,
+            "episode_title": "Genesis",
+            "episode_still_url": "",
+            "episode_still_status": "checked_no_data",
+            "episode_tmdb_rating": 7.8,
+            "episode_tmdb_votes": 120,
+            "episode_trakt_rating": None,
+            "episode_trakt_votes": None,
+            "episode_trakt_status": "checked_no_data",
+            "episode_imdb_rating": 7.6,
+            "episode_imdb_votes": 200,
+            "episode_imdb_status": "ready",
+            "display_rating": 9,
+        }
+        local_title = {
+            **local_row,
+            "title_key": "show:tmdb:43125",
+            "my_rating": 9.0,
+            "last_watched_at": watched_at,
+            "last_watched_at_known": True,
+            "watched_count": 1,
+            "latest_season": 1,
+            "latest_episode": 1,
+        }
+        self.app.state.services.tmdb_catalog = SimpleNamespace(
+            local_history_rows=lambda **_kwargs: [local_row],
+            local_history_title_summaries=lambda **_kwargs: [local_title],
+            local_history_titles=lambda **_kwargs: ["Guilty Crown"],
+        )
+
+        episodes = self.client.get("/history")
+        titles = self.client.get("/history?view=titles")
+
+        self.assertEqual(episodes.status_code, 200)
+        self.assertIn("Guilty Crown", episodes.text)
+        self.assertIn("Genesis", episodes.text)
+        self.assertIn('data-rating-provider="tmdb"', episodes.text)
+        self.assertIn('data-rating-tmdb-id="43125"', episodes.text)
+        self.assertIn("data-tmdb-history-unwatch", episodes.text)
+        self.assertEqual(titles.status_code, 200)
+        self.assertIn('data-history-title-key="show:tmdb:43125"', titles.text)
+
+    def test_tmdb_history_reads_only_local_projection_page_window(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        local_row_requests: list[dict] = []
+        local_title_requests: list[dict] = []
+        self.app.state.services.tmdb_catalog = SimpleNamespace(
+            local_history_rows=lambda **kwargs: local_row_requests.append(kwargs) or [],
+            local_history_title_summaries=lambda **kwargs: local_title_requests.append(kwargs) or [],
+            local_history_titles=lambda **_kwargs: [],
+        )
+        expected_limit = HISTORY_PAGE_SIZE + 1
+
+        episodes = self.client.get("/history?page=2")
+
+        self.assertEqual(episodes.status_code, 200)
+        self.assertEqual(self.history.history_requests, [])
+        self.assertEqual(local_row_requests[-1]["limit"], expected_limit)
+        self.assertEqual(local_row_requests[-1]["offset"], HISTORY_PAGE_SIZE)
+
+        titles = self.client.get("/history?view=titles&page=2")
+
+        self.assertEqual(titles.status_code, 200)
+        self.assertEqual(self.history.title_summary_requests, [])
+        self.assertEqual(local_title_requests[-1]["limit"], expected_limit)
+        self.assertEqual(local_title_requests[-1]["offset"], HISTORY_PAGE_SIZE)
 
     def test_history_unrated_card_uses_rating_modal_trigger(self) -> None:
         self.history.rows = [self._row("movie", 2, "Dune", watched_at=datetime(2026, 4, 3, 11, 0, tzinfo=UTC))]
@@ -524,6 +662,43 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertEqual(item.season, 1)
         self.assertEqual(item.episode, 2)
         self.assertEqual(title, "Severance")
+
+    def test_ratings_endpoint_saves_unmapped_tmdb_episode_rating_locally(self) -> None:
+        calls: list[dict] = []
+        tmdb_item = SimpleNamespace(
+            title_type="show",
+            tmdb_id=43125,
+            trakt_id=None,
+            title="Guilty Crown",
+        )
+        self.app.state.services.tmdb_catalog = SimpleNamespace(
+            get_item=lambda _title_type, _tmdb_id: tmdb_item,
+            set_rating=lambda _item, **kwargs: calls.append(kwargs) or {
+                "rating": kwargs["rating"],
+                "local_only": True,
+                "trakt_id": None,
+            },
+        )
+
+        response = self.client.post(
+            "/ratings",
+            json={
+                "provider": "tmdb",
+                "title_type": "show",
+                "tmdb_id": 43125,
+                "title": "Guilty Crown",
+                "season": 1,
+                "episode": 2,
+                "rating": 9,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["local_only"])
+        self.assertEqual(
+            calls,
+            [{"rating": 9, "season": 1, "episode": 2}],
+        )
 
     def test_history_uses_distinct_card_keys_for_same_title_on_different_days(self) -> None:
         self.history.rows = [
@@ -861,6 +1036,38 @@ class HistoryRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("S01E01 (S02E01)", response.text)
+
+    def test_tmdb_history_uses_only_imdb_coordinate_for_mapped_legacy_row(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        self.history.rows[0].update(
+            {
+                "provider": "trakt",
+                "tmdb_id": 95396,
+                "title_tmdb_rating": 8.4,
+                "title_tmdb_votes": 772,
+                "episode_imdb_season": 2,
+                "episode_imdb_episode": 1,
+                "episode_still_url": "https://still.example/severance.jpg",
+                "episode_still_status": "ready",
+                "episode_tmdb_rating": 7.2,
+                "episode_tmdb_votes": 11,
+                "episode_tmdb_status": "ready",
+            }
+        )
+
+        response = self.client.get("/history?page=1")
+
+        self.assertEqual(response.status_code, 200)
+        card = response.text.split('data-history-title-key="03.04.2026:show:1"', 1)[1].split("</article>", 1)[0]
+        self.assertIn("S02E01", card)
+        self.assertNotIn("S01E01 (S02E01)", card)
+        self.assertIn("https://www.themoviedb.org/tv/95396/season/1/episode/1", card)
+        self.assertIn("data-tmdb-card", card)
+        self.assertIn("data-tmdb-progress-watch-panel", card)
+        self.assertIn('data-title-matrix-url="/titles/tmdb/show/95396/episode-ratings-matrix"', card)
+        self.assertNotIn("trakt.tv", card)
+        self.assertNotIn("data-rating-trakt-id", card)
+        self.assertNotIn("data-trakt-id", card)
 
     def test_history_movie_preview_uses_external_trakt_link(self) -> None:
         template = (PROJECT_ROOT / "trakt_tracker" / "web" / "templates" / "history_title_card.html").read_text(

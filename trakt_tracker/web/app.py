@@ -177,7 +177,12 @@ class _TraktEpisodeRatingsRefreshLoop:
                 services = self._app.state.services
                 if services is None:
                     raise RuntimeError("Profile services are unavailable")
-                if not services.auth.is_authorized():
+                if (
+                    normalize_catalog_provider_mode(
+                        getattr(services.auth.config, "catalog_provider_mode", "trakt")
+                    ) != "trakt"
+                    or not services.auth.is_authorized()
+                ):
                     self._stop_event.wait(self._poll_interval_seconds)
                     continue
                 bg_tasks = self._app.state.bg_tasks
@@ -217,7 +222,13 @@ class _TraktOutboxLoop:
             try:
                 services: ServiceContainer = self._app.state.services
                 status = services.trakt_sync.status()
-                if services.auth.is_authorized() and status["pending"] > 0:
+                if (
+                    normalize_catalog_provider_mode(
+                        getattr(services.auth.config, "catalog_provider_mode", "trakt")
+                    ) == "trakt"
+                    and services.auth.is_authorized()
+                    and status["pending"] > 0
+                ):
                     services.trakt_sync.wake()
             except Exception:
                 logging.getLogger("trakt_tracker.runtime").exception("Trakt outbox loop failed")
@@ -334,8 +345,8 @@ def _build_templates() -> Jinja2Templates:
     templates.env.filters["progress_effective_percent"] = progress_effective_percent
     templates.env.filters["progress_skipped_count"] = progress_skipped_count
     templates.env.filters["progress_recent_release"] = progress_recent_release
-    templates.env.filters["progress_rating_chip"] = lambda item: progress_rating_chip(item, _TemplateFilters.format_rating_with_votes)
-    templates.env.filters["progress_episode_rating_chip"] = lambda item: progress_episode_rating_chip(item, _TemplateFilters.format_rating_with_votes)
+    templates.env.filters["progress_rating_chip"] = lambda item, primary_source=None: progress_rating_chip(item, _TemplateFilters.format_rating_with_votes, primary_source)
+    templates.env.filters["progress_episode_rating_chip"] = lambda item, primary_source=None: progress_episode_rating_chip(item, _TemplateFilters.format_rating_with_votes, primary_source)
     templates.env.filters["cached_image_url"] = lambda value: (f"/cached-image?url={quote(str(value))}&v=3" if value else "")
     templates.env.filters["episode_preview_url"] = tmdb_episode_preview_url
     return templates
@@ -619,6 +630,9 @@ def create_app(
             "settings_utc_offset": request.app.state.services.auth.config.utc_offset,
             "active_profile_slug": request.app.state.services.auth.config.active_slug,
             "trakt_sync_status": trakt_sync_status,
+            "catalog_provider_mode": normalize_catalog_provider_mode(
+                getattr(services.auth.config, "catalog_provider_mode", "trakt")
+            ),
             "web_hide_spoilers": bool(
                 getattr(request.app.state.services.auth.config, "web_hide_spoilers", False)
             ),
@@ -626,7 +640,7 @@ def create_app(
             "notifications_browser_poll_enabled": os.environ.get("TRAKT_TRACKER_TRAY_RUNTIME") != "1",
             "notification_activity_initial_seq": request.app.state.services.notifications.current_activity_seq(),
             "notification_pending_sources": ",".join(
-                request.app.state.services.notifications.refresh_pending_sources()
+                request.app.state.services.notifications.pending_sources()
             ),
             "debug_mode": request.app.state.services.auth.config.debug_mode,
             "debug_initial_seq": request.app.state.services.operations.current_seq(),
@@ -645,6 +659,9 @@ def create_app(
             "request": request,
             "current_path": request.url.path,
             "active_profile_slug": config.active_slug,
+            "catalog_provider_mode": normalize_catalog_provider_mode(
+                getattr(config, "catalog_provider_mode", "trakt")
+            ),
             "web_hide_spoilers": bool(getattr(config, "web_hide_spoilers", False)),
         }
         fragment_context.update(context)

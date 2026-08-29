@@ -94,6 +94,31 @@ class _FakeEpisodeRatingsMatrixService:
     def select_trakt_rating_refresh_keys(self, trakt_id: int, *, force_refresh: bool = False) -> list[tuple[int, int]]:
         return [(1, 1)]
 
+    def load_imdb_show_matrix(
+        self,
+        *,
+        title: str,
+        imdb_id: str,
+        title_tmdb_rating: float | None = None,
+        title_tmdb_votes: int | None = None,
+        title_imdb_rating: float | None = None,
+        title_imdb_votes: int | None = None,
+        title_ratings_status: str = "",
+        my_ratings: dict[tuple[int, int], int] | None = None,
+    ) -> EpisodeRatingsMatrixViewModel:
+        matrix = self.load_show_matrix(0, allow_network_refresh=False)
+        matrix.title = title
+        matrix.title_trakt_rating = None
+        matrix.title_trakt_votes = None
+        matrix.title_imdb_rating = title_imdb_rating
+        matrix.title_imdb_votes = title_imdb_votes
+        matrix.title_ratings_status = title_ratings_status
+        matrix.title_primary_provider = "tmdb"
+        matrix.title_primary_rating = title_tmdb_rating
+        matrix.title_primary_votes = title_tmdb_votes
+        self.calls.append({"imdb_id": imdb_id, "title": title, "my_ratings": my_ratings or {}})
+        return matrix
+
 
 class _FakeSearchWatchService:
     def __init__(self) -> None:
@@ -464,6 +489,7 @@ class CatalogRouteTests(unittest.TestCase):
                 local_keys=lambda: set(self.release_tracking_keys),
                 local_items=lambda: list(self.release_items),
                 matured_release_keys=lambda: {("show", 21)},
+                notified_release_keys=lambda: {("show", 21)},
                 refresh=lambda: list(self.release_items),
                 refresh_anticipated_list_counts=lambda _items: None,
                 set_tracked=lambda title_type, trakt_id, *, tracked: self.release_tracking_calls.append(
@@ -543,10 +569,12 @@ class CatalogRouteTests(unittest.TestCase):
                         ratings_status="ready",
                         released_at=datetime.now(tz=UTC) - timedelta(days=2),
                         is_release_tracked=True,
-                        is_notification_matured=True,
+                        is_notification_matured=False,
                     )
                 ],
                 refresh_release_items=lambda: [],
+                notified_release_keys=lambda: {("movie", 202)},
+                local_show_episode_ratings=lambda _tmdb_id: {},
             ),
         )
         self.saved_imdb_seasons: list[bool] = []
@@ -643,14 +671,168 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("data-tmdb-card", html)
         self.assertIn("data-tmdb-watchlist-toggle", html)
         self.assertIn("search-watchlist-button", html)
-        self.assertIn("TMDb 8.2", html)
-        self.assertIn("<span>TMDb 8.2 (28.0k)</span>", html)
+        self.assertIn("static/tmdb.png", html)
+        self.assertIn("<span>8.2 (28.0k)</span>", html)
         self.assertIn('aria-label="TMDb and IMDb title ratings"', html)
         self.assertIn("8.7 (2100000)", html)
         self.assertIn("imdb_icon.png", html)
+        self.assertIn("static/tmdb_preview.js", html)
         self.assertNotIn("tmdb-preview-toolbar", html)
         self.assertNotIn("tmdb-preview-card", html)
         self.assertNotIn("TMDb preview search", html)
+
+    def test_tmdb_mapped_show_keeps_rating_matrix_action_and_uses_tmdb_icon(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        mapped_show = TmdbCatalogItem(
+            title_type="show",
+            tmdb_id=82684,
+            trakt_id=135985,
+            title="Mapped TMDb Show",
+            year=2026,
+            tmdb_rating=8.2,
+            tmdb_votes=28000,
+            imdb_rating=8.7,
+            imdb_votes=2_100_000,
+            ratings_status="ready",
+            released_at=datetime.now(tz=UTC) - timedelta(days=2),
+            is_release_tracked=True,
+        )
+        self.app.state.services.tmdb_catalog.search_titles = (
+            lambda query, title_type=None, *, page, limit: TmdbCatalogPage(
+                items=[mapped_show],
+                page=page,
+                page_count=1,
+            )
+        )
+        self.app.state.services.tmdb_catalog.local_release_items = lambda: [mapped_show]
+
+        search_html = self.client.get("/search?q=Mapped+TMDb+Show&type=show").text
+        release_html = self.client.get("/release-tracking").text
+
+        for html in (search_html, release_html):
+            card = html.split('data-tmdb-id="82684"', 1)[1].split("</article>", 1)[0]
+            self.assertIn("title-matrix-trigger", card)
+            self.assertIn("data-title-matrix-trigger", card)
+            self.assertIn('data-title-matrix-tmdb-id="82684"', card)
+            self.assertIn('/titles/tmdb/show/82684/episode-ratings-matrix', card)
+            self.assertIn('href="https://www.themoviedb.org/tv/82684"', card)
+            self.assertNotIn("trakt.tv", card)
+            self.assertIn('static/tmdb.png', card)
+            self.assertIn('poster-chip-icon poster-chip-icon-tmdb', card)
+            self.assertNotIn(">TMDb 8.2", card)
+
+        tmdb_icon = STATIC_DIR / "tmdb.png"
+        self.assertTrue(tmdb_icon.is_file())
+        icon_bytes = tmdb_icon.read_bytes()
+        self.assertEqual(icon_bytes[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(
+            (int.from_bytes(icon_bytes[16:20]), int.from_bytes(icon_bytes[20:24])),
+            (64, 64),
+        )
+        styles = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        self.assertNotIn(
+            ".poster-chip-icon-tmdb {\n    object-fit: cover;\n}",
+            styles,
+        )
+
+    def test_tmdb_mapped_show_uses_only_imdb_season_layout(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+
+        response = self.client.get("/titles/show/138748/episode-ratings-matrix")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("data-imdb-seasons-toggle", response.text)
+        self.assertIn('data-matrix-layout-panel="imdb"', response.text)
+        self.assertNotIn('data-matrix-layout-panel="trakt"', response.text)
+        self.assertNotIn('data-title-matrix-provider="trakt"', response.text)
+        self.assertIn('data-title-matrix-rating-mode="my"', response.text)
+        self.assertNotIn("trakt", response.text.lower())
+
+    def test_tmdb_mapped_show_matrix_uses_local_imdb_path_without_trakt_cache(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        mapped_show = TmdbCatalogItem(
+            title_type="show",
+            tmdb_id=82684,
+            trakt_id=135985,
+            imdb_id="tt13111078",
+            title="Mapped TMDb Show",
+            tmdb_rating=8.2,
+            tmdb_votes=28_000,
+            imdb_rating=8.7,
+            imdb_votes=2_100_000,
+            ratings_status="ready",
+        )
+        local_rating_calls: list[int] = []
+        self.app.state.services.tmdb_catalog.get_item = lambda _title_type, _tmdb_id: mapped_show
+        self.app.state.services.tmdb_catalog.local_show_episode_ratings = (
+            lambda tmdb_id: local_rating_calls.append(tmdb_id) or {(1, 1): 9}
+        )
+
+        response = self.client.get("/titles/tmdb/show/82684/episode-ratings-matrix")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(local_rating_calls, [82684])
+        self.assertEqual(
+            self.matrix.calls[-1],
+            {"imdb_id": "tt13111078", "title": "Mapped TMDb Show", "my_ratings": {(1, 1): 9}},
+        )
+        self.assertFalse(any(call.get("trakt_id") == 135985 for call in self.matrix.calls))
+        self.assertNotIn('data-title-matrix-provider="trakt"', response.text)
+        self.assertIn('data-title-matrix-rating-mode="my"', response.text)
+
+    def test_tmdb_unmapped_show_keeps_rating_matrix_action_on_every_catalog_surface(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        unmapped_show = TmdbCatalogItem(
+            title_type="show",
+            tmdb_id=113962,
+            imdb_id="tt13111078",
+            title="Lioness",
+            year=2023,
+            tmdb_rating=8.0,
+            tmdb_votes=1300,
+            imdb_rating=7.8,
+            imdb_votes=91000,
+            ratings_status="ready",
+            released_at=datetime.now(tz=UTC) - timedelta(days=2),
+            is_release_tracked=True,
+        )
+        self.app.state.services.tmdb_catalog.search_titles = (
+            lambda query, title_type=None, *, page, limit: TmdbCatalogPage(
+                items=[unmapped_show],
+                page=page,
+                page_count=1,
+            )
+        )
+        self.app.state.services.tmdb_catalog.explore_titles = (
+            lambda title_type, feed, *, page, limit: TmdbCatalogPage(
+                items=[unmapped_show],
+                page=page,
+                page_count=1,
+            )
+        )
+        self.app.state.services.tmdb_catalog.local_release_items = lambda: [unmapped_show]
+        self.app.state.services.tmdb_catalog.get_item = lambda title_type, tmdb_id: unmapped_show
+
+        responses = (
+            self.client.get("/search?q=Lioness&type=show"),
+            self.client.get("/explore?type=show&feed=trending&page=1"),
+            self.client.get("/release-tracking"),
+        )
+
+        for response in responses:
+            self.assertEqual(response.status_code, 200)
+            card = response.text.split('data-tmdb-id="113962"', 1)[1].split("</article>", 1)[0]
+            self.assertIn('aria-label="Open episode IMDb ratings matrix for Lioness"', card)
+            self.assertIn("title-matrix-trigger", card)
+            self.assertIn("data-title-matrix-trigger", card)
+            self.assertIn('/titles/tmdb/show/113962/episode-ratings-matrix', card)
+
+        matrix_response = self.client.get("/titles/tmdb/show/113962/episode-ratings-matrix")
+        self.assertEqual(matrix_response.status_code, 200)
+        self.assertIn("S1", matrix_response.text)
+        self.assertIn("E1", matrix_response.text)
+        self.assertNotIn('data-title-matrix-provider="trakt"', matrix_response.text)
+        self.assertIn('data-title-matrix-rating-mode="my"', matrix_response.text)
 
     def test_tmdb_preview_explore_reuses_existing_toolbar_and_card_layout(self) -> None:
         self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
@@ -667,12 +849,13 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertNotIn('name="trakt_min"', html)
         self.assertIn('class="result-card search-result-card"', html)
         self.assertIn("TMDb Explore Title (2026)", html)
-        self.assertIn("TMDb 7.8", html)
-        self.assertIn("<span>TMDb 7.8 (12.0k)</span>", html)
+        self.assertIn("static/tmdb.png", html)
+        self.assertIn("<span>7.8 (12.0k)</span>", html)
         self.assertIn("TMDb popularity 94.5", html)
         self.assertIn('aria-label="TMDb and IMDb title ratings"', html)
         self.assertIn("7.6 (14000)", html)
         self.assertIn("imdb_icon.png", html)
+        self.assertIn("static/tmdb_preview.js", html)
         self.assertNotIn("tmdb-preview-toolbar", html)
         self.assertNotIn("tmdb-preview-card", html)
 
@@ -697,9 +880,15 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn('class="result-card search-result-card release-tracking-card', html)
         self.assertIn("TMDb Released Movie (2026)", html)
         self.assertIn("data-tmdb-card", html)
-        self.assertIn("TMDb 7.5", html)
-        self.assertIn("<span>TMDb 7.5 (9.0k)</span>", html)
+        self.assertIn("static/tmdb.png", html)
+        self.assertIn("<span>7.5 (9.0k)</span>", html)
         self.assertIn("7.3 (11000)", html)
+        self.assertIn("is-notification-sent", html)
+        self.assertIn('data-notification-sent="true"', html)
+        tmdb_script = (STATIC_DIR / "tmdb_preview.js").read_text(encoding="utf-8")
+        self.assertIn('card.classList.toggle("is-unacknowledged", !acknowledged);', tmdb_script)
+        self.assertIn('"is-notification-sent",', tmdb_script)
+        self.assertIn('card.dataset.notificationSent === "true"', tmdb_script)
         self.assertNotIn("tmdb-preview-toolbar", html)
         self.assertNotIn("tmdb-preview-card", html)
 
@@ -788,10 +977,10 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("8.2 (12400)", html)
         self.assertEqual(html.count("anticipated-rating-part"), 2)
         self.assertIn(
-            "release-tracking-card is-unacknowledged is-notification-due",
+            "release-tracking-card is-unacknowledged is-notification-sent",
             html,
         )
-        self.assertIn('data-notification-matured="true"', html)
+        self.assertIn('data-notification-sent="true"', html)
         self.assertIn('id="release-watch-overlay"', html)
         self.assertIn("data-show-watch-play", html)
         release_script = (STATIC_DIR / "release_tracking_page.js").read_text(encoding="utf-8")
@@ -801,24 +990,18 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn('data-title-matrix-url="/titles/show/22/episode-ratings-matrix"', html)
         self.assertNotIn("scheduleWatchPanelRefreshIfPending", html)
         self.assertIn("refreshWatchPanel", release_script)
-        self.assertIn('"is-notification-due",', release_script)
+        self.assertIn('"is-notification-sent",', release_script)
         self.assertEqual(html.count('loading="lazy" decoding="async" fetchpriority="low"'), 1)
         styles = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
-        self.assertIn(".release-tracking-card.is-notification-due", styles)
+        self.assertIn(".release-tracking-card.is-notification-sent .release-bell-icon", styles)
         notification_styles = styles[
-            styles.index(".release-tracking-card.is-notification-due") :
+            styles.index(".release-tracking-card.is-notification-sent .release-bell-icon") :
             styles.index(".anticipated-release-chip")
         ]
-        self.assertIn("border-color: #c6283d;", notification_styles)
-        self.assertIn("outline: 3px solid", notification_styles)
-        self.assertIn(
-            ".release-tracking-card.is-notification-due .search-watchlist-button",
-            notification_styles,
-        )
-        self.assertIn("filter: brightness(0) invert(1);", notification_styles)
-        self.assertIn("@keyframes release-notification-alert", notification_styles)
+        self.assertIn("animation: release-notification-bell", notification_styles)
         self.assertIn("@keyframes release-notification-bell", notification_styles)
-        self.assertNotIn("border-color: #2f9f73;", notification_styles)
+        self.assertNotIn("outline:", notification_styles)
+        self.assertNotIn("release-notification-alert", notification_styles)
 
     def test_release_page_keeps_title_without_release_date_in_upcoming(self) -> None:
         self.release_items.append(
@@ -1076,6 +1259,122 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertTrue((STATIC_DIR / "ui_core.js").is_file())
         self.assertTrue((STATIC_DIR / "catalog_page.js").is_file())
 
+    def test_tmdb_watch_panel_templates_load_shared_handler(self) -> None:
+        templates = PROJECT_ROOT / "trakt_tracker" / "web" / "templates"
+        trigger_templates = []
+        for template_path in templates.glob("*.html"):
+            template = template_path.read_text(encoding="utf-8")
+            if "data-tmdb-watch-panel" not in template:
+                continue
+            trigger_templates.append(template_path.name)
+            self.assertIn("tmdb_preview.js", template, template_path.name)
+
+        self.assertTrue(trigger_templates)
+
+    def test_tmdb_watch_panel_client_resets_and_configures_every_header_action(self) -> None:
+        script = (STATIC_DIR / "tmdb_preview.js").read_text(encoding="utf-8")
+
+        self.assertIn("function resetPanelHeader()", script)
+        self.assertIn("let panelRequestToken = 0;", script)
+        self.assertIn('overlay.dataset.watchPanelOwner = "tmdb"', script)
+        self.assertIn('overlay?.dataset.watchPanelOwner !== "tmdb"', script)
+        self.assertIn("{onEscape: closeTmdbPanel}", script)
+        self.assertIn("resetPanelHeader();", script)
+        self.assertIn("configurePanelHeader(data, card)", script)
+        self.assertIn("/titles/tmdb/show/${tmdbId}/episode-ratings-matrix", script)
+        self.assertIn("/search/show/${tmdbId}/play?title=", script)
+        self.assertIn("data-tmdb-scope-action", script)
+        self.assertIn("data-tmdb-scope-unwatch", script)
+        for adapter_name in ("catalog_page.js", "release_tracking_page.js"):
+            adapter = (STATIC_DIR / adapter_name).read_text(encoding="utf-8")
+            self.assertIn('watchOverlay.dataset.watchPanelOwner = "trakt"', adapter)
+            self.assertIn('watchOverlay?.dataset.watchPanelOwner !== "trakt"', adapter)
+
+    def test_tmdb_watch_panel_route_exposes_standard_header_contract(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        self.app.state.services.tmdb_catalog.load_watch_panel = lambda tmdb_id, *, season=None: {
+            "tmdb_id": tmdb_id,
+            "trakt_id": 8675309,
+            "title": "Guilty Crown",
+            "selected_season": season or 1,
+            "seasons": [{"season_number": 1, "episode_count": 22}],
+            "episodes": [],
+            "tmdb_rating": 7.4,
+            "tmdb_votes": 2300,
+            "imdb_rating": 7.0,
+            "imdb_votes": 18100,
+            "ratings_status": "ready",
+            "watched_count": 0,
+            "released_count": 22,
+            "released_watched_count": 0,
+            "can_mark_title": True,
+            "can_unwatch_title": False,
+            "can_mark_season": True,
+            "can_unwatch_season": False,
+        }
+
+        response = self.client.get("/tmdb-preview/show/43125/watch-panel")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["tmdb_id"], 43125)
+        self.assertEqual(payload["tmdb_rating"], 7.4)
+        self.assertEqual(payload["imdb_rating"], 7.0)
+        self.assertEqual(payload["released_count"], 22)
+        self.assertTrue(payload["can_mark_title"])
+        self.assertTrue(payload["can_mark_season"])
+        self.assertNotIn("trakt_id", payload)
+
+    def test_tmdb_episode_watch_returns_rating_context_and_release_cleanup(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        item = TmdbCatalogItem(
+            title_type="show",
+            tmdb_id=43125,
+            title="Guilty Crown",
+            is_release_tracked=True,
+        )
+        watch_calls: list[dict] = []
+        self.app.state.services.tmdb_catalog.get_item = lambda _title_type, _tmdb_id: item
+        self.app.state.services.tmdb_catalog.mark_watched = lambda _item, **kwargs: (
+            watch_calls.append(kwargs)
+            or {
+                "local_only": True,
+                "trakt_id": None,
+                "mapped": False,
+                "removed_from_release_tracking": True,
+            }
+        )
+
+        response = self.client.post(
+            "/tmdb-preview/watch",
+            json={
+                "title_type": "show",
+                "tmdb_id": 43125,
+                "season": 1,
+                "episode": 2,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["removed_from_release_tracking"])
+        self.assertEqual(
+            payload["rating_context"],
+            {
+                "provider": "tmdb",
+                "title_type": "show",
+                "tmdb_id": 43125,
+                "title": "Guilty Crown",
+                "season": 1,
+                "episode": 2,
+            },
+        )
+        self.assertEqual(watch_calls[0]["season"], 1)
+        self.assertEqual(watch_calls[0]["episode"], 2)
+        script = (STATIC_DIR / "tmdb_preview.js").read_text(encoding="utf-8")
+        self.assertIn("window.traktOpenRatingModal", script)
+        self.assertIn("removed_from_release_tracking", script)
+
     def test_partial_catalog_navigation_replaces_active_navigation(self) -> None:
         script = (STATIC_DIR / "catalog_page.js").read_text(encoding="utf-8")
         ui_script = (STATIC_DIR / "ui_core.js").read_text(encoding="utf-8")
@@ -1089,6 +1388,23 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn('headers.set("X-Trakt-Fetch", "1")', ui_script)
         self.assertIn("showTraktReconnectPrompt(payload)", ui_script)
         self.assertIn('form.action = "/settings/trakt-authorize"', ui_script)
+
+    def test_catalog_pager_scrolls_new_results_to_start(self) -> None:
+        script = (STATIC_DIR / "catalog_page.js").read_text(encoding="utf-8")
+
+        self.assertIn("scrollToPageStart = false", script)
+        self.assertIn(
+            'const scrollToPageStart = Boolean(link.closest(".pager"));',
+            script,
+        )
+        self.assertIn(
+            "navigateCatalog(target, {scrollToPageStart});",
+            script,
+        )
+        self.assertIn(
+            'resultsRegion?.scrollIntoView({block: "start", behavior: "auto"});',
+            script,
+        )
 
     def test_watchlist_page_renders_saved_titles_and_active_navigation(self) -> None:
         response = self.client.get("/watchlist")
@@ -1113,6 +1429,27 @@ class CatalogRouteTests(unittest.TestCase):
         self.assertIn("Upcoming", html)
         self.assertIn(">↓</button>", html)
         self.assertNotIn(">Apply<", html)
+
+    def test_tmdb_mode_watchlist_includes_local_tmdb_titles(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        self.app.state.services.tmdb_catalog.local_watchlist_items = lambda: [
+            TmdbCatalogItem(
+                title_type="show",
+                tmdb_id=43125,
+                title="Guilty Crown",
+                year=2011,
+                is_watchlisted=True,
+                poster_url="https://poster.example/guilty-crown.jpg",
+                released_at=datetime(2011, 10, 14, tzinfo=UTC),
+            )
+        ]
+
+        response = self.client.get("/watchlist")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Guilty Crown (2011)", response.text)
+        self.assertIn('data-tmdb-id="43125"', response.text)
+        self.assertIn('data-tmdb-watchlisted="true"', response.text)
 
     def test_explore_defaults_to_anticipated_shows_and_hides_future_actions(self) -> None:
         response = self.client.get("/explore")
@@ -1499,6 +1836,13 @@ class CatalogRouteTests(unittest.TestCase):
         template = (STATIC_DIR / "catalog_page.js").read_text(encoding="utf-8")
 
         self.assertIn('await loadWatchPanel("", {preserve: true});', template)
+
+    def test_episode_ratings_matrix_dialog_keeps_the_grid_body_visible(self) -> None:
+        css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+        dialog_rule = css.split(".title-matrix-dialog {", 1)[1].split("}", 1)[0]
+
+        self.assertIn("grid-template-rows: auto auto;", dialog_rule)
+        self.assertIn("max-height: min(620px, calc(100vh - 200px));", css)
 
     def test_catalog_watchlist_removal_resolves_show_card_from_panel_action(self) -> None:
         script = (STATIC_DIR / "catalog_page.js").read_text(encoding="utf-8")

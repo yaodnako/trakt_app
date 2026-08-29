@@ -39,6 +39,10 @@ DEFAULT_TMDB_SEARCH_SORT_MODE = "IMDb votes"
 
 
 def _trakt_sync_metadata(services: ServiceContainer) -> dict:
+    if normalize_catalog_provider_mode(
+        getattr(services.auth.config, "catalog_provider_mode", "trakt")
+    ) != "trakt":
+        return {}
     trakt_sync = getattr(services, "trakt_sync", None)
     reader = getattr(trakt_sync, "mutation_metadata", None)
     return reader() if callable(reader) else {}
@@ -48,6 +52,11 @@ def _tmdb_preview_enabled(services: ServiceContainer) -> bool:
     return normalize_catalog_provider_mode(
         getattr(services.auth.config, "catalog_provider_mode", "trakt")
     ) == "tmdb_preview"
+
+
+def _local_catalog_mode(services: ServiceContainer) -> str:
+    mode = normalize_catalog_provider_mode(getattr(services.auth.config, "catalog_provider_mode", "trakt"))
+    return mode if mode == "tmdb_preview" else "trakt"
 
 
 def _normalize_tmdb_search_sort_mode(value: str | None, fallback: str | None = None) -> str:
@@ -76,6 +85,10 @@ def _sort_tmdb_search_results(results: list, mode: str) -> list:
 
 
 def _decorate_tmdb_items(services: ServiceContainer, items: list) -> None:
+    if _tmdb_preview_enabled(services):
+        # TMDb mode arrives here already decorated from its own local projection.
+        # Never probe the legacy catalog just to paint a card state.
+        return
     try:
         watchlist_keys = services.catalog.watchlist_keys()
     except Exception:
@@ -122,6 +135,8 @@ def _saved_or_query_flag(request: Request, name: str, saved_value: bool) -> bool
 
 
 def _schedule_watchlist_snapshot_refresh(request: Request, services: ServiceContainer) -> None:
+    if _tmdb_preview_enabled(services):
+        return
     has_snapshot = getattr(services.catalog, "has_watchlist_snapshot", None)
     refresh_snapshot = getattr(services.catalog, "refresh_watchlist_snapshot", None)
     if not callable(has_snapshot) or not callable(refresh_snapshot):
@@ -191,7 +206,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
             common_context = {
                 "page_title": "Search",
                 "page_kind": "search",
-                "catalog_provider_mode": "tmdb_preview",
+                "catalog_provider_mode": _local_catalog_mode(services),
                 "query": query,
                 "search_type": selected_type,
                 "sort_mode": sort_mode,
@@ -548,7 +563,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
             common_context = {
                 "page_title": "Explore",
                 "page_kind": "explore",
-                "catalog_provider_mode": "tmdb_preview",
+                "catalog_provider_mode": _local_catalog_mode(services),
                 "explore_type": title_type,
                 "explore_feed": selected_feed,
                 "explore_imdb_min": _format_rating_threshold(remembered_imdb_min),
@@ -829,6 +844,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
         release_filter = release if release in {"released", "upcoming"} else "all"
         sort_mode = normalize_watchlist_sort_mode(sort)
         sort_direction = "asc" if direction == "asc" else "desc"
+        tmdb_mode = _tmdb_preview_enabled(services)
         catalog_loading = str(catalog_shell or "").strip().lower() in {"1", "true", "yes", "on"}
         if catalog_loading:
             return render(
@@ -839,17 +855,22 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                     "page": 1, "has_next": False, "watchlist_type": selected_type or "all",
                     "watchlist_release": release_filter, "watchlist_sort_mode": sort_mode,
                     "watchlist_sort_modes": WATCHLIST_SORT_MODES, "watchlist_direction": sort_direction,
+                    "tmdb_preview": tmdb_mode,
+                    "catalog_provider_mode": "tmdb_preview" if tmdb_mode else "trakt",
                     "catalog_loading": True,
                 },
             )
         try:
-            results = await asyncio.to_thread(services.catalog.local_watchlist_titles)
-            request.app.state.bg_tasks.start(
-                "watchlist_refresh",
-                source="Watchlist refresh",
-                operations=services.operations,
-                fn=services.catalog.watchlist_titles,
-            )
+            if tmdb_mode:
+                results = await asyncio.to_thread(services.tmdb_catalog.local_watchlist_items)
+            else:
+                results = await asyncio.to_thread(services.catalog.local_watchlist_titles)
+                request.app.state.bg_tasks.start(
+                    "watchlist_refresh",
+                    source="Watchlist refresh",
+                    operations=services.operations,
+                    fn=services.catalog.watchlist_titles,
+                )
             if selected_type is not None:
                 results = [item for item in results if item.title_type == selected_type]
             now = datetime.now(tz=UTC)
@@ -864,8 +885,9 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                     if item.released_at is not None and _known_utc(item.released_at) > now
                 ]
             results = sort_watchlist_results(results, sort_mode, descending=sort_direction == "desc")
-            _attach_search_rating_badges(services, results)
-            schedule_search_enrichment(request.app, results=results, query="", title_type=None)
+            if not tmdb_mode:
+                _attach_search_rating_badges(services, results)
+                schedule_search_enrichment(request.app, results=results, query="", title_type=None)
         except Exception as exc:
             error_message = str(exc)
         return render(
@@ -883,6 +905,8 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                 "watchlist_sort_mode": sort_mode,
                 "watchlist_sort_modes": WATCHLIST_SORT_MODES,
                 "watchlist_direction": sort_direction,
+                "tmdb_preview": tmdb_mode,
+                "catalog_provider_mode": "tmdb_preview" if tmdb_mode else "trakt",
             },
         )
 
@@ -931,7 +955,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
             error_message = ""
             released = []
             upcoming = []
-            notification_matured_keys: set[str] = set()
+            notified_release_keys: set[str] = set()
             try:
                 items = await asyncio.to_thread(services.tmdb_catalog.local_release_items)
                 request.app.state.bg_tasks.start(
@@ -951,10 +975,11 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                     [item for item in items if item.released_at is None or _known_utc(item.released_at) > now],
                     key=lambda item: (_as_utc(item.released_at) is None, _as_utc(item.released_at) or datetime.max.replace(tzinfo=UTC)),
                 )
-                notification_matured_keys = {
-                    f"{item.title_type}:tmdb:{item.tmdb_id}"
-                    for item in released
-                    if item.is_notification_matured
+                notified_release_keys = {
+                    f"{title_type}:tmdb:{tmdb_id}"
+                    for title_type, tmdb_id in await asyncio.to_thread(
+                        services.tmdb_catalog.notified_release_keys
+                    )
                 }
             except Exception as exc:
                 error_message = str(exc)
@@ -963,23 +988,23 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                 "release_tracking.html",
                 {
                     "page_title": "Releases",
-                    "catalog_provider_mode": "tmdb_preview",
+                    "catalog_provider_mode": _local_catalog_mode(services),
                     "released": released,
                     "upcoming": upcoming,
-                    "notification_matured_keys": notification_matured_keys,
+                    "notified_release_keys": notified_release_keys,
                     "error_message": error_message,
                 },
             )
         error_message = ""
         released = []
         upcoming = []
-        notification_matured_keys: set[str] = set()
+        notified_release_keys: set[str] = set()
         try:
             items = await asyncio.to_thread(services.release_tracking.local_items)
-            notification_matured_keys = {
+            notified_release_keys = {
                 f"{title_type}:{trakt_id}"
                 for title_type, trakt_id in await asyncio.to_thread(
-                    services.release_tracking.matured_release_keys
+                    services.release_tracking.notified_release_keys
                 )
             }
 
@@ -1014,7 +1039,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                 "page_title": "Releases",
                 "released": released,
                 "upcoming": upcoming,
-                "notification_matured_keys": notification_matured_keys,
+                "notified_release_keys": notified_release_keys,
                 "error_message": error_message,
             },
         )
@@ -1121,7 +1146,11 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
         force_refresh = str(refresh or "").strip().lower() in {"1", "true", "yes", "on"}
         should_refresh_missing = str(refresh_missing or "").strip().lower() in {"1", "true", "yes", "on"}
         try:
-            normalized_provider = "trakt" if str(provider or "").strip().lower() == "trakt" else "imdb"
+            normalized_provider = (
+                "trakt"
+                if not _tmdb_preview_enabled(services) and str(provider or "").strip().lower() == "trakt"
+                else "imdb"
+            )
             if normalized_provider == "trakt" and (force_refresh or should_refresh_missing):
                 refresh_keys = await asyncio.to_thread(
                     services.episode_ratings_matrix.select_trakt_rating_refresh_keys,
@@ -1161,6 +1190,8 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                         "imdb_seasons_enabled": bool(
                             getattr(services.auth.config, "web_imdb_seasons_enabled", True)
                         ),
+                        "trakt_season_layout_enabled": not _tmdb_preview_enabled(services),
+                        "trakt_ratings_enabled": not _tmdb_preview_enabled(services),
                     },
                 )
             )
@@ -1176,6 +1207,63 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                         "imdb_seasons_enabled": bool(
                             getattr(services.auth.config, "web_imdb_seasons_enabled", True)
                         ),
+                        "trakt_season_layout_enabled": not _tmdb_preview_enabled(services),
+                        "trakt_ratings_enabled": not _tmdb_preview_enabled(services),
+                    },
+                ),
+                status_code=500,
+            )
+
+    @app.get("/titles/tmdb/show/{tmdb_id}/episode-ratings-matrix", response_class=HTMLResponse)
+    async def tmdb_title_episode_ratings_matrix(
+        request: Request,
+        tmdb_id: int,
+        refresh: str = "",
+        provider: str = "imdb",
+        refresh_missing: str = "",
+    ) -> HTMLResponse:
+        services: ServiceContainer = request.app.state.services
+        try:
+            item = await asyncio.to_thread(services.tmdb_catalog.get_item, "show", tmdb_id)
+            my_ratings = await asyncio.to_thread(
+                services.tmdb_catalog.local_show_episode_ratings,
+                tmdb_id,
+            )
+            matrix = await asyncio.to_thread(
+                services.episode_ratings_matrix.load_imdb_show_matrix,
+                title=item.title,
+                imdb_id=item.imdb_id,
+                title_tmdb_rating=item.tmdb_rating,
+                title_tmdb_votes=item.tmdb_votes,
+                title_imdb_rating=item.imdb_rating,
+                title_imdb_votes=item.imdb_votes,
+                title_ratings_status=item.ratings_status,
+                my_ratings=my_ratings,
+            )
+            return HTMLResponse(
+                render_fragment(
+                    request,
+                    "title_episode_ratings_matrix.html",
+                    {
+                        "matrix": matrix,
+                        "imdb_seasons_enabled": True,
+                        "trakt_season_layout_enabled": False,
+                        "trakt_ratings_enabled": False,
+                    },
+                )
+            )
+        except Exception as exc:
+            return HTMLResponse(
+                render_fragment(
+                    request,
+                    "title_episode_ratings_matrix.html",
+                    {
+                        "matrix": None,
+                        "matrix_error_message": str(exc),
+                        "matrix_trakt_id": 0,
+                        "imdb_seasons_enabled": True,
+                        "trakt_season_layout_enabled": False,
+                        "trakt_ratings_enabled": False,
                     },
                 ),
                 status_code=500,
@@ -1354,6 +1442,13 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
             )
         except Exception as exc:
             return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+        release_was_tracked = False
+        release_tracking = getattr(services, "release_tracking", None)
+        if release_tracking is not None:
+            try:
+                release_was_tracked = (title_type, trakt_id) in release_tracking.local_keys()
+            except Exception:
+                release_was_tracked = False
         try:
             removed_from_watchlist = schedule_watch_follow_up(
                 request.app,
@@ -1362,7 +1457,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                 remove_from_watchlist=(
                     scope == "title" and bool(payload.get("remove_from_watchlist"))
                 ),
-                remove_from_release_tracking=scope == "title",
+                remove_from_release_tracking=True,
             )
         except Exception as exc:
             services.operations.publish(
@@ -1377,6 +1472,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                 "message": f"Marked {count} item{'s' if count != 1 else ''} watched.",
                 "count": count,
                 "removed_from_watchlist": removed_from_watchlist,
+                "removed_from_release_tracking": release_was_tracked,
                 **_trakt_sync_metadata(services),
             }
         )
@@ -1555,7 +1651,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
             )
         except Exception as exc:
             return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-        return JSONResponse({"ok": True, "message": "Watchlist updated.", **result, **_trakt_sync_metadata(services)})
+        return JSONResponse({"ok": True, "message": "Watchlist updated.", **_tmdb_public_result(result)})
 
     @app.post("/tmdb-preview/release-tracking/toggle")
     async def tmdb_preview_release_tracking_toggle(request: Request) -> JSONResponse:
@@ -1576,7 +1672,7 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
             )
         except Exception as exc:
             return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-        return JSONResponse({"ok": True, "message": "Release tracking updated.", **result, **_trakt_sync_metadata(services)})
+        return JSONResponse({"ok": True, "message": "Release tracking updated.", **_tmdb_public_result(result)})
 
     @app.post("/tmdb-preview/release-tracking/acknowledge")
     async def tmdb_preview_release_tracking_acknowledge(request: Request) -> JSONResponse:
@@ -1624,6 +1720,8 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
         payload = await _json_payload(request)
         title_type = str(payload.get("title_type") or "movie")
         tmdb_id = _optional_int(payload.get("tmdb_id")) or 0
+        scope = str(payload.get("scope") or "").strip().lower()
+        remove_from_release_tracking = bool(payload.get("remove_from_release_tracking"))
         season = _optional_int(payload.get("season"))
         episode = _optional_int(payload.get("episode"))
         if tmdb_id <= 0 or title_type not in {"movie", "show"}:
@@ -1631,14 +1729,20 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
         try:
             item = await asyncio.to_thread(services.tmdb_catalog.get_item, title_type, tmdb_id)
             mapped = int(item.trakt_id or 0)
+            release_was_tracked = bool(
+                getattr(item, "is_release_tracked", False)
+                or remove_from_release_tracking
+            )
             if mapped:
+                if scope not in {"title", "season", "episode"}:
+                    scope = "episode" if season is not None and episode is not None else "title"
                 if watched:
                     count = await asyncio.to_thread(
                         services.search_watch.mark_watch,
                         title_type=title_type,
                         trakt_id=mapped,
                         title=item.title,
-                        scope="episode" if season is not None and episode is not None else "title",
+                        scope=scope,
                         season=season,
                         episode=episode,
                         watched_at=datetime.now(tz=UTC),
@@ -1652,25 +1756,87 @@ def register_catalog_routes(app, *, render, render_fragment, schedule_search_enr
                         services.search_watch.unmark_scope,
                         title_type=title_type,
                         trakt_id=mapped,
-                        scope="title",
+                        scope=scope or "title",
+                        season=season,
                     )
                     message = "Watch removed."
-                return JSONResponse({"ok": True, "message": message, "local_only": False, "trakt_id": mapped, **_trakt_sync_metadata(services)})
-            result = await asyncio.to_thread(
-                services.tmdb_catalog.mark_watched if watched else services.tmdb_catalog.unwatch,
-                item,
-                watched_at=datetime.now(tz=UTC) if watched else None,
-                season=season,
-                episode=episode,
-            ) if watched else await asyncio.to_thread(
-                services.tmdb_catalog.unwatch,
-                item,
-                season=season,
-                episode=episode,
-            )
+                if watched:
+                    try:
+                        schedule_watch_follow_up(
+                            request.app,
+                            title_type=title_type,
+                            trakt_id=mapped,
+                            remove_from_release_tracking=True,
+                        )
+                    except Exception as exc:
+                        services.operations.publish(
+                            "TMDb watch warning",
+                            f"Watch follow-up scheduling failed: {exc}",
+                        )
+                result = {
+                    "local_only": False,
+                    "trakt_id": mapped,
+                    "removed_from_release_tracking": release_was_tracked if watched else False,
+                }
+                return JSONResponse({
+                    "ok": True,
+                    "message": message,
+                    **_tmdb_public_result(result),
+                    **(
+                        {"rating_context": _tmdb_rating_context(item, season=season, episode=episode)}
+                        if watched and title_type == "show" and season is not None and episode is not None
+                        else {}
+                    ),
+                })
+            if title_type == "show" and scope in {"title", "season"}:
+                if scope == "season" and season is None:
+                    raise ValueError("Missing season identity.")
+                if watched:
+                    count = await asyncio.to_thread(
+                        services.tmdb_catalog.mark_show_scope_watched,
+                        item,
+                        watched_at=datetime.now(tz=UTC),
+                        season=season if scope == "season" else None,
+                    )
+                    result = {
+                        "local_only": True,
+                        "trakt_id": None,
+                        "mapped": False,
+                        "count": count,
+                        "removed_from_release_tracking": release_was_tracked,
+                    }
+                else:
+                    count = await asyncio.to_thread(
+                        services.tmdb_catalog.unwatch_show_scope,
+                        item,
+                        season=season if scope == "season" else None,
+                    )
+                    result = {"local_only": True, "trakt_id": None, "mapped": False, "count": count}
+            else:
+                result = await asyncio.to_thread(
+                    services.tmdb_catalog.mark_watched if watched else services.tmdb_catalog.unwatch,
+                    item,
+                    watched_at=datetime.now(tz=UTC) if watched else None,
+                    season=season,
+                    episode=episode,
+                ) if watched else await asyncio.to_thread(
+                    services.tmdb_catalog.unwatch,
+                    item,
+                    season=season,
+                    episode=episode,
+                )
         except Exception as exc:
             return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-        return JSONResponse({"ok": True, "message": "Watched state saved locally." if watched else "Watched state removed locally.", **result, **_trakt_sync_metadata(services)})
+        return JSONResponse({
+            "ok": True,
+            "message": "Watched state saved locally." if watched else "Watched state removed locally.",
+            **_tmdb_public_result(result),
+            **(
+                {"rating_context": _tmdb_rating_context(item, season=season, episode=episode)}
+                if watched and title_type == "show" and season is not None and episode is not None
+                else {}
+            ),
+        })
 
 
 def _optional_int(value) -> int | None:
@@ -1679,6 +1845,21 @@ def _optional_int(value) -> int | None:
         return int(raw) if raw else None
     except (TypeError, ValueError):
         return None
+
+
+def _tmdb_rating_context(item, *, season: int, episode: int) -> dict:
+    return {
+        "provider": "tmdb",
+        "title_type": str(item.title_type),
+        "tmdb_id": int(item.tmdb_id),
+        "title": str(item.title or ""),
+        "season": int(season),
+        "episode": int(episode),
+    }
+
+
+def _tmdb_public_result(result: dict) -> dict:
+    return {key: value for key, value in dict(result or {}).items() if "trakt" not in str(key).lower()}
 
 
 async def _json_payload(request: Request) -> dict:
@@ -1691,6 +1872,7 @@ async def _json_payload(request: Request) -> dict:
 
 def _serialize_tmdb_preview_panel(panel: dict) -> dict:
     result = dict(panel or {})
+    result.pop("trakt_id", None)
     episodes = []
     for episode in list(result.get("episodes") or []):
         value = dict(episode)

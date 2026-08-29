@@ -5,9 +5,10 @@ import json
 import os
 import re
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 APP_DIR_NAME = "TraktTracker"
@@ -33,6 +34,7 @@ class AppConfig:
     tmdb_api_key: str = ""
     tmdb_read_access_token: str = ""
     catalog_provider_mode: str = "trakt"
+    network_proxy_url: str = ""
     kinopoisk_api_key: str = ""
     kinopoisk_domain_tail: str = "net"
     kinopoisk_domain_options: str = "net,ru"
@@ -96,12 +98,15 @@ class ConfigStore:
         if not self._path.exists():
             return AppConfig()
         raw = json.loads(self._path.read_text(encoding="utf-8"))
+        known_fields = {item.name for item in fields(AppConfig)}
+        raw = {key: value for key, value in raw.items() if key in known_fields}
         if "imdb_auto_sync_interval_minutes" not in raw:
             raw["imdb_auto_sync_interval_minutes"] = max(1, int(raw.get("imdb_auto_sync_interval_hours", 3) or 3) * 60)
         if "imdb_auto_sync_interval_hours" not in raw:
             raw["imdb_auto_sync_interval_hours"] = max(1, int(raw["imdb_auto_sync_interval_minutes"]) // 60 or 1)
         config = AppConfig(**raw)
         config.catalog_provider_mode = normalize_catalog_provider_mode(config.catalog_provider_mode)
+        config.network_proxy_url = normalize_tmdb_proxy_url(config.network_proxy_url)
         active_slug = config.active_profile_slug.strip() or config.last_user_slug.strip()
         config.active_profile_slug = active_slug
         config.last_user_slug = active_slug
@@ -112,6 +117,7 @@ class ConfigStore:
 
     def save(self, config: AppConfig) -> None:
         config.catalog_provider_mode = normalize_catalog_provider_mode(config.catalog_provider_mode)
+        config.network_proxy_url = normalize_tmdb_proxy_url(config.network_proxy_url)
         active_slug = config.active_profile_slug.strip() or config.last_user_slug.strip()
         config.active_profile_slug = active_slug
         config.last_user_slug = active_slug
@@ -254,6 +260,35 @@ def normalize_catalog_provider_mode(value: str | None, fallback: str = "trakt") 
     if normalized in {"trakt", "tmdb_preview"}:
         return normalized
     return fallback
+
+
+def normalize_tmdb_proxy_url(value: str | None, fallback: str = "") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"socks5h://{raw}"
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return fallback
+    scheme = parsed.scheme.casefold()
+    if (
+        scheme not in {"socks5", "socks5h"}
+        or not parsed.hostname
+        or port is None
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        return fallback
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{scheme}://{host}:{port}"
 
 
 def normalize_kinopoisk_domain_options(value: str | None, fallback: tuple[str, ...] = ("net", "ru")) -> list[str]:

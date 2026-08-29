@@ -221,6 +221,54 @@ class NotificationRefreshWorkflowTests(unittest.TestCase):
         self.assertEqual(len(notification_repo.tracked), 1)
         self.assertIsNone(notification_repo.logs[(1, 70)].seen_at)
 
+    def test_tmdb_schedule_move_retracts_premature_episode_notification(self) -> None:
+        stale_release = datetime.now(tz=UTC) - timedelta(days=2)
+        corrected_release = datetime.now(tz=UTC) + timedelta(days=5)
+        episode = EpisodeSummary(
+            trakt_id=70,
+            season=4,
+            number=17,
+            title="Episode 17",
+            first_aired=stale_release,
+        )
+        notification_repo = _FakeNotificationRepository()
+        notification_repo.track_released(
+            None,
+            show_trakt_id=1,
+            show_title="Tracked Show",
+            episode_trakt_id=70,
+            season=4,
+            episode=17,
+            message="S04E17 Episode 17",
+            released_at=stale_release,
+        )
+        sender = _FakeSender()
+
+        def overlay(items):
+            items[0].next_episode.first_aired = corrected_release
+            return items
+
+        workflow = NotificationRefreshWorkflow(
+            db=type("FakeDB", (), {"session": lambda self: nullcontext(object())})(),
+            auth_service=_FakeAuth(
+                _FakeClient(
+                    [CalendarEntry(show_trakt_id=1, show_title="Tracked Show", episode=episode)]
+                )
+            ),
+            config_store=_FakeConfigStore(AppConfig(notification_release_delay_minutes=0)),
+            notification_repo=notification_repo,
+            episode_repo=object(),
+            progress_repo=_FakeProgressRepository(episode),
+            sender=sender,
+            episode_schedule_overlay=overlay,
+        )
+
+        sent = workflow.poll_upcoming(send_native=True, refresh_remote=True)
+
+        self.assertEqual(sent, [])
+        self.assertEqual(sender.messages, [])
+        self.assertNotIn((1, 70), notification_repo.logs)
+
     def test_poll_local_ignores_old_unwatched_episode_outside_calendar_lookback(self) -> None:
         episode = EpisodeSummary(
             trakt_id=70,

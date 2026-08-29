@@ -318,9 +318,23 @@
         const traktId = Number(panel?.dataset.searchWatchTraktId || "0");
         const title = panel?.dataset.searchWatchTitle || "";
         action.hidden = !traktId;
-        if (!traktId) return;
+        if (!traktId) {
+            delete action.dataset.titleMatrixTitle;
+            delete action.dataset.titleMatrixTraktId;
+            delete action.dataset.titleMatrixTmdbId;
+            delete action.dataset.titleMatrixUrl;
+            action.removeAttribute("aria-label");
+            return;
+        }
+        const primaryIcon = action.querySelector(".poster-chip-part:first-child img");
+        if (primaryIcon) {
+            primaryIcon.src = "/static/trakt_logo_bw.svg";
+            primaryIcon.alt = "trakt";
+            primaryIcon.classList.remove("poster-chip-icon-tmdb");
+        }
         action.dataset.titleMatrixTitle = title;
         action.dataset.titleMatrixTraktId = String(traktId);
+        delete action.dataset.titleMatrixTmdbId;
         action.dataset.titleMatrixUrl = `/titles/show/${traktId}/episode-ratings-matrix`;
         action.setAttribute("aria-label", `Open episode ratings matrix for ${title || "this series"}`);
         const traktRating = action.querySelector("[data-search-watch-trakt-rating]");
@@ -331,6 +345,9 @@
 
     function configureSeasonScopeAction(action, state, {visible, unwatch = false}) {
         if (!action) return;
+        action.removeAttribute("data-tmdb-scope-action");
+        action.removeAttribute("data-tmdb-scope-unwatch");
+        action.toggleAttribute(unwatch ? "data-search-unwatch-action" : "data-search-watch-action", true);
         action.dataset.titleType = "show";
         action.dataset.traktId = String(state.traktId);
         action.dataset.title = state.title;
@@ -378,6 +395,12 @@
         const unwatch = overlay?.querySelector?.("[data-search-watch-header-unwatch]");
         [mark, unwatch].forEach((action) => {
             if (!(action instanceof HTMLButtonElement)) return;
+            action.removeAttribute("data-tmdb-scope-action");
+            action.removeAttribute("data-tmdb-scope-unwatch");
+            action.toggleAttribute(
+                action === unwatch ? "data-search-unwatch-action" : "data-search-watch-action",
+                true,
+            );
             action.dataset.traktId = String(traktId);
             action.dataset.title = title;
         });

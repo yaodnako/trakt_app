@@ -37,6 +37,7 @@
     }
 
     async function refreshWatchPanel(requestUrl, token, {state = null, focusDefault = false} = {}) {
+        if (watchOverlay?.dataset.watchPanelOwner !== "trakt") return;
         if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
         mappingRefreshTimer = 0;
         if (!window.traktShowWatchPanel?.needsRefresh(watchBody)) {
@@ -51,7 +52,7 @@
         try {
             const response = await fetch(refreshUrl.toString(), {headers: {"Accept": "text/html"}, cache: "no-store"});
             const html = await response.text();
-            if (token !== watchRefreshToken) return;
+            if (token !== watchRefreshToken || watchOverlay?.dataset.watchPanelOwner !== "trakt") return;
             if (!response.ok && !panelWasPending) return;
             const replacedPanel = window.traktShowWatchPanel?.applyRefresh(watchBody, html);
             if (replacedPanel) {
@@ -90,7 +91,7 @@
 
     async function loadWatchPanel(panelUrl = "", {preserve = false, focusDefault = false} = {}) {
         const requestUrl = panelUrl || activePanelUrl;
-        if (!requestUrl || !watchBody) return;
+        if (!requestUrl || !watchBody || watchOverlay?.dataset.watchPanelOwner !== "trakt") return;
         if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
         mappingRefreshTimer = 0;
         const token = watchRefreshToken;
@@ -98,7 +99,7 @@
         if (!preserve) watchBody.innerHTML = '<div class="title-matrix-loading-shell"><div class="title-matrix-loading-bar is-wide"></div></div>';
         try {
             const response = await fetch(requestUrl, {headers: {"Accept": "text/html"}, cache: "no-store"});
-            if (token !== watchRefreshToken) return;
+            if (token !== watchRefreshToken || watchOverlay?.dataset.watchPanelOwner !== "trakt") return;
             watchBody.innerHTML = await response.text();
             if (state) window.traktShowWatchPanel?.restoreState(watchBody, state);
             else if (focusDefault) window.traktShowWatchPanel?.focusDefaultEpisode(watchBody);
@@ -115,6 +116,7 @@
         activeTrigger = trigger;
         activePanelUrl = trigger.dataset.watchPanelUrl || "";
         watchRefreshToken += 1;
+        if (watchOverlay) watchOverlay.dataset.watchPanelOwner = "trakt";
         mappingRefreshAttempts = 0;
         if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
         if (watchTitle) watchTitle.textContent = trigger.dataset.title || "Episodes";
@@ -154,7 +156,16 @@
             pendingAction = null;
             setOverlayOpen(dateOverlay, false);
             window.pushFlashToast?.(result.message || "Marked watched.", 3600);
-            await loadWatchPanel("", {preserve: true});
+            const completedCard = activeTrigger?.closest("[data-release-card]");
+            if (result.removed_from_release_tracking && completedCard) {
+                completedCard.remove();
+                watchRefreshToken += 1;
+                setOverlayOpen(watchOverlay, false);
+                activeTrigger = null;
+                activePanelUrl = "";
+            } else {
+                await loadWatchPanel("", {preserve: true});
+            }
             if (completedAction.scope === "episode" && window.traktOpenRatingModal) {
                 window.traktOpenRatingModal({
                     titleType: completedAction.title_type,
@@ -216,6 +227,7 @@
         if (event.target.closest("[data-release-watch-close]")) {
             event.preventDefault();
             watchRefreshToken += 1;
+            if (watchOverlay?.dataset.watchPanelOwner === "trakt") delete watchOverlay.dataset.watchPanelOwner;
             setOverlayOpen(watchOverlay, false);
             activeTrigger?.focus();
             activeTrigger = null;
@@ -251,8 +263,8 @@
                 const card = button.closest("[data-release-card]");
                 card?.classList.toggle("is-unacknowledged", !result.acknowledged);
                 card?.classList.toggle(
-                    "is-notification-due",
-                    !result.acknowledged && card.dataset.notificationMatured === "true",
+                    "is-notification-sent",
+                    !result.acknowledged && card.dataset.notificationSent === "true",
                 );
                 button.title = result.acknowledged ? "Resume notifications" : "Acknowledge release";
             } else {

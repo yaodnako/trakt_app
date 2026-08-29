@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import unittest
 import subprocess
+import unittest
 from concurrent.futures import ThreadPoolExecutor
 from email.message import Message
 from threading import Event, Lock
@@ -193,6 +193,25 @@ class ArtworkCacheTests(unittest.TestCase):
         self.assertIn("--retry-all-errors", command)
         self.assertEqual(command[command.index("--continue-at") + 1], "-")
         self.assertEqual(execute.call_args.kwargs["timeout"], 21)
+
+    def test_curl_image_fetch_uses_socks_proxy_without_doh(self) -> None:
+        def run(command, **_kwargs):
+            output_path = command[command.index("-o") + 1]
+            with open(output_path, "wb") as handle:
+                handle.write(b"complete-image")
+            return subprocess.CompletedProcess(command, 0, stdout="image/jpeg", stderr="")
+
+        with patch("trakt_tracker.infrastructure.artwork_cache.subprocess.run", side_effect=run) as execute:
+            result = _fetch_image_with_curl(
+                "https://image.tmdb.org/t/p/w780/example.jpg",
+                8,
+                proxy_url="socks5h://127.0.0.1:10808",
+            )
+
+        self.assertEqual(result, (b"complete-image", "image/jpeg"))
+        command = execute.call_args.args[0]
+        self.assertEqual(command[command.index("--proxy") + 1], "socks5h://127.0.0.1:10808")
+        self.assertNotIn("--doh-url", command)
 
     def test_fragmented_tls_image_fetch_returns_payload_and_content_type(self) -> None:
         response_headers = Message()

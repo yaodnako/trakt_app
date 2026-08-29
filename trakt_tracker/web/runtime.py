@@ -227,6 +227,9 @@ class PortalRuntime:
                 mark_setup_complete(database, "Existing profile migrated and ready.")
             services = build_services(self.config_store, database)
             def wake_outbox(active_services=services) -> None:
+                if getattr(active_services.auth.config, "catalog_provider_mode", "trakt") != "trakt":
+                    return
+
                 def drain_due() -> None:
                     for _attempt in range(5):
                         result = active_services.trakt_sync.drain(limit=20)

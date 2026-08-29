@@ -96,7 +96,13 @@ def has_cached_image(cache: BinaryCache, url: str) -> bool:
     return cache.get_any_bytes(url) is not None
 
 
-def fetch_and_cache_image(cache: BinaryCache, target_url: str, timeout: float) -> tuple[bytes, str] | None:
+def fetch_and_cache_image(
+    cache: BinaryCache,
+    target_url: str,
+    timeout: float,
+    *,
+    proxy_url: str = "",
+) -> tuple[bytes, str] | None:
     if not is_trusted_image_url(target_url):
         return None
     with _image_fetch_lock:
@@ -112,7 +118,15 @@ def fetch_and_cache_image(cache: BinaryCache, target_url: str, timeout: float) -
         return flight.result
     try:
         with _image_fetch_limit:
-            flight.result = _fetch_and_cache_image_uncached(cache, target_url, timeout)
+            if proxy_url:
+                flight.result = _fetch_and_cache_image_uncached(
+                    cache,
+                    target_url,
+                    timeout,
+                    proxy_url=proxy_url,
+                )
+            else:
+                flight.result = _fetch_and_cache_image_uncached(cache, target_url, timeout)
         return flight.result
     except Exception as exc:
         flight.error = exc
@@ -124,7 +138,13 @@ def fetch_and_cache_image(cache: BinaryCache, target_url: str, timeout: float) -
             flight.event.set()
 
 
-def _fetch_and_cache_image_uncached(cache: BinaryCache, target_url: str, timeout: float) -> tuple[bytes, str] | None:
+def _fetch_and_cache_image_uncached(
+    cache: BinaryCache,
+    target_url: str,
+    timeout: float,
+    *,
+    proxy_url: str = "",
+) -> tuple[bytes, str] | None:
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
@@ -132,13 +152,14 @@ def _fetch_and_cache_image_uncached(cache: BinaryCache, target_url: str, timeout
     candidates = _candidate_image_urls(target_url)
     if _is_tmdb_image_url(target_url):
         for fetch_url in candidates:
-            fetched_by_fragmented_tls = _fetch_image_with_fragmented_tls(fetch_url, timeout, headers)
-            if fetched_by_fragmented_tls is not None:
-                fetched, content_type = fetched_by_fragmented_tls
-                if _valid_image_payload(fetched, content_type):
-                    cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(fetch_url, content_type))
-                    return fetched, content_type
-            fetched_by_curl = _fetch_image_with_curl(fetch_url, timeout)
+            if not proxy_url:
+                fetched_by_fragmented_tls = _fetch_image_with_fragmented_tls(fetch_url, timeout, headers)
+                if fetched_by_fragmented_tls is not None:
+                    fetched, content_type = fetched_by_fragmented_tls
+                    if _valid_image_payload(fetched, content_type):
+                        cache.set_bytes(target_url, fetched, suffix=image_cache_suffix(fetch_url, content_type))
+                        return fetched, content_type
+            fetched_by_curl = _fetch_image_with_curl(fetch_url, timeout, proxy_url=proxy_url)
             if fetched_by_curl is not None:
                 fetched, content_type = fetched_by_curl
                 if _valid_image_payload(fetched, content_type):
@@ -257,7 +278,12 @@ def _is_tmdb_image_url(target_url: str) -> bool:
     return bool(re.match(r"^https://image\.tmdb\.org/t/p/", target_url))
 
 
-def _fetch_image_with_curl(target_url: str, timeout: float) -> tuple[bytes, str] | None:
+def _fetch_image_with_curl(
+    target_url: str,
+    timeout: float,
+    *,
+    proxy_url: str = "",
+) -> tuple[bytes, str] | None:
     fd, output_path = tempfile.mkstemp(suffix=".img")
     os.close(fd)
     try:
@@ -269,37 +295,40 @@ def _fetch_image_with_curl(target_url: str, timeout: float) -> tuple[bytes, str]
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             creationflags = subprocess.CREATE_NO_WINDOW
+        command = [
+            "curl.exe",
+            "--silent",
+            "--show-error",
+            "--ipv4",
+            "--connect-timeout",
+            "3",
+            "--max-filesize",
+            str(MAX_IMAGE_BYTES),
+            "--max-time",
+            str(attempt_timeout),
+            "--retry",
+            "2",
+            "--retry-all-errors",
+            "--retry-delay",
+            "0",
+            "--retry-max-time",
+            str(retry_timeout),
+            "--continue-at",
+            "-",
+            "-A",
+            "Mozilla/5.0",
+            "-o",
+            output_path,
+            "-w",
+            "%{content_type}",
+            target_url,
+        ]
+        if proxy_url:
+            command[4:4] = ["--proxy", proxy_url]
+        else:
+            command[4:4] = ["--doh-url", "https://cloudflare-dns.com/dns-query"]
         completed = subprocess.run(
-            [
-                "curl.exe",
-                "--silent",
-                "--show-error",
-                "--ipv4",
-                "--doh-url",
-                "https://cloudflare-dns.com/dns-query",
-                "--connect-timeout",
-                "3",
-                "--max-filesize",
-                str(MAX_IMAGE_BYTES),
-                "--max-time",
-                str(attempt_timeout),
-                "--retry",
-                "2",
-                "--retry-all-errors",
-                "--retry-delay",
-                "0",
-                "--retry-max-time",
-                str(retry_timeout),
-                "--continue-at",
-                "-",
-                "-A",
-                "Mozilla/5.0",
-                "-o",
-                output_path,
-                "-w",
-                "%{content_type}",
-                target_url,
-            ],
+            command,
             capture_output=True,
             text=True,
             timeout=retry_timeout + 5,
@@ -322,7 +351,13 @@ def _fetch_image_with_curl(target_url: str, timeout: float) -> tuple[bytes, str]
             pass
 
 
-def warm_image_cache_in_background(cache: BinaryCache, target_url: str, *, timeout: float) -> None:
+def warm_image_cache_in_background(
+    cache: BinaryCache,
+    target_url: str,
+    *,
+    timeout: float,
+    proxy_url: str = "",
+) -> None:
     target_url = target_url.strip()
     if not is_trusted_image_url(target_url):
         return
@@ -333,7 +368,10 @@ def warm_image_cache_in_background(cache: BinaryCache, target_url: str, *, timeo
 
     def runner() -> None:
         try:
-            fetch_and_cache_image(cache, target_url, timeout)
+            if proxy_url:
+                fetch_and_cache_image(cache, target_url, timeout, proxy_url=proxy_url)
+            else:
+                fetch_and_cache_image(cache, target_url, timeout)
         except Exception:
             pass
         finally:
@@ -350,6 +388,7 @@ def warm_image_urls(
     timeout: float = 8,
     max_workers: int = 4,
     skip_cached: bool = True,
+    proxy_url: str = "",
 ) -> WarmImageResult:
     unique_urls = [str(url or "").strip() for url in dict.fromkeys(urls) if str(url or "").strip()]
     if skip_cached:
@@ -366,10 +405,19 @@ def warm_image_urls(
         return result
     workers = max(1, int(max_workers or 1))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(fetch_and_cache_image, cache, url, timeout): url
-            for url in unique_urls
-        }
+        futures = {}
+        for url in unique_urls:
+            if proxy_url:
+                future = executor.submit(
+                    fetch_and_cache_image,
+                    cache,
+                    url,
+                    timeout,
+                    proxy_url=proxy_url,
+                )
+            else:
+                future = executor.submit(fetch_and_cache_image, cache, url, timeout)
+            futures[future] = url
         for future in as_completed(futures):
             try:
                 if future.result() is not None:

@@ -26,6 +26,7 @@ from trakt_tracker.domain import (
     ProgressSortMode,
     ProgressView,
     TitleSummary,
+    synthetic_episode_id,
 )
 from trakt_tracker.infrastructure.imdb_dataset import IMDbDatasetClient
 from trakt_tracker.infrastructure.tmdb import TMDbClient
@@ -49,6 +50,7 @@ class ProgressSyncWorkflow:
         catalog=None,
         notification_repo=None,
         trakt_outbox=None,
+        episode_schedule_overlay: Callable[[int, list[dict]], list[dict]] | None = None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -66,6 +68,7 @@ class ProgressSyncWorkflow:
         self._catalog = catalog
         self._notification_repo = notification_repo
         self._trakt_outbox = trakt_outbox
+        self._episode_schedule_overlay = episode_schedule_overlay
 
     def refresh_show_progress(
         self,
@@ -168,6 +171,7 @@ class ProgressSyncWorkflow:
         dropped_only: bool | None = None,
         limit: int | None = 50,
     ) -> list[ProgressSnapshot]:
+        repair_missing_next = self._history is not None
         with self._db.session() as session:
             items = self._progress_repo.list_in_progress(
                 session,
@@ -175,10 +179,18 @@ class ProgressSyncWorkflow:
                 sort_mode=sort_mode,
                 descending=descending,
                 dropped_only=dropped_only,
-                limit=limit,
+                limit=None if repair_missing_next else limit,
+                include_missing_next=repair_missing_next,
             )
             if self._history is not None and items:
                 for item in items:
+                    missing_next = item.next_episode is None
+                    if missing_next and not self._history.watched_episode_keys(
+                        session,
+                        int(item.trakt_id),
+                        source="local",
+                    ):
+                        continue
                     self._overlay_local_watches(
                         session,
                         item,
@@ -187,6 +199,16 @@ class ProgressSyncWorkflow:
                             int(item.trakt_id),
                         ),
                     )
+                    if missing_next and item.next_episode is not None:
+                        self._progress_repo.upsert_progress(session, item)
+                items = [item for item in items if item.next_episode is not None]
+                items = self._sort_dashboard_items(
+                    items,
+                    sort_mode=sort_mode,
+                    descending=descending,
+                )
+                if limit is not None:
+                    items = items[: max(0, int(limit))]
             title_episode_averages = (
                 self._history.watched_episode_average_ratings(
                     session,
@@ -198,6 +220,39 @@ class ProgressSyncWorkflow:
         for item in items:
             item.title_episode_avg_rating = title_episode_averages.get(int(item.trakt_id))
         return items
+
+    @staticmethod
+    def _sort_dashboard_items(
+        items: list[ProgressSnapshot],
+        *,
+        sort_mode: ProgressSortMode | str,
+        descending: bool,
+    ) -> list[ProgressSnapshot]:
+        try:
+            normalized = ProgressSortMode(str(getattr(sort_mode, "value", sort_mode)))
+        except ValueError:
+            normalized = ProgressSortMode.EPISODE_RELEASE
+        if normalized is ProgressSortMode.LAST_WATCHED:
+            def value(item):
+                return item.last_watched_at
+        elif normalized is ProgressSortMode.RELEASE_YEAR:
+            def value(item):
+                return item.title_year
+        else:
+            def value(item):
+                return item.next_episode.first_aired if item.next_episode else None
+
+        def comparable(raw):
+            if isinstance(raw, datetime):
+                known = raw.replace(tzinfo=UTC) if raw.tzinfo is None else raw.astimezone(UTC)
+                return known.timestamp()
+            return raw
+
+        known_items = [item for item in items if value(item) is not None]
+        unknown_items = [item for item in items if value(item) is None]
+        known_items.sort(key=lambda item: comparable(value(item)), reverse=bool(descending))
+        unknown_items.sort(key=lambda item: (item.title.casefold(), int(item.trakt_id)))
+        return [*known_items, *unknown_items]
 
     def _overlay_local_watches(
         self,
@@ -218,15 +273,35 @@ class ProgressSyncWorkflow:
         if not rows:
             return
         now = datetime.now(tz=UTC)
-        known_aired = 0
+        original_air_dates = {
+            (int(row["season"]), int(row["number"])): row.get("first_aired")
+            for row in rows
+        }
+        if self._episode_schedule_overlay is not None:
+            rows = self._episode_schedule_overlay(int(progress.trakt_id), rows)
+        known_aired = sum(
+            1
+            for row in rows
+            if self._has_aired(row.get("first_aired"), now)
+        )
+        schedule_adjustment = 0
         for row in rows:
-            first_aired = row.get("first_aired")
-            if first_aired is None:
+            key = (int(row["season"]), int(row["number"]))
+            previous = original_air_dates.get(key)
+            current = row.get("first_aired")
+            if previous is None or current is None:
                 continue
-            aired_at = first_aired.replace(tzinfo=UTC) if first_aired.tzinfo is None else first_aired.astimezone(UTC)
-            if aired_at <= now:
-                known_aired += 1
-        aired = min(len(rows), max(int(progress.aired or 0), known_aired))
+            schedule_adjustment += int(self._has_aired(current, now)) - int(
+                self._has_aired(previous, now)
+            )
+        aired = min(
+            len(rows),
+            max(
+                0,
+                int(progress.aired or 0) + schedule_adjustment,
+                known_aired,
+            ),
+        )
         completed = sum(
             1
             for row in rows[:aired]
@@ -259,10 +334,23 @@ class ProgressSyncWorkflow:
         progress.next_episode = self._episode_summary_from_row(next_row) if next_row is not None else None
 
     @staticmethod
+    def _has_aired(first_aired: datetime | None, now: datetime) -> bool:
+        if first_aired is None:
+            return False
+        aired_at = (
+            first_aired.replace(tzinfo=UTC)
+            if first_aired.tzinfo is None
+            else first_aired.astimezone(UTC)
+        )
+        return aired_at <= now
+
+    @staticmethod
     def _episode_summary_from_row(row: dict) -> EpisodeSummary | None:
-        trakt_id = int(row.get("episode_trakt_id") or 0)
-        if trakt_id <= 0:
-            return None
+        trakt_id = int(row.get("episode_trakt_id") or 0) or synthetic_episode_id(
+            int(row.get("show_trakt_id") or 0),
+            int(row["season"]),
+            int(row["number"]),
+        )
         imdb_rating = row.get("imdb_rating")
         imdb_votes = row.get("imdb_votes")
         imdb_id = str(row.get("imdb_id") or "")

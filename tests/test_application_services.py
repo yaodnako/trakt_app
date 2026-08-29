@@ -32,10 +32,10 @@ import trakt_tracker.application.services as services_module
 from trakt_tracker.application.services import NotificationService, SyncService, build_services
 from trakt_tracker.application.trakt_outbox import TraktOutboxService
 from trakt_tracker.config import AppConfig, ConfigStore
-from trakt_tracker.domain import EpisodeSummary, ExploreResultPage, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
+from trakt_tracker.domain import EpisodeSummary, ExploreResultPage, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary, synthetic_episode_id
 from trakt_tracker.infrastructure.trakt.client import TraktClient
 from trakt_tracker.persistence.database import Database
-from trakt_tracker.persistence.repositories import EpisodeRepository, HistoryRepository, ProgressRepository, SyncStateRepository, TitleRepository, UserStateRepository
+from trakt_tracker.persistence.repositories import EpisodeRepository, HistoryRepository, NotificationRepository, ProgressRepository, SyncStateRepository, TitleRepository, UserStateRepository
 from trakt_tracker.persistence.trakt_outbox import TraktOutboxRepository
 
 
@@ -78,6 +78,85 @@ class NotificationActivityTests(unittest.TestCase):
         service._release_tracking = SimpleNamespace(has_due_unacknowledged_release=lambda: False)
         self.assertEqual(service.refresh_pending_sources(), ["progress"])
         self.assertEqual(service.pending_sources(), ["progress"])
+
+    def test_release_pending_source_uses_only_active_catalog_provider(self) -> None:
+        auth = SimpleNamespace(config=SimpleNamespace(catalog_provider_mode="tmdb_preview"))
+        legacy_release = SimpleNamespace(has_due_unacknowledged_release=lambda: True)
+        tmdb_release = SimpleNamespace(has_due_unacknowledged_release=lambda: False)
+        service = NotificationService(
+            SimpleNamespace(),
+            auth,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            release_tracking=legacy_release,
+            tmdb_catalog=tmdb_release,
+        )
+        service._workflow = SimpleNamespace(has_due_unseen_current_episode=lambda: False)
+
+        self.assertEqual(service.refresh_pending_sources(), [])
+        auth.config.catalog_provider_mode = "trakt"
+        self.assertEqual(service.refresh_pending_sources(), ["release"])
+
+    def test_tmdb_notifications_use_local_episode_ids_and_can_be_seen(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            db = Database(Path(tempdir) / "notifications.sqlite3")
+            db.create_schema()
+            self.addCleanup(db.close)
+            config = SimpleNamespace(
+                catalog_provider_mode="tmdb_preview",
+                notifications_enabled=True,
+                notification_repeat_minutes=5,
+                notification_release_delay_minutes=0,
+            )
+            episode = EpisodeSummary(
+                trakt_id=synthetic_episode_id(43125, 1, 2),
+                season=1,
+                number=2,
+                title="Survival of the Fittest",
+                first_aired=datetime.now(tz=UTC) - timedelta(hours=2),
+            )
+            item = ProgressSnapshot(
+                trakt_id=0,
+                tmdb_id=43125,
+                provider="tmdb",
+                title="Guilty Crown",
+                completed=1,
+                aired=2,
+                percent_completed=50.0,
+                next_episode=episode,
+            )
+            tmdb_catalog = SimpleNamespace(
+                local_progress_items=lambda **kwargs: [item] if kwargs.get("view") == "active" else [],
+                poll_releases=lambda **_kwargs: [],
+                has_due_unacknowledged_release=lambda: False,
+            )
+            service = NotificationService(
+                db,
+                SimpleNamespace(config=config),
+                SimpleNamespace(load=lambda: config),
+                NotificationRepository(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(send=lambda _message: None),
+                tmdb_catalog=tmdb_catalog,
+            )
+
+            sent = service.poll_upcoming(send_native=False, refresh_remote=False)
+
+            self.assertEqual(sent[0]["source"], "progress")
+            self.assertEqual(service.unseen_episode_ids(), {episode.trakt_id})
+            self.assertIn("progress", service.refresh_pending_sources())
+            service.mark_episode_seen(
+                show_trakt_id=-43125,
+                show_title=item.title,
+                episode=episode,
+            )
+            self.assertEqual(service.unseen_episode_ids(), set())
+            self.assertNotIn("progress", service.refresh_pending_sources())
+            db.close()
 
 
 class _FakeAuthService:
@@ -261,6 +340,26 @@ class _FakeImdbClient:
     def lookup_episode_metadata(self, imdb_id: str) -> dict | None:
         self.episode_metadata_calls.append(imdb_id)
         return self.episode_metadata.get(imdb_id)
+
+    def list_show_episode_metadata(self, show_imdb_id: str) -> list[dict]:
+        result: list[dict] = []
+        for (parent_imdb_id, season, episode), imdb_id in sorted(self.episode_ids.items()):
+            if parent_imdb_id != show_imdb_id:
+                continue
+            metadata = self.episode_metadata.get(imdb_id, {})
+            result.append(
+                {
+                    "season": season,
+                    "number": episode,
+                    "imdb_season": season,
+                    "imdb_episode": episode,
+                    "imdb_id": imdb_id,
+                    "title": str(metadata.get("title") or ""),
+                    "imdb_rating": metadata.get("imdb_rating"),
+                    "imdb_votes": metadata.get("imdb_votes"),
+                }
+            )
+        return result
 
 
 class _FakeHistoryService:
@@ -1242,6 +1341,255 @@ class ApplicationServiceTests(unittest.TestCase):
             (503, 1, 3),
         )
 
+    def test_progress_dashboard_repairs_missing_next_from_tmdb_episode_rows(self) -> None:
+        progress_repo = ProgressRepository()
+        now = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            self.episode_repo.replace_show_episodes(
+                session,
+                157599,
+                [
+                    EpisodeSummary(trakt_id=0, season=1, number=1, title="Pilot", first_aired=now - timedelta(days=2)),
+                    EpisodeSummary(trakt_id=0, season=1, number=2, title="Episode 2", first_aired=now + timedelta(days=5)),
+                ],
+            )
+            progress_repo.upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=157599,
+                    title="Lanterns",
+                    completed=1,
+                    aired=1,
+                    percent_completed=100.0,
+                    next_episode=None,
+                ),
+            )
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=None,
+                title_trakt_id=157599,
+                title="Lanterns",
+                title_type="show",
+                action="watched",
+                watched_at=now,
+                season=1,
+                episode=1,
+                source="local",
+            )
+        workflow = ProgressSyncWorkflow(
+            self.db,
+            self.auth,
+            progress_repo,
+            self.episode_repo,
+            self.titles,
+            self.user_states,
+            self.sync_state,
+            lambda _config: _FakeTmdbClient(),
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+            history_repo=self.history_repo,
+        )
+
+        progress = workflow.dashboard_progress()
+
+        self.assertEqual(len(progress), 1)
+        self.assertIsNotNone(progress[0].next_episode)
+        self.assertLess(progress[0].next_episode.trakt_id, 0)
+        self.assertEqual((progress[0].next_episode.season, progress[0].next_episode.number), (1, 2))
+        with self.db.session() as session:
+            repaired = progress_repo.list_in_progress(session)
+        self.assertEqual((repaired[0].next_episode.season, repaired[0].next_episode.number), (1, 2))
+
+    def test_progress_dashboard_does_not_revive_remote_completed_row_from_partial_history(self) -> None:
+        progress_repo = ProgressRepository()
+        now = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            self.episode_repo.replace_show_episodes(
+                session,
+                42,
+                [
+                    EpisodeSummary(trakt_id=0, season=1, number=1, title="One", first_aired=now - timedelta(days=2)),
+                    EpisodeSummary(trakt_id=0, season=1, number=2, title="Two", first_aired=now - timedelta(days=1)),
+                ],
+            )
+            progress_repo.upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=42,
+                    title="Completed remotely",
+                    completed=2,
+                    aired=2,
+                    percent_completed=100.0,
+                    next_episode=None,
+                ),
+            )
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=1,
+                title_trakt_id=42,
+                title="Completed remotely",
+                title_type="show",
+                action="watched",
+                watched_at=now,
+                season=1,
+                episode=1,
+                source="trakt",
+            )
+        workflow = ProgressSyncWorkflow(
+            self.db,
+            self.auth,
+            progress_repo,
+            self.episode_repo,
+            self.titles,
+            self.user_states,
+            self.sync_state,
+            lambda _config: _FakeTmdbClient(),
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+            history_repo=self.history_repo,
+        )
+
+        self.assertEqual(workflow.dashboard_progress(), [])
+        with self.db.session() as session:
+            stored = progress_repo.list_in_progress(session, include_missing_next=True)
+        self.assertEqual(len(stored), 1)
+        self.assertIsNone(stored[0].next_episode)
+
+    def test_progress_dashboard_counts_aired_from_tmdb_corrected_schedule(self) -> None:
+        progress_repo = ProgressRepository()
+        now = datetime.now(tz=UTC)
+        with self.db.session() as session:
+            self.episode_repo.replace_show_episodes(
+                session,
+                5,
+                [
+                    EpisodeSummary(
+                        trakt_id=501,
+                        season=1,
+                        number=1,
+                        title="One",
+                        first_aired=now - timedelta(days=15),
+                    ),
+                    EpisodeSummary(
+                        trakt_id=502,
+                        season=1,
+                        number=2,
+                        title="Two",
+                        first_aired=now - timedelta(days=7),
+                    ),
+                    EpisodeSummary(
+                        trakt_id=503,
+                        season=1,
+                        number=3,
+                        title="Three",
+                        first_aired=now - timedelta(days=1),
+                    ),
+                ],
+            )
+            progress_repo.upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=5,
+                    title="Example",
+                    completed=1,
+                    aired=3,
+                    percent_completed=33.3,
+                    next_episode=EpisodeSummary(
+                        trakt_id=502,
+                        season=1,
+                        number=2,
+                        title="Two",
+                    ),
+                ),
+            )
+            self.history_repo.add_event(
+                session,
+                trakt_history_id=None,
+                title_trakt_id=5,
+                title="Example",
+                title_type="show",
+                action="watched",
+                watched_at=now,
+                season=1,
+                episode=1,
+            )
+
+        def overlay_episode_row_air_dates(trakt_id: int, rows: list[dict]) -> list[dict]:
+            self.assertEqual(trakt_id, 5)
+            rows[-1]["first_aired"] = now + timedelta(days=6)
+            return rows
+
+        tmdb_catalog = SimpleNamespace(
+            episode_schedule_enabled=lambda: True,
+            overlay_episode_air_dates=lambda items: items,
+            overlay_episode_row_air_dates=overlay_episode_row_air_dates,
+        )
+        service = services_module.ProgressService(
+            self.db,
+            self.auth,
+            self.history_repo,
+            progress_repo,
+            self.episode_repo,
+            self.titles,
+            self.user_states,
+            self.sync_state,
+            lambda _config: _FakeTmdbClient(),
+            self.imdb,
+            OperationLog(),
+            self.episode_metadata,
+            tmdb_catalog=tmdb_catalog,
+        )
+
+        progress = service.dashboard_progress(limit=None)[0]
+
+        self.assertEqual(progress.aired, 2)
+        self.assertEqual(progress.completed, 1)
+        self.assertEqual(progress.aired - progress.completed, 1)
+        self.assertIsNotNone(progress.next_episode)
+        self.assertEqual(progress.next_episode.number, 2)
+
+    def test_progress_dashboard_sorts_mixed_timezone_episode_dates(self) -> None:
+        naive = ProgressSnapshot(
+            trakt_id=1,
+            title="Naive",
+            completed=1,
+            aired=2,
+            percent_completed=50.0,
+            next_episode=EpisodeSummary(
+                trakt_id=101,
+                season=1,
+                number=2,
+                title="Two",
+                first_aired=datetime(2026, 8, 7),
+            ),
+        )
+        aware = ProgressSnapshot(
+            trakt_id=2,
+            title="Aware",
+            completed=1,
+            aired=2,
+            percent_completed=50.0,
+            next_episode=EpisodeSummary(
+                trakt_id=201,
+                season=1,
+                number=2,
+                title="Two",
+                first_aired=datetime(2026, 8, 8, tzinfo=UTC),
+            ),
+        )
+        service = object.__new__(services_module.ProgressService)
+        service._workflow = SimpleNamespace(dashboard_progress=lambda **_kwargs: [naive, aware])
+        service._tmdb_catalog = SimpleNamespace(
+            episode_schedule_enabled=lambda: True,
+            overlay_episode_air_dates=lambda items: items,
+        )
+
+        result = service.dashboard_progress(limit=None)
+
+        self.assertEqual([item.trakt_id for item in result], [2, 1])
+
     def test_history_service_add_and_rate_movie_updates_display_rating(self) -> None:
         service = HistoryService(
             self.db,
@@ -1317,6 +1665,76 @@ class ApplicationServiceTests(unittest.TestCase):
         status = trakt_outbox.status()
         self.assertEqual(status["pending"], 1)
         self.assertEqual(status["items"][0]["operation_type"], "history")
+
+    def test_local_progress_keeps_tmdb_episode_without_trakt_episode_id(self) -> None:
+        progress_repo = ProgressRepository()
+        trakt_outbox = TraktOutboxService(
+            self.db,
+            self.auth,
+            self.trakt_outbox_repo,
+            self.episode_repo,
+            self.sync_state,
+        )
+        service = HistoryService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.user_states,
+            self.history_repo,
+            self.episode_repo,
+            self.history_read_model,
+            self.episode_metadata,
+            trakt_outbox,
+            progress_repo,
+        )
+        with self.db.session() as session:
+            self.titles.upsert_title(
+                session,
+                TitleSummary(
+                    trakt_id=157599,
+                    title_type="show",
+                    title="Lanterns",
+                    tmdb_id=95350,
+                ),
+            )
+            self.episode_repo.replace_show_episodes(
+                session,
+                157599,
+                [
+                    EpisodeSummary(
+                        trakt_id=0,
+                        season=1,
+                        number=1,
+                        title="Pilot",
+                        first_aired=datetime(2026, 8, 16, tzinfo=UTC),
+                    ),
+                    EpisodeSummary(
+                        trakt_id=0,
+                        season=1,
+                        number=2,
+                        title="Episode 2",
+                        first_aired=datetime(2026, 8, 23, tzinfo=UTC),
+                    ),
+                ],
+            )
+
+        service.add_history_item(
+            HistoryItemInput(
+                title_type="show",
+                trakt_id=157599,
+                watched_at=datetime(2026, 8, 18, 15, 50, tzinfo=UTC),
+                season=1,
+                episode=1,
+                title="Lanterns",
+            )
+        )
+
+        with self.db.session() as session:
+            progress = progress_repo.list_in_progress(session)
+        self.assertEqual(len(progress), 1)
+        self.assertIsNotNone(progress[0].next_episode)
+        self.assertLess(progress[0].next_episode.trakt_id, 0)
+        self.assertEqual((progress[0].next_episode.season, progress[0].next_episode.number), (1, 2))
 
     def test_history_service_allows_undated_watch_and_sorts_it_last(self) -> None:
         service = HistoryService(
@@ -1416,6 +1834,8 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(self.trakt_client.history_items, [])
         rows = history_service.history(title_type="show")
         self.assertEqual([(row["season"], row["episode"], row["watched_at_known"]) for row in rows], [(1, 1, False)])
+        self.assertIn("episode_tmdb_rating", rows[0])
+        self.assertIn("episode_tmdb_votes", rows[0])
 
     def test_search_watch_panel_does_not_synchronously_enrich_episode_stills(self) -> None:
         class _BlockingEpisodeMetadata:
@@ -2971,6 +3391,50 @@ class ApplicationServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_notification_poll_refreshes_tmdb_schedule_without_trakt_authorization(self) -> None:
+        calls: list[tuple[str, object]] = []
+        snapshots = [SimpleNamespace(trakt_id=1)]
+        auth = SimpleNamespace(
+            config=SimpleNamespace(catalog_provider_mode="tmdb_preview"),
+            is_authorized=lambda: False,
+        )
+        progress = SimpleNamespace(
+            sync_progress=lambda **kwargs: calls.append(("trakt_progress", kwargs)),
+            dashboard_progress=lambda **kwargs: calls.append(("local_progress", kwargs)) or snapshots,
+        )
+        tmdb_catalog = SimpleNamespace(
+            overlay_episode_air_dates=lambda items: items,
+            refresh_episode_air_dates=lambda items: calls.append(("tmdb_schedule", items)),
+            poll_releases=lambda **kwargs: calls.append(("tmdb_releases", kwargs)) or [],
+        )
+        service = NotificationService(
+            SimpleNamespace(),
+            auth,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            progress_service=progress,
+            tmdb_catalog=tmdb_catalog,
+        )
+        service._workflow = SimpleNamespace(
+            poll_upcoming=lambda **kwargs: calls.append(("notifications", kwargs)) or []
+        )
+        service._release_tracking = None
+        service.refresh_pending_sources = lambda: []
+
+        service.poll_upcoming(send_native=False, refresh_remote=True)
+
+        self.assertEqual(
+            calls,
+            [
+                ("local_progress", {"limit": None}),
+                ("tmdb_schedule", snapshots),
+                ("tmdb_releases", {"send_native": False, "refresh_remote": True}),
+            ],
+        )
+
     def test_sync_trakt_data_runs_full_progress_before_notification_refresh(self) -> None:
         calls: list[tuple[str, dict]] = []
 
@@ -3010,6 +3474,26 @@ class ApplicationServiceTests(unittest.TestCase):
                 ("notifications", {}),
             ],
         )
+
+    def test_sync_service_never_starts_trakt_work_in_tmdb_mode(self) -> None:
+        calls: list[str] = []
+        service = object.__new__(SyncService)
+        service._auth = SimpleNamespace(config=SimpleNamespace(catalog_provider_mode="tmdb_preview"))
+        service._workflow = SimpleNamespace(
+            initial_import=lambda **_kwargs: calls.append("initial_import"),
+            refresh_history=lambda **_kwargs: calls.append("refresh_history"),
+            maybe_refresh_history=lambda: calls.append("maybe_refresh_history") or True,
+            sync_updates=lambda: calls.append("sync_updates"),
+        )
+        service._tmdb_catalog = None
+
+        service.initial_import()
+        service.refresh_history()
+        service.sync_trakt_data()
+        service.sync_updates()
+
+        self.assertFalse(service.maybe_refresh_history())
+        self.assertEqual(calls, [])
 
     def test_episode_metadata_reads_active_profile_trakt_cache(self) -> None:
         calls: list[str] = []
@@ -3646,6 +4130,10 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].title_episode_avg_rating, 7.0)
 
+    def test_rating_bucket_color_uses_one_decimal_display_value(self) -> None:
+        self.assertEqual(rating_bucket_color(7.956521739130435), "rgb(40, 180, 99)")
+        self.assertEqual(rating_bucket_color(7.94), "rgb(244, 208, 63)")
+
     def test_episode_ratings_matrix_builds_grid_and_season_avgs(self) -> None:
         self.trakt_client.get_show_episodes = lambda trakt_id: [
             EpisodeSummary(trakt_id=101, season=1, number=1, title="E1", imdb_rating=9.2, imdb_votes=1134),
@@ -3682,6 +4170,53 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(matrix.rows[0].cells[0].tooltip, "E1\nS01 E01\n1 134 votes")
         self.assertEqual([season.avg_display for season in matrix.seasons], ["9.2", "7.4", "8.3"])
         self.assertEqual([season.label for season in matrix.imdb_seasons], ["S1", "S2", "ALL"])
+
+    def test_episode_ratings_matrix_builds_imdb_only_grid_without_trakt_identity(self) -> None:
+        self.imdb.ready = True
+        self.imdb.episode_ids[("tt13111078", 1, 1)] = "tt21399090"
+        self.imdb.episode_ids[("tt13111078", 1, 2)] = "tt21975608"
+        self.imdb.episode_metadata["tt21399090"] = self._imdb_episode_metadata(
+            parent="tt13111078",
+            season=1,
+            episode=1,
+            title="Sacrificial Soldiers",
+            rating=7.7,
+            votes=4100,
+        )
+        self.imdb.episode_metadata["tt21975608"] = self._imdb_episode_metadata(
+            parent="tt13111078",
+            season=1,
+            episode=2,
+            title="The Beating",
+            rating=7.6,
+            votes=3600,
+        )
+        service = EpisodeRatingsMatrixService(
+            self.db,
+            self.auth,
+            self.titles,
+            self.history_repo,
+            self.episode_repo,
+            self.imdb,
+        )
+
+        matrix = service.load_imdb_show_matrix(
+            title="Lioness",
+            imdb_id="tt13111078",
+            title_tmdb_rating=8.0,
+            title_tmdb_votes=1300,
+            title_imdb_rating=7.8,
+            title_imdb_votes=91000,
+            title_ratings_status="ready",
+        )
+
+        self.assertEqual(matrix.trakt_id, 0)
+        self.assertEqual(matrix.title, "Lioness")
+        self.assertEqual(matrix.title_primary_provider, "tmdb")
+        self.assertEqual(matrix.title_primary_rating, 8.0)
+        self.assertEqual([row.label for row in matrix.rows], ["E1", "E2"])
+        self.assertEqual(matrix.rows[0].cells[0].display_value, "7.7")
+        self.assertEqual(matrix.rows[1].cells[0].imdb_url, "https://www.imdb.com/title/tt21975608")
 
     def test_episode_ratings_matrix_builds_separate_imdb_season_layout(self) -> None:
         service = EpisodeRatingsMatrixService(self.db, self.auth, self.titles, self.history_repo, self.episode_repo, self.imdb)

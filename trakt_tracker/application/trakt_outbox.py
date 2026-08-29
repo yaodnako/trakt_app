@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
+from trakt_tracker.config import normalize_catalog_provider_mode
 from trakt_tracker.domain import HistoryItemInput, RatingInput
 from trakt_tracker.infrastructure.trakt.client import (
     TraktError,
@@ -64,8 +65,13 @@ class TraktOutboxService:
         self._delivery_callback = callback
 
     def wake(self) -> None:
-        if self._wake_callback is not None:
+        if self._trakt_mode_enabled() and self._wake_callback is not None:
             self._wake_callback()
+
+    def _trakt_mode_enabled(self) -> bool:
+        return normalize_catalog_provider_mode(
+            getattr(self._auth.config, "catalog_provider_mode", "trakt")
+        ) == "trakt"
 
     @staticmethod
     def history_key(
@@ -116,6 +122,8 @@ class TraktOutboxService:
         origin: str = "user",
         metadata: dict[str, Any] | None = None,
     ) -> str | None:
+        if not self._trakt_mode_enabled():
+            return None
         if desired_watched and watched_at is None:
             return None
         key = self.history_key(
@@ -164,6 +172,8 @@ class TraktOutboxService:
         episode: int | None = None,
         episode_trakt_id: int | None = None,
     ) -> str | None:
+        if not self._trakt_mode_enabled():
+            return None
         key = self.rating_key(
             title_type=title_type,
             trakt_id=trakt_id,
@@ -202,6 +212,8 @@ class TraktOutboxService:
         origin: str = "user",
         metadata: dict[str, Any] | None = None,
     ) -> str | None:
+        if not self._trakt_mode_enabled():
+            return None
         key = self.membership_key(operation_type, title_type, trakt_id)
         row = self._repository.enqueue(
             session,
@@ -229,6 +241,8 @@ class TraktOutboxService:
         base_hidden: bool,
         desired_hidden: bool,
     ) -> str | None:
+        if not self._trakt_mode_enabled():
+            return None
         key = self.hidden_key(operation_type, trakt_id)
         row = self._repository.enqueue(
             session,
@@ -250,6 +264,8 @@ class TraktOutboxService:
         return None
 
     def drain(self, *, limit: int = 20) -> TraktSyncResult:
+        if not self._trakt_mode_enabled():
+            return self._result(processed=0, delivered=0)
         if not self._auth.is_authorized():
             self._record_error("Trakt authorization is unavailable; local changes remain queued.")
             return self._result(processed=0, delivered=0)
@@ -275,6 +291,8 @@ class TraktOutboxService:
         return self._result(processed=len(claimed), delivered=delivered)
 
     def retry(self) -> TraktSyncResult:
+        if not self._trakt_mode_enabled():
+            return self._result(processed=0, delivered=0)
         with self._db.session() as session:
             self._repository.retry_all(session)
         self.wake()

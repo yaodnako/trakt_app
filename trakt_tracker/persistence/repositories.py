@@ -21,6 +21,7 @@ from trakt_tracker.domain import (
     ProgressSortMode,
     ProgressView,
     TitleSummary,
+    synthetic_episode_id,
 )
 
 from .models import (
@@ -805,8 +806,14 @@ class HistoryRepository:
             stmt = stmt.limit(limit)
         return list(session.scalars(stmt))
 
-    def watched_episode_keys(self, session: Session, show_trakt_id: int) -> set[tuple[int, int]]:
-        rows = session.scalars(
+    def watched_episode_keys(
+        self,
+        session: Session,
+        show_trakt_id: int,
+        *,
+        source: str | None = None,
+    ) -> set[tuple[int, int]]:
+        statement = (
             select(HistoryEvent)
             .where(HistoryEvent.action == "watched")
             .where(HistoryEvent.title_type == "show")
@@ -814,6 +821,9 @@ class HistoryRepository:
             .where(HistoryEvent.season.is_not(None))
             .where(HistoryEvent.episode.is_not(None))
         )
+        if source is not None:
+            statement = statement.where(HistoryEvent.source == str(source))
+        rows = session.scalars(statement)
         return {
             (int(row.season), int(row.episode))
             for row in rows
@@ -1200,6 +1210,7 @@ class ProgressRepository:
         descending: bool = True,
         dropped_only: bool | None = None,
         limit: int | None = 50,
+        include_missing_next: bool = False,
     ) -> list[ProgressSnapshot]:
         normalized_view = self.normalize_view(view, dropped_only=dropped_only)
         normalized_sort = self.normalize_sort_mode(sort_mode)
@@ -1214,8 +1225,9 @@ class ProgressRepository:
                 & (EpisodeCache.number == WatchProgress.next_episode_number),
             )
             .where(WatchProgress.completed > 0)
-            .where(WatchProgress.next_episode_trakt_id.is_not(None))
         )
+        if not include_missing_next:
+            stmt = stmt.where(WatchProgress.next_episode_trakt_id.is_not(None))
         stmt = self._apply_view_filter(stmt, normalized_view)
         if normalized_sort is ProgressSortMode.LAST_WATCHED:
             sort_column = UserTitleState.last_watched_at
@@ -1245,7 +1257,7 @@ class ProgressRepository:
             ):
                 show_title = title.title
             next_episode = None
-            if row.next_episode_trakt_id:
+            if row.next_episode_trakt_id is not None:
                 next_episode = EpisodeSummary(
                     trakt_id=row.next_episode_trakt_id,
                     season=row.next_episode_season or 0,
@@ -1275,7 +1287,7 @@ class ProgressRepository:
                     first_aired=row.next_episode_first_aired,
                 )
             last_episode = None
-            if row.last_episode_trakt_id:
+            if row.last_episode_trakt_id is not None:
                 last_episode = EpisodeSummary(
                     trakt_id=row.last_episode_trakt_id,
                     season=row.last_episode_season or 0,
@@ -1299,6 +1311,9 @@ class ProgressRepository:
                     status=title.status if title is not None else "",
                     title_trakt_rating=(title.trakt_rating if title is not None else None),
                     title_trakt_votes=(title.trakt_votes if title is not None else None),
+                    tmdb_id=(title.tmdb_id if title is not None else None),
+                    title_tmdb_rating=(title.tmdb_rating if title is not None else None),
+                    title_tmdb_votes=(title.tmdb_votes if title is not None else None),
                     title_imdb_rating=(title.imdb_rating if title is not None else None),
                     title_imdb_votes=(title.imdb_votes if title is not None else None),
                     title_ratings_status=(title.ratings_status if title is not None else ENRICH_STATUS_UNKNOWN),
@@ -1472,7 +1487,14 @@ class EpisodeRepository:
                     show_trakt_id=title.trakt_id,
                     show_title=title.title,
                     episode=EpisodeSummary(
-                        trakt_id=episode.episode_trakt_id,
+                        trakt_id=(
+                            int(episode.episode_trakt_id or 0)
+                            or synthetic_episode_id(
+                                int(title.trakt_id),
+                                int(episode.season),
+                                int(episode.number),
+                            )
+                        ),
                         season=episode.season,
                         number=episode.number,
                         title=episode.title,
@@ -1640,6 +1662,7 @@ class EpisodeRepository:
         )
         return [
             {
+                "show_trakt_id": int(show_trakt_id),
                 "episode_trakt_id": row.episode_trakt_id,
                 "season": row.season,
                 "number": row.number,

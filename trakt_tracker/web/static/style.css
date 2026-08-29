@@ -197,6 +197,10 @@ body.is-notifying-release .nav a[data-notification-source="release"] .nav-badge:
     gap: 16px;
 }
 
+.banner + .content {
+    margin-top: 16px;
+}
+
 .panel,
 .banner {
     backdrop-filter: blur(14px);
@@ -641,7 +645,7 @@ select {
 }
 
 .progress-sort-field select[data-progress-sort-mode="episode_release"] {
-    width: 136px;
+    width: 152px;
 }
 
 .progress-sort-field select[data-progress-sort-mode="release_year"] {
@@ -2080,7 +2084,7 @@ tbody tr:hover {
     width: min(680px, calc(100vw - 34px));
     max-height: calc(100vh - 36px);
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
     gap: 8px;
     padding: 12px;
     border-radius: 18px;
@@ -2202,6 +2206,7 @@ tbody tr:hover {
 
 .title-matrix-overlay-body {
     min-height: 0;
+    max-height: min(620px, calc(100vh - 200px));
     overflow: auto;
     padding-right: 1px;
 }
@@ -4189,55 +4194,20 @@ tbody tr:hover {
     background: rgba(238, 250, 243, 0.98);
     box-shadow: none;
 }
-.release-tracking-card.is-notification-due {
-    border-color: #c6283d;
-    outline: 3px solid rgba(198, 40, 61, 0.72);
-    outline-offset: 3px;
-    background: rgba(255, 240, 243, 0.98);
-    box-shadow:
-        0 0 0 4px rgba(198, 40, 61, 0.22),
-        0 0 30px 10px rgba(198, 40, 61, 0.38);
-    animation: release-notification-alert 1.6s ease-in-out infinite;
-}
-.release-tracking-card.is-notification-due .search-watchlist-button {
-    border-color: #fff;
-    background: #c6283d;
-    box-shadow:
-        0 0 0 3px rgba(198, 40, 61, 0.3),
-        0 0 18px 6px rgba(198, 40, 61, 0.55);
+.release-tracking-card.is-notification-sent .release-bell-icon {
+    transform-origin: center;
+    filter: brightness(0) saturate(100%) invert(21%) sepia(87%) saturate(3244%) hue-rotate(337deg) brightness(89%) contrast(97%);
     animation: release-notification-bell 0.8s ease-in-out infinite alternate;
-}
-.release-tracking-card.is-notification-due .release-bell-icon {
-    filter: brightness(0) invert(1);
-}
-@keyframes release-notification-alert {
-    0%,
-    100% {
-        border-color: #c6283d;
-        outline-color: rgba(198, 40, 61, 0.62);
-        box-shadow:
-            0 0 0 4px rgba(198, 40, 61, 0.22),
-            0 0 30px 10px rgba(198, 40, 61, 0.38);
-    }
-    50% {
-        border-color: #ff334e;
-        outline-color: rgba(255, 51, 78, 0.92);
-        box-shadow:
-            0 0 0 7px rgba(255, 51, 78, 0.34),
-            0 0 48px 16px rgba(255, 51, 78, 0.56);
-    }
 }
 @keyframes release-notification-bell {
     from {
         transform: scale(1);
-        background: #c6283d;
+        opacity: 0.58;
     }
     to {
-        transform: scale(1.16);
-        background: #ff334e;
-        box-shadow:
-            0 0 0 5px rgba(255, 51, 78, 0.38),
-            0 0 24px 9px rgba(255, 51, 78, 0.68);
+        transform: scale(1.24);
+        opacity: 1;
+        filter: brightness(0) saturate(100%) invert(21%) sepia(87%) saturate(3244%) hue-rotate(337deg) brightness(106%) contrast(102%) drop-shadow(0 0 5px rgba(198, 40, 61, 0.8));
     }
 }
 .anticipated-release-chip {

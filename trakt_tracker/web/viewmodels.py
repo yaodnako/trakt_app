@@ -194,6 +194,9 @@ def progress_effective_aired(item) -> int:
     completed = int(getattr(item, "completed", 0) or 0)
     if progress_has_released_next_episode(item):
         return max(aired, completed + 1)
+    next_episode = getattr(item, "next_episode", None)
+    if next_episode is not None and getattr(next_episode, "first_aired", None) is not None:
+        return min(aired, completed)
     return aired
 
 
@@ -224,15 +227,20 @@ def progress_skipped_count(item) -> int:
     return max(progress_effective_aired(item) - int(getattr(item, "completed", 0) or 0), 0)
 
 
-def progress_rating_chip(item, rating_with_votes) -> str:
+def progress_rating_chip(item, rating_with_votes, primary_source: str | None = None) -> str:
     parts: list[str] = []
-    trakt_status = getattr(item, "title_ratings_status", "unknown")
-    if getattr(item, "title_trakt_rating", None) is not None and getattr(item, "title_trakt_votes", None) is not None:
-        trakt_text = rating_with_votes(getattr(item, "title_trakt_rating", None), getattr(item, "title_trakt_votes", None))
-    elif trakt_status == "checked_no_data":
-        trakt_text = "n/a"
+    primary_source = primary_source if primary_source in {"tmdb", "trakt"} else (
+        "tmdb" if getattr(item, "provider", "trakt") == "tmdb" else "trakt"
+    )
+    primary_rating = getattr(item, "title_tmdb_rating", None) if primary_source == "tmdb" else getattr(item, "title_trakt_rating", None)
+    primary_votes = getattr(item, "title_tmdb_votes", None) if primary_source == "tmdb" else getattr(item, "title_trakt_votes", None)
+    primary_status = getattr(item, "title_ratings_status", "unknown")
+    if primary_rating is not None and primary_votes is not None:
+        primary_text = rating_with_votes(primary_rating, primary_votes)
+    elif primary_status == "checked_no_data":
+        primary_text = "n/a"
     else:
-        trakt_text = "Loading"
+        primary_text = "Loading"
     imdb_status = getattr(item, "title_ratings_status", "unknown")
     if getattr(item, "title_imdb_rating", None) is not None and getattr(item, "title_imdb_votes", None) is not None:
         imdb_text = rating_with_votes(getattr(item, "title_imdb_rating", None), getattr(item, "title_imdb_votes", None))
@@ -240,23 +248,28 @@ def progress_rating_chip(item, rating_with_votes) -> str:
         imdb_text = "n/a"
     else:
         imdb_text = "Loading"
-    parts.append(f"trakt|{trakt_text}")
+    parts.append(f"{primary_source}|{primary_text}")
     parts.append(f"imdb|{imdb_text}")
     return " | ".join(parts)
 
 
-def progress_episode_rating_chip(item, rating_with_votes) -> str:
+def progress_episode_rating_chip(item, rating_with_votes, primary_source: str | None = None) -> str:
     next_episode = getattr(item, "next_episode", None)
     if next_episode is None:
         return ""
     parts: list[str] = []
-    trakt_status = getattr(next_episode, "trakt_details_status", "unknown")
-    if getattr(next_episode, "trakt_rating", None) is not None and getattr(next_episode, "trakt_votes", None) is not None:
-        trakt_text = rating_with_votes(getattr(next_episode, "trakt_rating", None), getattr(next_episode, "trakt_votes", None))
-    elif trakt_status == "checked_no_data":
-        trakt_text = "n/a"
+    primary_source = primary_source if primary_source in {"tmdb", "trakt"} else (
+        "tmdb" if getattr(item, "provider", "trakt") == "tmdb" else "trakt"
+    )
+    primary_rating = getattr(next_episode, "tmdb_rating", None) if primary_source == "tmdb" else getattr(next_episode, "trakt_rating", None)
+    primary_votes = getattr(next_episode, "tmdb_votes", None) if primary_source == "tmdb" else getattr(next_episode, "trakt_votes", None)
+    primary_status = getattr(next_episode, "trakt_details_status", "unknown")
+    if primary_rating is not None and primary_votes is not None:
+        primary_text = rating_with_votes(primary_rating, primary_votes)
+    elif primary_status == "checked_no_data":
+        primary_text = "n/a"
     else:
-        trakt_text = "Loading"
+        primary_text = "Loading"
     imdb_status = getattr(next_episode, "imdb_status", "unknown")
     if getattr(next_episode, "imdb_rating", None) is not None and getattr(next_episode, "imdb_votes", None) is not None:
         imdb_text = rating_with_votes(getattr(next_episode, "imdb_rating", None), getattr(next_episode, "imdb_votes", None))
@@ -264,7 +277,7 @@ def progress_episode_rating_chip(item, rating_with_votes) -> str:
         imdb_text = "n/a"
     else:
         imdb_text = "Loading"
-    parts.append(f"trakt|{trakt_text}")
+    parts.append(f"{primary_source}|{primary_text}")
     parts.append(f"imdb|{imdb_text}")
     return " | ".join(parts)
 
@@ -288,7 +301,9 @@ def progress_query_string(
     sort_mode: str = DEFAULT_PROGRESS_SORT_MODE,
     sort_direction: str = DEFAULT_PROGRESS_SORT_DIRECTION,
     flash: str = "",
+    rate_provider: str = "trakt",
     rate_trakt_id: int | None = None,
+    rate_tmdb_id: int | None = None,
     rate_season: int | None = None,
     rate_episode: int | None = None,
     rate_title: str = "",
@@ -302,8 +317,12 @@ def progress_query_string(
     }
     if flash:
         params["flash"] = flash
+    if rate_provider and rate_provider != "trakt":
+        params["rate_provider"] = rate_provider
     if rate_trakt_id is not None:
         params["rate_trakt_id"] = str(rate_trakt_id)
+    if rate_tmdb_id is not None:
+        params["rate_tmdb_id"] = str(rate_tmdb_id)
     if rate_season is not None:
         params["rate_season"] = str(rate_season)
     if rate_episode is not None:

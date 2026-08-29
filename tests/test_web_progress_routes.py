@@ -239,8 +239,8 @@ class ProgressRouteTests(unittest.TestCase):
         self.templates.env.filters["progress_effective_percent"] = progress_effective_percent
         self.templates.env.filters["progress_skipped_count"] = progress_skipped_count
         self.templates.env.filters["progress_recent_release"] = progress_recent_release
-        self.templates.env.filters["progress_rating_chip"] = lambda item: progress_rating_chip(item, lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a")
-        self.templates.env.filters["progress_episode_rating_chip"] = lambda item: progress_episode_rating_chip(item, lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a")
+        self.templates.env.filters["progress_rating_chip"] = lambda item, primary_source=None: progress_rating_chip(item, lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a", primary_source)
+        self.templates.env.filters["progress_episode_rating_chip"] = lambda item, primary_source=None: progress_episode_rating_chip(item, lambda rating, votes: f"{rating} ({votes})" if rating is not None else "n/a", primary_source)
         self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
         items = [
@@ -302,6 +302,7 @@ class ProgressRouteTests(unittest.TestCase):
             notifications=SimpleNamespace(unseen_episode_ids=lambda: self.unseen_episode_ids),
             auth=SimpleNamespace(
                 config=SimpleNamespace(
+                    catalog_provider_mode="trakt",
                     hide_upcoming_in_progress=False,
                     show_paused_in_progress=False,
                     show_dropped_in_progress=False,
@@ -326,6 +327,7 @@ class ProgressRouteTests(unittest.TestCase):
             ),
             play=SimpleNamespace(),
             operations=SimpleNamespace(publish=lambda *args: None),
+            tmdb_catalog=SimpleNamespace(local_progress_items=lambda **_kwargs: []),
         )
         self.app.state.bg_tasks = _FakeBackgroundTaskManager()
 
@@ -454,6 +456,130 @@ class ProgressRouteTests(unittest.TestCase):
         )
         self.assertEqual(self.progress.refresh_calls, [(1, True, False)])
 
+    def test_tmdb_local_progress_is_rendered_with_local_actions(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        local_item = ProgressSnapshot(
+            trakt_id=0,
+            tmdb_id=43125,
+            provider="tmdb",
+            title="Guilty Crown",
+            completed=1,
+            aired=2,
+            percent_completed=50.0,
+            next_episode=EpisodeSummary(
+                trakt_id=0,
+                season=1,
+                number=2,
+                title="Survival of the Fittest",
+                first_aired=datetime(2011, 10, 21, tzinfo=UTC),
+                still_status="checked_no_data",
+                trakt_details_status="checked_no_data",
+                imdb_status="checked_no_data",
+            ),
+            poster_status="checked_no_data",
+            title_ratings_status="checked_no_data",
+            title_tmdb_rating=7.4,
+            title_tmdb_votes=2300,
+        )
+        self.app.state.services.tmdb_catalog.local_progress_items = lambda **_kwargs: [local_item]
+
+        response = self.client.get("/progress")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Guilty Crown", response.text)
+        self.assertIn('data-progress-card-key="progress:tmdb:43125"', response.text)
+        self.assertIn('href="https://www.themoviedb.org/tv/43125"', response.text)
+        self.assertIn('action="/progress/tmdb/43125/watch"', response.text)
+        self.assertIn("tmdb_preview.js?v=", response.text)
+        self.assertEqual(self.progress.dashboard_calls, [])
+
+    def test_tmdb_progress_uses_imdb_episode_coordinate_without_trakt_prefix(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        local_item = self.progress.items[0]
+        local_item.trakt_id = 0
+        local_item.tmdb_id = 95396
+        local_item.provider = "tmdb"
+        local_item.next_episode.trakt_id = 0
+        self.app.state.services.tmdb_catalog.local_progress_items = lambda **_kwargs: [local_item]
+
+        response = self.client.get("/progress")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("S03E01", response.text)
+        self.assertNotIn("S02E03 (S03E01)", response.text)
+
+    def test_tmdb_progress_card_uses_tmdb_links_and_ratings_without_trakt_trace(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        item = self.progress.items[0]
+        item.trakt_id = 0
+        item.provider = "tmdb"
+        item.tmdb_id = 95396
+        item.title_tmdb_rating = 8.4
+        item.title_tmdb_votes = 772
+        item.next_episode.trakt_id = 0
+        item.next_episode.tmdb_rating = 7.8
+        item.next_episode.tmdb_votes = 310
+        self.app.state.services.tmdb_catalog.local_progress_items = lambda **_kwargs: [item]
+
+        response = self.client.get("/progress")
+
+        self.assertEqual(response.status_code, 200)
+        card = response.text.split('data-progress-card-key="progress:tmdb:95396"', 1)[1].split("</article>", 1)[0]
+        self.assertIn('href="https://www.themoviedb.org/tv/95396"', card)
+        self.assertIn('href="https://www.themoviedb.org/tv/95396/season/2/episode/3"', card)
+        self.assertIn("S03E01", card)
+        self.assertIn("data-tmdb-card", card)
+        self.assertIn("data-tmdb-progress-watch-panel", card)
+        self.assertIn("static/tmdb.png", card)
+        self.assertIn("8.4 (772)", card)
+        self.assertIn("7.8 (310)", card)
+        self.assertNotIn("trakt.tv", card)
+        self.assertNotIn("trakt_logo_bw.svg", card)
+        tmdb_script = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "tmdb_preview.js").read_text(encoding="utf-8")
+        self.assertIn(
+            'event.target.closest("[data-tmdb-watch-panel], [data-tmdb-progress-watch-panel]")',
+            tmdb_script,
+        )
+        self.assertIn("openPanel(card, null", tmdb_script)
+
+    def test_tmdb_local_progress_watch_advances_and_opens_local_rating(self) -> None:
+        self.app.state.services.auth.config.catalog_provider_mode = "tmdb_preview"
+        local_item = ProgressSnapshot(
+            trakt_id=0,
+            tmdb_id=43125,
+            provider="tmdb",
+            title="Guilty Crown",
+            completed=1,
+            aired=2,
+            percent_completed=50.0,
+            next_episode=EpisodeSummary(
+                trakt_id=0,
+                season=1,
+                number=2,
+                title="Survival of the Fittest",
+            ),
+        )
+        calls: list[dict] = []
+        self.app.state.services.tmdb_catalog.local_progress_items = lambda **_kwargs: [local_item]
+        self.app.state.services.tmdb_catalog.get_item = lambda _title_type, _tmdb_id: SimpleNamespace(
+            title_type="show",
+            tmdb_id=43125,
+            trakt_id=None,
+            title="Guilty Crown",
+        )
+        self.app.state.services.tmdb_catalog.mark_watched = lambda _item, **kwargs: calls.append(kwargs) or {
+            "local_only": True,
+            "removed_from_release_tracking": False,
+        }
+
+        response = self.client.post("/progress/tmdb/43125/watch", data={}, follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(calls[0]["season"], 1)
+        self.assertEqual(calls[0]["episode"], 2)
+        self.assertIn("rate_provider=tmdb", response.headers["location"])
+        self.assertIn("rate_tmdb_id=43125", response.headers["location"])
+
     def test_progress_episode_watch_reconciles_missing_watchlist_snapshot_in_background(self) -> None:
         self.watchlist_snapshot_available = False
 
@@ -542,7 +668,7 @@ class ProgressRouteTests(unittest.TestCase):
 
         css = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "style.css").read_text(encoding="utf-8")
         self.assertNotIn("field-sizing: content;", css)
-        self.assertIn('select[data-progress-sort-mode="episode_release"] {\n    width: 136px;', css)
+        self.assertIn('select[data-progress-sort-mode="episode_release"] {\n    width: 152px;', css)
         self.assertNotIn(".year-filter-box", css)
         self.assertNotIn(".year-input", css)
         self.assertIn("gap: 3px;", css)
@@ -697,6 +823,21 @@ class ProgressRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertLess(response.text.index("Andor"), response.text.index("Severance"))
         self.assertIn("progress-new-badge", response.text)
+
+    def test_future_tmdb_episode_is_hidden_and_not_partitioned_as_new(self) -> None:
+        future_item = self.progress.items[0]
+        future_item.completed = 16
+        future_item.aired = 17
+        future_item.next_episode.first_aired = datetime.now(tz=UTC) + timedelta(days=5)
+        self.progress.items = [future_item]
+        self.unseen_episode_ids = {future_item.next_episode.trakt_id}
+        self.app.state.services.auth.config.hide_upcoming_in_progress = True
+
+        response = self.client.get("/progress")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(future_item.title, response.text)
+        self.assertNotIn("progress-new-badge", response.text)
 
     def test_progress_new_partition_is_applied_before_page_limit(self) -> None:
         released_at = datetime.now(tz=UTC) - timedelta(days=1)

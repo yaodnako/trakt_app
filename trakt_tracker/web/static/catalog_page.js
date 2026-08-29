@@ -72,6 +72,7 @@
     }
 
     async function refreshWatchPanel(requestUrl, token, {state = null, focusDefault = false} = {}) {
+        if (watchOverlay?.dataset.watchPanelOwner !== "trakt") return;
         if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
         mappingRefreshTimer = 0;
         if (!window.traktShowWatchPanel?.needsRefresh(watchBody)) {
@@ -89,7 +90,7 @@
                 cache: "no-store",
             });
             const html = await response.text();
-            if (token !== watchRefreshToken) return;
+            if (token !== watchRefreshToken || watchOverlay?.dataset.watchPanelOwner !== "trakt") return;
             if (!response.ok && !panelWasPending) return;
             const replacedPanel = window.traktShowWatchPanel?.applyRefresh(watchBody, html);
             if (replacedPanel) {
@@ -128,7 +129,7 @@
 
     async function loadWatchPanel(panelUrl, {preserve = false, focusDefault = false} = {}) {
         const requestUrl = panelUrl || activePanelUrl;
-        if (!requestUrl || !watchBody) {
+        if (!requestUrl || !watchBody || watchOverlay?.dataset.watchPanelOwner !== "trakt") {
             return;
         }
         if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
@@ -141,7 +142,7 @@
                 headers: {"Accept": "text/html"},
                 cache: "no-store",
             });
-            if (token !== watchRefreshToken) {
+            if (token !== watchRefreshToken || watchOverlay?.dataset.watchPanelOwner !== "trakt") {
                 return;
             }
             watchBody.innerHTML = await response.text();
@@ -160,6 +161,7 @@
         activeTrigger = trigger;
         activePanelUrl = trigger.dataset.watchPanelUrl || "";
         watchRefreshToken += 1;
+        if (watchOverlay) watchOverlay.dataset.watchPanelOwner = "trakt";
         mappingRefreshAttempts = 0;
         if (mappingRefreshTimer) window.clearTimeout(mappingRefreshTimer);
         if (watchTitle) {
@@ -477,6 +479,7 @@
         if (event.target.closest("[data-search-watch-close]")) {
             event.preventDefault();
             watchRefreshToken += 1;
+            if (watchOverlay?.dataset.watchPanelOwner === "trakt") delete watchOverlay.dataset.watchPanelOwner;
             closeOverlay(watchOverlay);
             if (activeTrigger && document.contains(activeTrigger)) {
                 activeTrigger.focus();
@@ -515,6 +518,8 @@
             return;
         }
         if (watchOverlay && !watchOverlay.hidden) {
+            watchRefreshToken += 1;
+            if (watchOverlay.dataset.watchPanelOwner === "trakt") delete watchOverlay.dataset.watchPanelOwner;
             closeOverlay(watchOverlay);
         }
     });
@@ -540,7 +545,7 @@
         });
     }
 
-    async function navigateCatalog(target, {push = true} = {}) {
+    async function navigateCatalog(target, {push = true, scrollToPageStart = false} = {}) {
         navigationRequest?.abort();
         const controller = new AbortController();
         navigationRequest = controller;
@@ -572,6 +577,10 @@
             if (incomingNav && currentNav) currentNav.replaceWith(incomingNav);
             if (push) history.pushState(null, "", target.toString());
             document.title = parsed.title || document.title;
+            if (scrollToPageStart) {
+                const resultsRegion = document.querySelector("#catalog-results-region");
+                resultsRegion?.scrollIntoView({block: "start", behavior: "auto"});
+            }
         } catch (error) {
             if (error?.name === "AbortError") return;
             setActiveNavigation(window.location.pathname);
@@ -600,8 +609,9 @@
         if (!link || link.target || event.defaultPrevented) return;
         const target = catalogUrl(link.href);
         if (!target) return;
+        const scrollToPageStart = Boolean(link.closest(".pager"));
         event.preventDefault();
-        navigateCatalog(target);
+        navigateCatalog(target, {scrollToPageStart});
     });
     const catalogRegion = document.querySelector("#catalog-results-region");
     if (catalogRegion?.dataset.catalogLoading === "1") {

@@ -21,6 +21,15 @@ class ProgressSortMode(str, Enum):
     RELEASE_YEAR = "release_year"
 
 
+def synthetic_episode_id(show_id: int, season: int, episode: int) -> int:
+    """Stable local identity for an episode that has no tracker episode id."""
+    return -(
+        max(1, int(show_id)) * 1_000_000
+        + max(0, int(season)) * 10_000
+        + max(1, int(episode))
+    )
+
+
 @dataclass(slots=True)
 class TitleSummary:
     trakt_id: int
@@ -83,10 +92,14 @@ class EpisodeSummary:
     imdb_votes: int | None = None
     imdb_season: int | None = None
     imdb_episode: int | None = None
+    tmdb_season: int | None = None
+    tmdb_episode: int | None = None
     imdb_status: str = "unknown"
     first_aired: datetime | None = None
     runtime: int | None = None
     overview: str = ""
+    tmdb_rating: float | None = None
+    tmdb_votes: int | None = None
 
 
 @dataclass(slots=True)
@@ -133,6 +146,10 @@ class ProgressSnapshot:
     is_paused: bool = False
     last_watched_at: datetime | None = None
     title_year: int | None = None
+    provider: str = "trakt"
+    tmdb_id: int | None = None
+    title_tmdb_rating: float | None = None
+    title_tmdb_votes: int | None = None
 
 
 @dataclass(slots=True)

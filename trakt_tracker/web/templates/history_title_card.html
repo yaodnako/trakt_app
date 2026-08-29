@@ -1,11 +1,13 @@
+{% set tmdb_history = title_group.tmdb_id|default(none) and (title_group.provider|default('trakt') == 'tmdb' or catalog_provider_mode|default('trakt') == 'tmdb_preview') %}
 <article
     class="history-title-card"
     data-history-title-key="{{ title_group.title_key }}"
     data-history-entry-count="{{ title_group.entries|length }}"
+    {% if tmdb_history %}data-tmdb-card data-tmdb-id="{{ title_group.tmdb_id }}" data-title-type="{{ title_group.type }}"{% endif %}
 >
     {% set trakt_title_url = "" %}
     {% if title_group.type in ('show', 'movie') %}
-        {% set trakt_title_url = "https://trakt.tv/" ~ title_group.type ~ "s/" ~ (title_group.title_slug or title_group.title_trakt_id) %}
+        {% set trakt_title_url = ("https://www.themoviedb.org/" ~ ('tv' if title_group.type == 'show' else 'movie') ~ "/" ~ title_group.tmdb_id) if tmdb_history else ("https://trakt.tv/" ~ title_group.type ~ "s/" ~ (title_group.title_slug or title_group.title_trakt_id)) %}
     {% endif %}
     <div class="history-title-summary">
         <div class="history-title-heading">
@@ -19,9 +21,14 @@
             target="_blank"
             rel="noreferrer"
             {% if title_group.type == 'show' %}
+            {% if tmdb_history %}
+            data-tmdb-progress-watch-panel
+            data-tmdb-id="{{ title_group.tmdb_id }}"
+            {% else %}
             data-history-show-watch-trigger
             data-watch-panel-url="/search/show/{{ title_group.title_trakt_id }}/watch-panel"
             data-trakt-id="{{ title_group.title_trakt_id }}"
+            {% endif %}
             data-title="{{ title_group.title }}"
             aria-label="Open episode watch panel for {{ title_group.title }}"
             {% endif %}
@@ -51,12 +58,12 @@
                 <span class="poster-chip-part">
                     <img
                         class="poster-chip-icon"
-                        src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
-                        alt="trakt"
+                        src="{{ request.url_for('static', path='tmdb.png' if tmdb_history else 'trakt_logo_bw.svg') }}"
+                        alt="{{ 'tmdb' if tmdb_history else 'trakt' }}"
                     >
                     <span>
-                        {% if title_group.title_trakt_rating is not none %}
-                        {{ title_group.title_trakt_rating|rating_with_votes(title_group.title_trakt_votes) }}
+                        {% if (title_group.title_tmdb_rating if tmdb_history else title_group.title_trakt_rating) is not none %}
+                        {{ (title_group.title_tmdb_rating if tmdb_history else title_group.title_trakt_rating)|rating_with_votes(title_group.title_tmdb_votes if tmdb_history else title_group.title_trakt_votes) }}
                         {% elif title_group.title_ratings_status in ('checked_no_data', 'ready') %}
                         n/a
                         {% else %}
@@ -89,19 +96,24 @@
             class="poster-chip history-poster-chip history-title-chip title-matrix-trigger history-title-matrix-trigger"
             data-title-matrix-trigger
             data-title-matrix-title="{{ title_group.title }}"
+            {% if tmdb_history %}
+            data-title-matrix-tmdb-id="{{ title_group.tmdb_id }}"
+            data-title-matrix-url="/titles/tmdb/show/{{ title_group.tmdb_id }}/episode-ratings-matrix"
+            {% else %}
             data-title-matrix-trakt-id="{{ title_group.title_trakt_id }}"
             data-title-matrix-url="/titles/show/{{ title_group.title_trakt_id }}/episode-ratings-matrix"
+            {% endif %}
             aria-label="Open episode IMDb ratings matrix for {{ title_group.title }}"
         >
             <span class="poster-chip-part">
                 <img
                     class="poster-chip-icon"
-                    src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
-                    alt="trakt"
+                    src="{{ request.url_for('static', path='tmdb.png' if tmdb_history else 'trakt_logo_bw.svg') }}"
+                    alt="{{ 'tmdb' if tmdb_history else 'trakt' }}"
                 >
                 <span>
-                    {% if title_group.title_trakt_rating is not none %}
-                    {{ title_group.title_trakt_rating|rating_with_votes(title_group.title_trakt_votes) }}
+                    {% if (title_group.title_tmdb_rating if tmdb_history else title_group.title_trakt_rating) is not none %}
+                    {{ (title_group.title_tmdb_rating if tmdb_history else title_group.title_trakt_rating)|rating_with_votes(title_group.title_tmdb_votes if tmdb_history else title_group.title_trakt_votes) }}
                     {% elif title_group.title_ratings_status in ('checked_no_data', 'ready') %}
                     n/a
                     {% else %}
@@ -139,7 +151,14 @@
             {% set trakt_episode_url = "" %}
             {% set still_status = row.episode_still_status or 'unknown' %}
             {% set trakt_status = row.episode_trakt_status or 'unknown' %}
+            {% set tmdb_status = row.episode_tmdb_status or 'unknown' %}
             {% set imdb_status = row.episode_imdb_status or 'unknown' %}
+            {% set episode_display_label = row.season|episode_label(row.episode, row.get('episode_imdb_season'), row.get('episode_imdb_episode')) %}
+            {% set tmdb_episode_season = row.get('episode_tmdb_season') or row.season %}
+            {% set tmdb_episode_number = row.get('episode_tmdb_episode') or row.episode %}
+            {% if tmdb_history and row.get('episode_imdb_season') is not none and row.get('episode_imdb_episode') is not none %}
+                {% set episode_display_label = row.get('episode_imdb_season')|episode_label(row.get('episode_imdb_episode')) %}
+            {% endif %}
             {% if row.type == 'show' and row.season is not none and row.episode is not none %}
                 {% set preview_url = row.episode_still_url %}
                 {% set preview_alt = (row.episode_title or (row.season|episode_label(row.episode)) or title_group.title) ~ ' still' %}
@@ -147,7 +166,9 @@
                 {% set preview_url = row.backdrop_url or title_group.backdrop_url or title_group.poster_url %}
                 {% set preview_alt = (row.title or title_group.title) ~ (' backdrop' if row.backdrop_url or title_group.backdrop_url else ' poster') %}
             {% endif %}
-            {% if title_group.title_slug and row.type == 'show' and row.season is not none and row.episode is not none %}
+            {% if tmdb_history and row.type == 'show' and row.season is not none and row.episode is not none %}
+                {% set trakt_episode_url = "https://www.themoviedb.org/tv/" ~ title_group.tmdb_id ~ "/season/" ~ tmdb_episode_season ~ "/episode/" ~ tmdb_episode_number %}
+            {% elif title_group.title_slug and row.type == 'show' and row.season is not none and row.episode is not none %}
                 {% set trakt_episode_url = "https://trakt.tv/shows/" ~ title_group.title_slug ~ "/seasons/" ~ row.season ~ "/episodes/" ~ row.episode %}
             {% endif %}
             <div class="history-episode-head">
@@ -183,8 +204,10 @@
                     class="history-rating-badge user-rating-badge{% if is_episode_user_rating %} episode-user-rating-badge{% endif %}"
                     style="--user-rating-color: {{ row.display_rating|rating_bucket_color }};"
                     data-rating-trigger
+                    data-rating-provider="{{ 'tmdb' if tmdb_history else 'trakt' }}"
                     data-rating-title-type="{{ row.type }}"
-                    data-rating-trakt-id="{{ row.title_trakt_id }}"
+                    {% if not tmdb_history %}data-rating-trakt-id="{{ row.title_trakt_id }}"{% endif %}
+                    data-rating-tmdb-id="{{ row.tmdb_id if tmdb_history else '' }}"
                     data-rating-title="{{ row.title }}"
                     data-rating-season="{{ row.season if row.season is not none else '' }}"
                     data-rating-episode="{{ row.episode if row.episode is not none else '' }}"
@@ -195,15 +218,17 @@
                     type="button"
                     class="history-rate-chip"
                     data-rating-trigger
+                    data-rating-provider="{{ 'tmdb' if tmdb_history else 'trakt' }}"
                     data-rating-title-type="{{ row.type }}"
-                    data-rating-trakt-id="{{ row.title_trakt_id }}"
+                    {% if not tmdb_history %}data-rating-trakt-id="{{ row.title_trakt_id }}"{% endif %}
+                    data-rating-tmdb-id="{{ row.tmdb_id if tmdb_history else '' }}"
                     data-rating-title="{{ row.title }}"
                     data-rating-season="{{ row.season if row.season is not none else '' }}"
                     data-rating-episode="{{ row.episode if row.episode is not none else '' }}"
                 >Rate</button>
                 {% endif %}
                 {% if row.type == 'show' and row.season is not none and row.episode is not none %}
-                <div class="history-episode-chip">{{ row.season|episode_label(row.episode, row.get('episode_imdb_season'), row.get('episode_imdb_episode')) }}</div>
+                <div class="history-episode-chip">{{ episode_display_label }}</div>
                 {% endif %}
             </div>
             {% if row.type == 'show' and row.season is not none and row.episode is not none %}
@@ -212,13 +237,13 @@
                     <span class="poster-chip-part">
                         <img
                             class="poster-chip-icon"
-                            src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
-                            alt="trakt"
+                            src="{{ request.url_for('static', path='tmdb.png' if tmdb_history else 'trakt_logo_bw.svg') }}"
+                            alt="{{ 'tmdb' if tmdb_history else 'trakt' }}"
                         >
                         <span>
-                            {% if row.episode_trakt_rating is not none %}
-                            {{ row.episode_trakt_rating|rating_with_votes(row.episode_trakt_votes) }}
-                            {% elif trakt_status == 'checked_no_data' %}
+                            {% if (row.episode_tmdb_rating if tmdb_history else row.episode_trakt_rating) is not none %}
+                            {{ (row.episode_tmdb_rating if tmdb_history else row.episode_trakt_rating)|rating_with_votes(row.episode_tmdb_votes if tmdb_history else row.episode_trakt_votes) }}
+                            {% elif (tmdb_status if tmdb_history else trakt_status) == 'checked_no_data' %}
                             n/a
                             {% else %}
                             Loading
@@ -246,10 +271,10 @@
                     type="button"
                     class="icon-button history-unwatch-action"
                     title="Remove episode from watched history"
-                    aria-label="Remove {{ title_group.title }} {{ row.season|episode_label(row.episode) }} from watched history"
-                    data-search-unwatch-action
+                    aria-label="Remove {{ title_group.title }} {{ episode_display_label }} from watched history"
+                    {% if tmdb_history %}data-tmdb-history-unwatch data-tmdb-id="{{ row.tmdb_id }}"{% else %}data-search-unwatch-action{% endif %}
                     data-title-type="show"
-                    data-trakt-id="{{ row.title_trakt_id }}"
+                    {% if not tmdb_history %}data-trakt-id="{{ row.title_trakt_id }}"{% endif %}
                     data-title="{{ row.title }}"
                     data-scope="episode"
                     data-season="{{ row.season }}"
@@ -268,9 +293,9 @@
                     class="icon-button history-unwatch-action"
                     title="Remove movie from watched history"
                     aria-label="Remove {{ row.title }} from watched history"
-                    data-search-unwatch-action
+                    {% if tmdb_history %}data-tmdb-history-unwatch data-tmdb-id="{{ row.tmdb_id }}"{% else %}data-search-unwatch-action{% endif %}
                     data-title-type="movie"
-                    data-trakt-id="{{ row.title_trakt_id }}"
+                    {% if not tmdb_history %}data-trakt-id="{{ row.title_trakt_id }}"{% endif %}
                     data-title="{{ row.title }}"
                     data-scope="title"
                 >

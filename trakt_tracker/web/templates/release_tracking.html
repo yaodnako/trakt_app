@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% set tmdb_preview = catalog_provider_mode|default('trakt') == 'tmdb_preview' %}
 
-{% macro release_card(item, is_released, is_notification_matured=false) %}
+{% macro release_card(item, is_released, was_notified=false) %}
 {% set trakt_title_url = "https://trakt.tv/" ~ item.title_type ~ "s/" ~ (item.slug or item.trakt_id) %}
 {% set tmdb_item = tmdb_preview and item.tmdb_id is defined and item.tmdb_id %}
-{% set mapped_to_trakt = not tmdb_item or item.trakt_id %}
-{% set provider_id = item.trakt_id if item.trakt_id else item.tmdb_id %}
-{% set title_url = item.source_url if tmdb_item else trakt_title_url %}
-<article class="result-card search-result-card release-tracking-card{% if is_released and not item.release_acknowledged %} is-unacknowledged{% endif %}{% if is_released and is_notification_matured and not item.release_acknowledged %} is-notification-due{% endif %}" data-release-card data-notification-matured="{{ 'true' if is_notification_matured else 'false' }}"{% if tmdb_item %} data-tmdb-card data-tmdb-id="{{ item.tmdb_id }}" data-title-type="{{ item.title_type }}" data-trakt-id="{{ item.trakt_id or '' }}"{% endif %}>
+{% set provider_id = item.tmdb_id if tmdb_item else item.trakt_id %}
+{% set rating_chip_clickable = item.title_type == 'show' %}
+{% set title_url = ("https://www.themoviedb.org/" ~ ('tv' if item.title_type == 'show' else 'movie') ~ "/" ~ item.tmdb_id) if tmdb_item else trakt_title_url %}
+<article class="result-card search-result-card release-tracking-card{% if is_released and not item.release_acknowledged %} is-unacknowledged{% endif %}{% if is_released and was_notified and not item.release_acknowledged %} is-notification-sent{% endif %}" data-release-card data-notification-sent="{{ 'true' if was_notified else 'false' }}"{% if tmdb_item %} data-tmdb-card data-tmdb-id="{{ item.tmdb_id }}" data-title-type="{{ item.title_type }}"{% endif %}>
     <div class="search-result-side">
         <div class="search-result-title-stack">
             <h3 class="search-result-title{% if item.title|length > 18 %} is-long{% endif %}{% if item.title|length > 28 %} is-xlong{% endif %}">
@@ -20,7 +20,7 @@
             <button
                 type="button"
                 class="progress-poster search-result-poster search-watch-poster-trigger"
-                {% if tmdb_item and not mapped_to_trakt %}
+                {% if tmdb_item %}
                 data-tmdb-watch-panel
                 data-tmdb-id="{{ item.tmdb_id }}"
                 {% else %}
@@ -50,7 +50,7 @@
                 class="icon-button search-card-action search-watch-title-button"
                 {% if tmdb_item and item.title_type == 'movie' %}
                 data-tmdb-watch-toggle data-tmdb-watched="{{ 'true' if item.is_in_history else 'false' }}" data-tmdb-id="{{ item.tmdb_id }}"
-                {% elif tmdb_item and not mapped_to_trakt %}
+                {% elif tmdb_item %}
                 data-tmdb-watch-panel data-tmdb-id="{{ item.tmdb_id }}"
                 {% else %}
                 data-release-watched data-trakt-id="{{ item.trakt_id }}"
@@ -59,14 +59,19 @@
             ><img class="icon-glyph icon-glyph-check" src="{{ request.url_for('static', path='watched_check.svg') }}" alt="" aria-hidden="true"></button>
             <button type="button" class="icon-button search-card-action release-acknowledge-button{% if item.release_acknowledged %} is-active{% endif %}"{% if tmdb_item %} data-tmdb-release-acknowledge data-tmdb-acknowledged="{{ 'true' if item.release_acknowledged else 'false' }}" data-tmdb-id="{{ item.tmdb_id }}"{% else %} data-release-acknowledge data-trakt-id="{{ item.trakt_id }}" data-acknowledged="{{ 'true' if item.release_acknowledged else 'false' }}"{% endif %} data-title-type="{{ item.title_type }}" title="{{ 'Resume notifications' if item.release_acknowledged else 'Acknowledge release' }}" aria-label="Acknowledge release for {{ item.title }}"><img src="{{ request.url_for('static', path='eye.svg') }}" alt="" aria-hidden="true"></button>
             {% endif %}
-            {% if item.title_type == 'show' and not tmdb_item %}
+            {% if rating_chip_clickable %}
             <button
                 type="button"
                 class="poster-chip progress-title-chip search-title-ratings-chip anticipated-release-chip title-matrix-trigger"
                 data-title-matrix-trigger
                 data-title-matrix-title="{{ item.title }}"
+                {% if not tmdb_item %}
                 data-title-matrix-trakt-id="{{ item.trakt_id }}"
                 data-title-matrix-url="/titles/show/{{ item.trakt_id }}/episode-ratings-matrix"
+                {% else %}
+                data-title-matrix-tmdb-id="{{ item.tmdb_id }}"
+                data-title-matrix-url="/titles/tmdb/show/{{ item.tmdb_id }}/episode-ratings-matrix"
+                {% endif %}
                 aria-label="Open episode IMDb ratings matrix for {{ item.title }}"
             >
             {% else %}
@@ -78,7 +83,10 @@
                 {% endif %}
                 {% if is_released %}
                 {% if tmdb_item %}
-                <span class="poster-chip-part anticipated-rating-part"><span>TMDb {{ item.tmdb_rating|round(1) if item.tmdb_rating is not none else 'n/a' }}{% if item.tmdb_votes is not none %} ({{ item.tmdb_votes|compact_votes }}){% endif %}</span></span>
+                <span class="poster-chip-part anticipated-rating-part">
+                    <img class="poster-chip-icon poster-chip-icon-tmdb" src="{{ request.url_for('static', path='tmdb.png') }}" alt="tmdb">
+                    <span>{{ item.tmdb_rating|round(1) if item.tmdb_rating is not none else 'n/a' }}{% if item.tmdb_votes is not none %} ({{ item.tmdb_votes|compact_votes }}){% endif %}</span>
+                </span>
                 <span class="poster-chip-part anticipated-rating-part">
                     <img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="imdb">
                     <span>{% if item.imdb_rating is not none %}{{ item.imdb_rating|rating_with_votes(item.imdb_votes) }}{% elif item.ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}</span>
@@ -94,7 +102,7 @@
                 </span>
                 {% endif %}
                 {% endif %}
-            {% if item.title_type == 'show' and not tmdb_item %}
+            {% if rating_chip_clickable %}
             </button>
             {% else %}
             </div>
@@ -113,7 +121,7 @@
 
 <section class="release-tracking-section" data-catalog-provider="{{ 'tmdb_preview' if tmdb_preview else 'trakt' }}">
     <div class="section-head"><h2>Released</h2><p>{{ released|length }} title{% if released|length != 1 %}s{% endif %}</p></div>
-    {% if released %}<div class="search-results-grid">{% for item in released %}{{ release_card(item, true, ((item.title_type ~ ':tmdb:' ~ item.tmdb_id) if tmdb_preview else (item.title_type ~ ':' ~ item.trakt_id)) in notification_matured_keys) }}{% endfor %}</div>
+    {% if released %}<div class="search-results-grid">{% for item in released %}{{ release_card(item, true, ((item.title_type ~ ':tmdb:' ~ item.tmdb_id) if tmdb_preview else (item.title_type ~ ':' ~ item.trakt_id)) in notified_release_keys) }}{% endfor %}</div>
     {% elif not error_message %}<div class="empty-state"><p>No tracked titles have been released yet.</p></div>{% endif %}
 </section>
 
@@ -134,7 +142,7 @@
             </div>
             <div class="search-watch-header-actions">
                 <button type="button" class="poster-chip title-matrix-trigger search-watch-title-ratings" data-search-watch-title-ratings data-title-matrix-trigger hidden>
-                    <span class="poster-chip-part"><img class="poster-chip-icon" src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}" alt="trakt"><span data-search-watch-trakt-rating></span></span>
+                    <span class="poster-chip-part"><img class="poster-chip-icon" src="{{ request.url_for('static', path='tmdb.png' if tmdb_preview else 'trakt_logo_bw.svg') }}" alt="{{ 'TMDb' if tmdb_preview else 'Trakt' }}"><span data-search-watch-trakt-rating></span></span>
                     <span class="poster-chip-part"><img class="poster-chip-icon" src="{{ request.url_for('static', path='imdb_icon.png') }}" alt="IMDb"><span data-search-watch-imdb-rating></span></span>
                 </button>
                 <button type="button" class="search-watch-scope-button search-watch-header-scope" data-search-watch-action data-search-watch-season-action data-search-watch-header-season-mark data-title-type="show" data-scope="season" hidden>
@@ -164,7 +172,7 @@
             <div class="title-matrix-dialog-copy">
                 <p class="title-matrix-eyebrow">Watched Date</p>
                 <h2 id="release-watch-date-title">Mark watched</h2>
-                <p class="title-matrix-subtitle">Choose how this appears in Trakt history</p>
+                <p class="title-matrix-subtitle">{{ 'Manage watched episodes locally' if tmdb_preview else 'Choose how this appears in Trakt history' }}</p>
             </div>
             <button type="button" class="title-matrix-close" data-release-watch-date-close aria-label="Close watched date prompt"><span class="title-matrix-close-glyph">&times;</span></button>
         </div>

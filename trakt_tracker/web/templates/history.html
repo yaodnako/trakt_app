@@ -134,5 +134,6 @@
 
 {% block page_scripts %}
 <script src="{{ request.url_for('static', path='history_watch_panel.js') }}?v={{ static_js_version }}"></script>
+<script src="{{ request.url_for('static', path='tmdb_preview.js') }}?v={{ static_js_version }}"></script>
 <script src="{{ request.url_for('static', path='history_page.js') }}?v={{ static_js_version }}"></script>
 {% endblock %}

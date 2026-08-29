@@ -54,11 +54,13 @@
     </div>
 </section>
 
-{% if rate_trakt_id %}
+{% if rate_trakt_id or rate_tmdb_id %}
 <div
     data-rating-autopen
+    data-rating-provider="{{ rate_provider or 'trakt' }}"
     data-rating-title-type="show"
-    data-rating-trakt-id="{{ rate_trakt_id }}"
+    data-rating-trakt-id="{{ rate_trakt_id or '' }}"
+    data-rating-tmdb-id="{{ rate_tmdb_id or '' }}"
     data-rating-title="{{ rate_title }}"
     data-rating-season="{{ rate_season or '' }}"
     data-rating-episode="{{ rate_episode or '' }}"
@@ -71,5 +73,6 @@
 </div>
 {% include "history_show_watch_overlay.html" %}
 <script src="{{ request.url_for('static', path='history_watch_panel.js') }}?v={{ static_js_version }}"></script>
+<script src="{{ request.url_for('static', path='tmdb_preview.js') }}?v={{ static_js_version }}"></script>
 <script src="{{ request.url_for('static', path='progress_page.js') }}?v={{ static_js_version }}"></script>
 {% endblock %}

@@ -1,12 +1,22 @@
 {% set progress_item_is_paused = progress_item.is_paused|default(false) %}
 {% set spoiler_profile = active_profile_slug|default('local', true)|urlencode %}
+{% set tmdb_progress = progress_item.provider|default('trakt') == 'tmdb' and progress_item.tmdb_id|default(none) %}
+{% set tmdb_catalog_item = tmdb_preview|default(false) and progress_item.tmdb_id|default(none) %}
+{% set progress_identity = ('tmdb:' ~ progress_item.tmdb_id) if tmdb_progress else progress_item.trakt_id %}
+{% set progress_action_base = ('/progress/tmdb/' ~ progress_item.tmdb_id) if tmdb_progress else ('/progress/' ~ progress_item.trakt_id) %}
+{% set use_imdb_episode_coordinate = tmdb_preview|default(false) and progress_item.next_episode and progress_item.next_episode.imdb_season is not none and progress_item.next_episode.imdb_episode is not none %}
+{% set displayed_episode_season = progress_item.next_episode.imdb_season if use_imdb_episode_coordinate else (progress_item.next_episode.season if progress_item.next_episode else none) %}
+{% set displayed_episode_number = progress_item.next_episode.imdb_episode if use_imdb_episode_coordinate else (progress_item.next_episode.number if progress_item.next_episode else none) %}
+{% set title_url = ('https://www.themoviedb.org/tv/' ~ progress_item.tmdb_id) if tmdb_catalog_item else ('https://trakt.tv/shows/' ~ (progress_item.slug or progress_item.trakt_id)) %}
+{% set episode_url = ('https://www.themoviedb.org/tv/' ~ progress_item.tmdb_id ~ '/season/' ~ (progress_item.next_episode.tmdb_season or progress_item.next_episode.season) ~ '/episode/' ~ (progress_item.next_episode.tmdb_episode or progress_item.next_episode.number)) if tmdb_catalog_item and progress_item.next_episode else '' %}
 <article
     class="progress-card{% if progress_is_new %} is-released{% endif %}{% if progress_item.is_dropped %} is-dropped{% elif progress_item_is_paused %} is-paused{% endif %}"
-    data-progress-card-key="progress:{{ progress_item.trakt_id }}"
+    data-progress-card-key="progress:{{ progress_identity }}"
+    {% if tmdb_catalog_item %}data-tmdb-card data-tmdb-id="{{ progress_item.tmdb_id }}" data-title-type="show"{% endif %}
 >
     {% if progress_is_new %}
     <div class="progress-new-badge">New</div>
-    <form method="post" action="/progress/{{ progress_item.trakt_id }}/seen" class="progress-seen-form">
+    <form method="post" action="{{ progress_action_base }}/seen" class="progress-seen-form">
         <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
         <input type="hidden" name="show_paused" value="{{ '1' if show_paused else '0' }}">
         <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
@@ -17,29 +27,32 @@
         </button>
     </form>
     {% endif %}
-    {% set trakt_title_url = "https://trakt.tv/shows/" ~ (progress_item.slug or progress_item.trakt_id) %}
-    {% set trakt_episode_url = "" %}
-    {% if progress_item.slug and progress_item.next_episode and progress_item.next_episode.season is not none and progress_item.next_episode.number is not none %}
-        {% set trakt_episode_url = "https://trakt.tv/shows/" ~ progress_item.slug ~ "/seasons/" ~ progress_item.next_episode.season ~ "/episodes/" ~ progress_item.next_episode.number %}
+    {% if not tmdb_catalog_item and progress_item.slug and progress_item.next_episode and progress_item.next_episode.season is not none and progress_item.next_episode.number is not none %}
+        {% set episode_url = "https://trakt.tv/shows/" ~ progress_item.slug ~ "/seasons/" ~ progress_item.next_episode.season ~ "/episodes/" ~ progress_item.next_episode.number %}
     {% endif %}
     <div class="progress-main">
         <div class="progress-side">
             <div class="progress-title-stack">
-                <h3><a href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">{{ progress_item.title }}</a></h3>
+                <h3><a href="{{ title_url }}" target="_blank" rel="noreferrer">{{ progress_item.title }}</a></h3>
                 {% if progress_item.status %}
                 <p class="progress-status">{{ progress_item.status }}</p>
                 {% endif %}
             </div>
             <div class="progress-poster-shell">
-            {% set chip = progress_item|progress_rating_chip %}
+            {% set chip = progress_item|progress_rating_chip('tmdb' if tmdb_preview|default(false) else none) %}
             <a
-                href="{{ trakt_title_url }}"
+                href="{{ title_url }}"
                 class="progress-poster"
                 target="_blank"
                 rel="noreferrer"
+                {% if tmdb_catalog_item %}
+                data-tmdb-progress-watch-panel
+                data-tmdb-id="{{ progress_item.tmdb_id }}"
+                {% else %}
                 data-history-show-watch-trigger
                 data-watch-panel-url="/search/show/{{ progress_item.trakt_id }}/watch-panel"
                 data-trakt-id="{{ progress_item.trakt_id }}"
+                {% endif %}
                 data-title="{{ progress_item.title }}"
                 aria-label="Open episode watch panel for {{ progress_item.title }}"
             >
@@ -66,7 +79,7 @@
             </a>
             <div class="progress-title-actions" data-progress-title-actions>
                 {% if not progress_item.is_dropped %}
-                <form method="post" action="/progress/{{ progress_item.trakt_id }}/pause-toggle" class="progress-title-action progress-title-action-side">
+                <form method="post" action="{{ progress_action_base }}/pause-toggle" class="progress-title-action progress-title-action-side">
                     <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
                     <input type="hidden" name="show_paused" value="{{ '1' if show_paused else '0' }}">
                     <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">
@@ -96,7 +109,7 @@
                 </button>
                 <form
                     method="post"
-                    action="/progress/{{ progress_item.trakt_id }}/drop-toggle"
+                    action="{{ progress_action_base }}/drop-toggle"
                     class="progress-title-action progress-title-action-side"
                     {% if not progress_item.is_dropped %}
                     data-confirm-title="Remove from Up next?"
@@ -126,8 +139,13 @@
                 class="poster-chip progress-title-chip title-matrix-trigger progress-title-matrix-trigger"
                 data-title-matrix-trigger
                 data-title-matrix-title="{{ progress_item.title }}"
+                {% if tmdb_catalog_item %}
+                data-title-matrix-tmdb-id="{{ progress_item.tmdb_id }}"
+                data-title-matrix-url="/titles/tmdb/show/{{ progress_item.tmdb_id }}/episode-ratings-matrix"
+                {% else %}
                 data-title-matrix-trakt-id="{{ progress_item.trakt_id }}"
                 data-title-matrix-url="/titles/show/{{ progress_item.trakt_id }}/episode-ratings-matrix"
+                {% endif %}
                 aria-label="Open episode IMDb ratings matrix for {{ progress_item.title }}"
             >
                 {% for part in chip.split(' | ') %}
@@ -136,7 +154,7 @@
                 <span class="poster-chip-part">
                     <img
                         class="poster-chip-icon"
-                        src="{{ request.url_for('static', path='imdb_icon.png' if source == 'imdb' else 'trakt_logo_bw.svg') }}"
+                        src="{{ request.url_for('static', path='imdb_icon.png' if source == 'imdb' else ('tmdb.png' if source == 'tmdb' else 'trakt_logo_bw.svg')) }}"
                         alt="{{ source }}"
                     >
                     <span>{{ value }}</span>
@@ -159,13 +177,13 @@
                     and progress_item.completed > 0
                     and progress_item.next_episode.still_url
                 ) %}
-                {% set episode_chip = progress_item|progress_episode_rating_chip %}
+                {% set episode_chip = progress_item|progress_episode_rating_chip('tmdb' if tmdb_preview|default(false) else none) %}
                 <div
                     class="progress-episode-preview-shell{% if preview_is_spoiler %} is-spoiler-protected{% endif %}"
-                    {% if preview_is_spoiler %}data-spoiler-key="{{ spoiler_profile }}:{{ progress_item.trakt_id }}:{{ progress_item.next_episode.season }}:{{ progress_item.next_episode.number }}"{% endif %}
+                    {% if preview_is_spoiler %}data-spoiler-key="{{ spoiler_profile }}:{{ progress_identity }}:{{ progress_item.next_episode.season }}:{{ progress_item.next_episode.number }}"{% endif %}
                 >
                     <a
-                        href="{{ trakt_episode_url or trakt_title_url }}"
+                        href="{{ episode_url or title_url }}"
                         class="progress-episode-preview{% if not preview_url %} is-empty{% endif %}{% if preview_is_poster_fallback %} is-poster-fallback{% endif %}"
                         target="_blank"
                         rel="noreferrer"
@@ -188,11 +206,11 @@
                         type="button"
                         class="episode-spoiler-reveal"
                         data-spoiler-reveal
-                        aria-label="Reveal spoiler image for {{ progress_item.title }} S{{ "%02d"|format(progress_item.next_episode.season) }}E{{ "%02d"|format(progress_item.next_episode.number) }}"
+                        aria-label="Reveal spoiler image for {{ progress_item.title }} S{{ "%02d"|format(displayed_episode_season) }}E{{ "%02d"|format(displayed_episode_number) }}"
                         hidden
                     >Click to unblur</button>
                     {% endif %}
-                    <div class="progress-episode-chip">{{ progress_item.next_episode.season|episode_label(progress_item.next_episode.number, progress_item.next_episode.imdb_season, progress_item.next_episode.imdb_episode) }}</div>
+                    <div class="progress-episode-chip">{% if use_imdb_episode_coordinate %}{{ displayed_episode_season|episode_label(displayed_episode_number) }}{% else %}{{ progress_item.next_episode.season|episode_label(progress_item.next_episode.number, progress_item.next_episode.imdb_season, progress_item.next_episode.imdb_episode) }}{% endif %}</div>
                     {% if episode_chip %}
                     <div class="poster-chip progress-episode-ratings-chip">
                         {% for part in episode_chip.split(' | ') %}
@@ -201,7 +219,7 @@
                         <span class="poster-chip-part">
                             <img
                                 class="poster-chip-icon"
-                                src="{{ request.url_for('static', path='imdb_icon.png' if source == 'imdb' else 'trakt_logo_bw.svg') }}"
+                                src="{{ request.url_for('static', path='imdb_icon.png' if source == 'imdb' else ('tmdb.png' if source == 'tmdb' else 'trakt_logo_bw.svg')) }}"
                                 alt="{{ source }}"
                             >
                             <span>{{ value }}</span>
@@ -222,13 +240,14 @@
             {% endif %}
                 <a
                     class="icon-button js-play-link"
-                    href="/progress/{{ progress_item.trakt_id }}/play?hide_upcoming={{ '1' if hide_upcoming else '0' }}&show_paused={{ '1' if show_paused else '0' }}&show_dropped={{ '1' if show_dropped else '0' }}&sort={{ sort_mode }}&direction={{ sort_direction }}"
+                    href="{{ progress_action_base }}/play?hide_upcoming={{ '1' if hide_upcoming else '0' }}&show_paused={{ '1' if show_paused else '0' }}&show_dropped={{ '1' if show_dropped else '0' }}&sort={{ sort_mode }}&direction={{ sort_direction }}"
                     target="_blank"
                     rel="noreferrer"
                     title="Play"
                     {% if progress_item.next_episode and not progress_item.is_dropped %}
-                    data-play-prompt-key="{{ progress_item.trakt_id }}:{{ progress_item.next_episode.season }}:{{ progress_item.next_episode.number }}"
-                    data-play-trakt-id="{{ progress_item.trakt_id }}"
+                    data-play-prompt-key="{{ progress_identity }}:{{ progress_item.next_episode.season }}:{{ progress_item.next_episode.number }}"
+                    {% if not tmdb_catalog_item %}data-play-trakt-id="{{ progress_item.trakt_id }}"{% endif %}
+                    data-play-watch-url="{{ progress_action_base }}/watch"
                     data-play-title="{{ progress_item.title }}"
                     data-play-season="{{ progress_item.next_episode.season }}"
                     data-play-episode="{{ progress_item.next_episode.number }}"
@@ -242,7 +261,7 @@
                 >
                     <img class="icon-glyph icon-glyph-play" src="{{ request.url_for('static', path='play.svg') }}" alt="" aria-hidden="true">
                 </a>
-                <form method="post" action="/progress/{{ progress_item.trakt_id }}/watch" class="js-watch-form" data-play-prompt-key="{% if progress_item.next_episode %}{{ progress_item.trakt_id }}:{{ progress_item.next_episode.season }}:{{ progress_item.next_episode.number }}{% endif %}">
+                <form method="post" action="{{ progress_action_base }}/watch" class="js-watch-form" data-play-prompt-key="{% if progress_item.next_episode %}{{ progress_identity }}:{{ progress_item.next_episode.season }}:{{ progress_item.next_episode.number }}{% endif %}">
                     <input type="hidden" name="hide_upcoming" value="{{ '1' if hide_upcoming else '0' }}">
                     <input type="hidden" name="show_paused" value="{{ '1' if show_paused else '0' }}">
                     <input type="hidden" name="show_dropped" value="{{ '1' if show_dropped else '0' }}">

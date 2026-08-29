@@ -82,6 +82,8 @@ class HistoryReadModelService:
             )
             return [
                 {
+                    "provider": "trakt",
+                    "tmdb_id": (title_models.get(row.title_trakt_id).tmdb_id if title_models.get(row.title_trakt_id) is not None else None),
                     "title_trakt_id": row.title_trakt_id,
                     "title": row.title,
                     "title_slug": (title_models.get(row.title_trakt_id).slug if title_models.get(row.title_trakt_id) is not None else ""),
@@ -97,6 +99,8 @@ class HistoryReadModelService:
                     ),
                     "title_trakt_rating": (title_models.get(row.title_trakt_id).trakt_rating if title_models.get(row.title_trakt_id) is not None else None),
                     "title_trakt_votes": (title_models.get(row.title_trakt_id).trakt_votes if title_models.get(row.title_trakt_id) is not None else None),
+                    "title_tmdb_rating": (title_models.get(row.title_trakt_id).tmdb_rating if title_models.get(row.title_trakt_id) is not None else None),
+                    "title_tmdb_votes": (title_models.get(row.title_trakt_id).tmdb_votes if title_models.get(row.title_trakt_id) is not None else None),
                     "title_imdb_rating": (title_models.get(row.title_trakt_id).imdb_rating if title_models.get(row.title_trakt_id) is not None else None),
                     "title_imdb_votes": (title_models.get(row.title_trakt_id).imdb_votes if title_models.get(row.title_trakt_id) is not None else None),
                     "title_ratings_status": (title_models.get(row.title_trakt_id).ratings_status if title_models.get(row.title_trakt_id) is not None else "unknown"),
@@ -149,6 +153,8 @@ class HistoryReadModelService:
                         if row.season is not None and row.episode is not None
                         else None
                     ),
+                    "episode_tmdb_rating": None,
+                    "episode_tmdb_votes": None,
                     "episode_imdb_rating": (
                         (
                             (episode_metadata.get((row.title_trakt_id, row.season, row.episode)) or {}).get("imdb_rating")
@@ -299,6 +305,8 @@ class HistoryReadModelService:
             return [
                 {
                     "title_key": f"{group['type']}:{group['title_trakt_id']}",
+                    "provider": "trakt",
+                    "tmdb_id": (title_models.get(int(group["title_trakt_id"])).tmdb_id if title_models.get(int(group["title_trakt_id"])) is not None else None),
                     "title_trakt_id": group["title_trakt_id"],
                     "title": group["title"],
                     "title_slug": (title_models.get(int(group["title_trakt_id"])).slug if title_models.get(int(group["title_trakt_id"])) is not None else ""),
@@ -316,6 +324,8 @@ class HistoryReadModelService:
                     ),
                     "title_trakt_rating": (title_models.get(int(group["title_trakt_id"])).trakt_rating if title_models.get(int(group["title_trakt_id"])) is not None else None),
                     "title_trakt_votes": (title_models.get(int(group["title_trakt_id"])).trakt_votes if title_models.get(int(group["title_trakt_id"])) is not None else None),
+                    "title_tmdb_rating": (title_models.get(int(group["title_trakt_id"])).tmdb_rating if title_models.get(int(group["title_trakt_id"])) is not None else None),
+                    "title_tmdb_votes": (title_models.get(int(group["title_trakt_id"])).tmdb_votes if title_models.get(int(group["title_trakt_id"])) is not None else None),
                     "title_imdb_rating": (title_models.get(int(group["title_trakt_id"])).imdb_rating if title_models.get(int(group["title_trakt_id"])) is not None else None),
                     "title_imdb_votes": (title_models.get(int(group["title_trakt_id"])).imdb_votes if title_models.get(int(group["title_trakt_id"])) is not None else None),
                     "title_ratings_status": (title_models.get(int(group["title_trakt_id"])).ratings_status if title_models.get(int(group["title_trakt_id"])) is not None else "unknown"),

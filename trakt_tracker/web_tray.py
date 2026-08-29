@@ -103,7 +103,7 @@ class TrayNotificationPoller(QObject):
                 active_services = self._runtime.services
                 items = active_services.notifications.poll_upcoming(
                     send_native=True,
-                    refresh_remote=active_services.auth.is_authorized(),
+                    refresh_remote=True,
                 )
                 if not items:
                     return

@@ -537,3 +537,15 @@ def test_auth_service_loads_profile_token_only_when_client_is_created(tmp_path: 
     token_store.saved["alpha"] = replacement
     assert auth.get_client() is client
     assert client.loaded == [original]
+
+
+def test_auth_service_does_not_create_trakt_client_in_tmdb_mode(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig(catalog_provider_mode="tmdb_preview"))
+    created = []
+
+    auth = AuthService(store, _TokenStore(), lambda _config: created.append(True))
+
+    with pytest.raises(RuntimeError, match="disabled in TMDb mode"):
+        auth.get_client()
+    assert created == []

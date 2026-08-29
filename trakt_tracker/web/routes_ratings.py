@@ -17,29 +17,58 @@ def register_rating_routes(app) -> None:
         except Exception:
             payload = {}
         title_type = normalize_title_type(str(payload.get("title_type", "") or "")) or "movie"
+        provider = str(payload.get("provider") or "trakt").strip().lower()
         try:
             trakt_id = int(payload.get("trakt_id") or 0)
+            tmdb_id = int(payload.get("tmdb_id") or 0)
             rating = int(payload.get("rating") or 0)
         except (TypeError, ValueError):
             return JSONResponse({"ok": False, "message": "Invalid rating payload."}, status_code=400)
-        if trakt_id <= 0:
+        if provider == "tmdb" and tmdb_id <= 0:
+            return JSONResponse({"ok": False, "message": "Missing TMDb id."}, status_code=400)
+        if provider != "tmdb" and trakt_id <= 0:
             return JSONResponse({"ok": False, "message": "Missing Trakt id."}, status_code=400)
         if not 1 <= rating <= 10:
             return JSONResponse({"ok": False, "message": "Rating must be between 1 and 10."}, status_code=400)
         season = _optional_int(payload.get("season"))
         episode = _optional_int(payload.get("episode"))
         title = str(payload.get("title", "") or "").strip()
+        local_only = False
         try:
-            services.history.set_rating(
-                RatingInput(
-                    title_type=title_type,
-                    trakt_id=trakt_id,
-                    rating=rating,
-                    season=season,
-                    episode=episode,
-                ),
-                title=title,
-            )
+            if provider == "tmdb":
+                item = services.tmdb_catalog.get_item(title_type, tmdb_id)
+                mapped = int(getattr(item, "trakt_id", 0) or 0)
+                if mapped:
+                    services.history.set_rating(
+                        RatingInput(
+                            title_type=title_type,
+                            trakt_id=mapped,
+                            rating=rating,
+                            season=season,
+                            episode=episode,
+                        ),
+                        title=title or str(getattr(item, "title", "") or ""),
+                    )
+                    trakt_id = mapped
+                else:
+                    result = services.tmdb_catalog.set_rating(
+                        item,
+                        rating=rating,
+                        season=season,
+                        episode=episode,
+                    )
+                    local_only = bool(result.get("local_only", True))
+            else:
+                services.history.set_rating(
+                    RatingInput(
+                        title_type=title_type,
+                        trakt_id=trakt_id,
+                        rating=rating,
+                        season=season,
+                        episode=episode,
+                    ),
+                    title=title,
+                )
         except Exception as exc:
             return JSONResponse({"ok": False, "message": f"Rating failed: {exc}"}, status_code=400)
         services.operations.publish("Rating action", f"Save rating: {title or title_type} -> {rating}/10")
@@ -47,6 +76,7 @@ def register_rating_routes(app) -> None:
             "ok": True,
             "message": "Rating saved.",
             "rating": rating,
+            "local_only": local_only,
             **(
                 services.trakt_sync.mutation_metadata()
                 if callable(getattr(getattr(services, "trakt_sync", None), "mutation_metadata", None))

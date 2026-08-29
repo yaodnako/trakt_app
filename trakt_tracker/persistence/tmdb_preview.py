@@ -38,6 +38,13 @@ class TmdbPreviewRepository:
         if row is None:
             row = TmdbPreviewSnapshot(title_type=title_type, tmdb_id=tmdb_id)
             session.add(row)
+        else:
+            previous = _json_value(row.payload_json, {})
+            if isinstance(previous, dict):
+                merged = {**previous, **payload}
+                if not payload.get("seasons") and previous.get("seasons"):
+                    merged["seasons"] = previous["seasons"]
+                payload = merged
         row.trakt_id = _optional_int(payload.get("trakt_id"))
         row.imdb_id = str(payload.get("imdb_id") or "")
         row.title = str(payload.get("title") or "")
@@ -53,6 +60,20 @@ class TmdbPreviewRepository:
         row.payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         session.flush()
         return row
+
+    def list_snapshots(
+        self,
+        session: Session,
+        *,
+        title_type: str | None = None,
+    ) -> list[TmdbPreviewSnapshot]:
+        statement = select(TmdbPreviewSnapshot).order_by(
+            TmdbPreviewSnapshot.title,
+            TmdbPreviewSnapshot.tmdb_id,
+        )
+        if title_type:
+            statement = statement.where(TmdbPreviewSnapshot.title_type == str(title_type))
+        return list(session.scalars(statement))
 
     def identity(self, session: Session, title_type: str, tmdb_id: int) -> CatalogIdentityMap | None:
         return session.scalar(
@@ -130,6 +151,29 @@ class TmdbPreviewRepository:
             return False
         return bool(_json_value(row.desired_state_json, False))
 
+    def effective_value(
+        self,
+        session: Session,
+        *,
+        operation_type: str,
+        title_type: str,
+        tmdb_id: int,
+        season: int | None = None,
+        episode: int | None = None,
+        fallback: Any = None,
+    ) -> Any:
+        row = self.intent(
+            session,
+            operation_type=operation_type,
+            title_type=title_type,
+            tmdb_id=tmdb_id,
+            season=season,
+            episode=episode,
+        )
+        if row is None:
+            return fallback
+        return _json_value(row.desired_state_json, fallback)
+
     def set_intent(
         self,
         session: Session,
@@ -190,11 +234,101 @@ class TmdbPreviewRepository:
         session.flush()
         return row
 
-    def list_intents(self, session: Session, *, status: str | None = None) -> list[TmdbPreviewIntent]:
+    def set_value_intent(
+        self,
+        session: Session,
+        *,
+        operation_type: str,
+        title_type: str,
+        tmdb_id: int,
+        desired: Any,
+        payload: dict[str, Any] | None = None,
+        season: int | None = None,
+        episode: int | None = None,
+        mapped_trakt_id: int | None = None,
+    ) -> TmdbPreviewIntent | None:
+        payload = dict(payload or {})
+        row = self.intent(
+            session,
+            operation_type=operation_type,
+            title_type=title_type,
+            tmdb_id=tmdb_id,
+            season=season,
+            episode=episode,
+        )
+        if desired is None:
+            if row is not None:
+                session.delete(row)
+                session.flush()
+            return None
+        if row is None:
+            row = TmdbPreviewIntent(
+                operation_type=operation_type,
+                title_type=title_type,
+                tmdb_id=int(tmdb_id),
+                season=season,
+                episode=episode,
+                base_state_json="null",
+                desired_state_json=json.dumps(desired),
+                payload_json=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                revision=1,
+                status="mapped_pending" if mapped_trakt_id else "local_only",
+                mapped_trakt_id=mapped_trakt_id,
+            )
+            session.add(row)
+            session.flush()
+            return row
+        row.desired_state_json = json.dumps(desired)
+        row.payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        row.revision = max(1, int(row.revision or 1) + 1)
+        if row.status == "exported":
+            row.status = "mapped_pending" if (mapped_trakt_id or row.mapped_trakt_id) else "local_only"
+        if mapped_trakt_id is not None:
+            row.mapped_trakt_id = int(mapped_trakt_id)
+            if row.status == "local_only":
+                row.status = "mapped_pending"
+        session.flush()
+        return row
+
+    def list_intents(
+        self,
+        session: Session,
+        *,
+        status: str | None = None,
+        operation_type: str | None = None,
+        title_type: str | None = None,
+        tmdb_id: int | None = None,
+    ) -> list[TmdbPreviewIntent]:
         statement = select(TmdbPreviewIntent).order_by(TmdbPreviewIntent.updated_at, TmdbPreviewIntent.id)
         if status:
             statement = statement.where(TmdbPreviewIntent.status == status)
+        if operation_type:
+            statement = statement.where(TmdbPreviewIntent.operation_type == str(operation_type))
+        if title_type:
+            statement = statement.where(TmdbPreviewIntent.title_type == str(title_type))
+        if tmdb_id is not None:
+            statement = statement.where(TmdbPreviewIntent.tmdb_id == int(tmdb_id))
         return list(session.scalars(statement))
+
+    def history_episode_states(
+        self,
+        session: Session,
+        *,
+        tmdb_id: int,
+    ) -> dict[tuple[int, int], bool]:
+        rows = session.scalars(
+            select(TmdbPreviewIntent).where(
+                TmdbPreviewIntent.operation_type == "history",
+                TmdbPreviewIntent.title_type == "show",
+                TmdbPreviewIntent.tmdb_id == int(tmdb_id),
+                TmdbPreviewIntent.season.is_not(None),
+                TmdbPreviewIntent.episode.is_not(None),
+            )
+        )
+        return {
+            (int(row.season), int(row.episode)): bool(_json_value(row.desired_state_json, False))
+            for row in rows
+        }
 
     def attach_mapping(self, session: Session, *, title_type: str, tmdb_id: int, trakt_id: int) -> int:
         rows = list(
@@ -269,11 +403,21 @@ class TmdbPreviewRepository:
             )
         )
 
+    def delete_release_state(self, session: Session, title_type: str, tmdb_id: int) -> bool:
+        row = self.release_state(session, title_type, tmdb_id)
+        if row is None:
+            return False
+        session.delete(row)
+        session.flush()
+        return True
+
     def set_release_acknowledged(self, session: Session, title_type: str, tmdb_id: int, acknowledged: bool) -> bool:
         row = self.release_state(session, title_type, tmdb_id)
         if row is None:
             return False
         row.acknowledged_at = datetime.now(tz=UTC).replace(tzinfo=None) if acknowledged else None
+        if not acknowledged:
+            row.last_sent_at = None
         session.flush()
         return True
 

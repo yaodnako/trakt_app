@@ -1,4 +1,4 @@
-{% macro render_matrix_grid(seasons, rows, layout, hidden=false) -%}
+{% macro render_matrix_grid(seasons, rows, layout, hidden=false, include_trakt=false) -%}
 <div class="title-matrix-grid-wrap" data-matrix-layout-panel="{{ layout }}"{% if hidden %} hidden{% endif %}>
     <table class="title-matrix-grid">
         <thead>
@@ -19,9 +19,11 @@
                     data-imdb-display="{{ season.imdb_avg_display }}"
                     data-imdb-state="{% if season.imdb_avg_rating is not none %}rated{% else %}unrated{% endif %}"
                     data-imdb-color="{{ season.imdb_avg_color }}"
+                    {% if include_trakt %}
                     data-trakt-display="{{ season.trakt_avg_display }}"
                     data-trakt-state="{% if season.trakt_avg_rating is not none %}rated{% else %}unrated{% endif %}"
                     data-trakt-color="{{ season.trakt_avg_color }}"
+                    {% endif %}
                     data-my-display="{{ season.my_avg_display }}"
                     data-my-state="{% if season.my_avg_rating is not none %}rated{% else %}unrated{% endif %}"
                     data-my-color="{{ season.my_avg_color }}"
@@ -48,10 +50,12 @@
                     data-imdb-state="{{ cell.imdb_state }}"
                     data-imdb-color="{{ cell.imdb_color }}"
                     data-imdb-tooltip="{{ cell.imdb_tooltip }}"
+                    {% if include_trakt %}
                     data-trakt-display="{{ cell.trakt_display_value }}"
                     data-trakt-state="{{ cell.trakt_state }}"
                     data-trakt-color="{{ cell.trakt_color }}"
                     data-trakt-tooltip="{{ cell.trakt_tooltip }}"
+                    {% endif %}
                     data-my-display="{{ cell.my_display_value }}"
                     data-my-state="{{ cell.my_state }}"
                     data-my-color="{{ cell.my_color }}"
@@ -69,17 +73,30 @@
 {%- endmacro %}
 {% set matrix_error = matrix_error_message if matrix_error_message is defined else (matrix.error_message if matrix else "") %}
 {% set imdb_layout_available = matrix.imdb_layout_available if matrix else true %}
-{% set use_imdb_seasons = (imdb_seasons_enabled if imdb_seasons_enabled is defined else true) and imdb_layout_available %}
+{% set supports_trakt_ratings = matrix and matrix.trakt_id and (trakt_ratings_enabled if trakt_ratings_enabled is defined else true) %}
+{% set supports_my_ratings = matrix and matrix.supports_my_ratings %}
+{% set supports_trakt_layout = supports_trakt_ratings and (trakt_season_layout_enabled if trakt_season_layout_enabled is defined else true) %}
+{% set use_imdb_seasons = imdb_layout_available and ((not supports_trakt_layout) or (imdb_seasons_enabled if imdb_seasons_enabled is defined else true)) %}
 {% if matrix %}
+{% set title_primary_rating = matrix.title_primary_rating %}
+{% set title_primary_votes = matrix.title_primary_votes %}
+{% set title_primary_provider = matrix.title_primary_provider or 'trakt' %}
+{% if not supports_trakt_ratings and title_primary_provider == 'trakt' %}
+    {% set title_primary_provider = 'imdb' %}
+    {% set title_primary_rating = matrix.title_imdb_rating %}
+    {% set title_primary_votes = matrix.title_imdb_votes %}
+{% endif %}
 <div
     data-title-matrix-title-rating-data
-    data-title-trakt-rating="{% if matrix.title_trakt_rating is not none %}{{ matrix.title_trakt_rating|rating_with_votes(matrix.title_trakt_votes) }}{% elif matrix.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"
+    data-title-primary-provider="{{ title_primary_provider }}"
+    data-title-primary-rating="{% if title_primary_rating is not none %}{{ title_primary_rating|rating_with_votes(title_primary_votes) }}{% elif matrix.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"
+    {% if supports_trakt_ratings %}data-title-trakt-rating="{% if matrix.title_trakt_rating is not none %}{{ matrix.title_trakt_rating|rating_with_votes(matrix.title_trakt_votes) }}{% elif matrix.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"{% endif %}
     data-title-imdb-rating="{% if matrix.title_imdb_rating is not none %}{{ matrix.title_imdb_rating|rating_with_votes(matrix.title_imdb_votes) }}{% elif matrix.title_ratings_status in ('checked_no_data', 'ready') %}n/a{% else %}Loading{% endif %}"
     hidden
 ></div>
 {% endif %}
 {% if matrix and matrix.has_episodes %}
-<div class="title-matrix-fragment is-hide-season-zero{% if use_imdb_seasons %} is-imdb-seasons{% endif %}" data-matrix-provider="{{ matrix.provider }}" data-imdb-layout-available="{{ '1' if imdb_layout_available else '0' }}" data-matrix-imdb-subtitle="IMDb episode ratings by season" data-matrix-trakt-subtitle="Trakt episode ratings by season" data-matrix-my-subtitle="My episode ratings by season">
+<div class="title-matrix-fragment is-hide-season-zero{% if use_imdb_seasons %} is-imdb-seasons{% endif %}" data-matrix-provider="{{ matrix.provider }}" data-imdb-layout-available="{{ '1' if imdb_layout_available else '0' }}" data-matrix-imdb-subtitle="IMDb episode ratings by season"{% if supports_trakt_ratings %} data-matrix-trakt-subtitle="Trakt episode ratings by season"{% endif %} data-matrix-my-subtitle="My episode ratings by season">
     {% if matrix_error %}
     <div class="title-matrix-inline-note">
         Latest refresh hit an error. Showing cached episode data.
@@ -87,18 +104,21 @@
     {% endif %}
     {% if not imdb_layout_available %}
     <div class="title-matrix-inline-note">
-        IMDb seasons are unavailable because this Trakt show combines multiple IMDb series. Trakt seasons are shown.
+        IMDb seasons are unavailable because this show combines multiple IMDb series. Existing episode numbering is shown.
     </div>
     {% endif %}
     <div class="title-matrix-options">
+        {% if supports_trakt_layout %}
         <label class="title-matrix-option">
             <input type="checkbox" data-imdb-seasons-toggle {% if use_imdb_seasons %}checked{% endif %}{% if not imdb_layout_available %} disabled data-layout-locked="1"{% endif %}>
             <span>IMDb seasons</span>
         </label>
+        {% endif %}
         <label class="title-matrix-option">
             <input type="checkbox" data-hide-season-zero-toggle checked>
             <span>Hide season 0</span>
         </label>
+        {% if supports_my_ratings %}
         <div class="title-matrix-option title-matrix-provider-option">
             <span>Ratings</span>
             <div class="title-matrix-provider-group" role="group" aria-label="Ratings provider">
@@ -119,7 +139,7 @@
                     >
                     <span class="visually-hidden">IMDb</span>
                 </button>
-                <button
+                {% if supports_trakt_ratings %}<button
                     type="button"
                     class="title-matrix-provider-toggle{% if matrix.provider == 'trakt' %} is-active{% endif %}"
                     data-title-matrix-provider-toggle
@@ -135,7 +155,7 @@
                         aria-hidden="true"
                     >
                     <span class="visually-hidden">Trakt</span>
-                </button>
+                </button>{% endif %}
                 <button
                     type="button"
                     class="title-matrix-provider-toggle"
@@ -149,6 +169,7 @@
                 </button>
             </div>
         </div>
+        {% endif %}
     </div>
     <div class="title-matrix-legend" aria-label="IMDb rating legend">
         {% for item in matrix.legend %}
@@ -159,9 +180,11 @@
         {% endfor %}
     </div>
     {% if imdb_layout_available %}
-    {{ render_matrix_grid(matrix.imdb_seasons or matrix.seasons, matrix.imdb_rows or matrix.rows, "imdb", not use_imdb_seasons) }}
+    {{ render_matrix_grid(matrix.imdb_seasons or matrix.seasons, matrix.imdb_rows or matrix.rows, "imdb", not use_imdb_seasons, supports_trakt_ratings) }}
     {% endif %}
-    {{ render_matrix_grid(matrix.seasons, matrix.rows, "trakt", use_imdb_seasons) }}
+    {% if supports_trakt_layout or not imdb_layout_available %}
+    {{ render_matrix_grid(matrix.seasons, matrix.rows, "trakt", use_imdb_seasons, supports_trakt_ratings) }}
+    {% endif %}
 </div>
 {% else %}
 <div class="title-matrix-empty-state">

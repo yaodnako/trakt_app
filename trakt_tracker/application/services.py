@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
 from threading import Lock, RLock
 from time import perf_counter
-from typing import Callable
+from typing import Any, Callable, cast
 
 from trakt_tracker.application.catalog import CatalogService
 from trakt_tracker.application.episode_ratings_matrix import EpisodeRatingsMatrixService
@@ -49,6 +49,7 @@ from trakt_tracker.config import (
     normalize_kinopoisk_domain_options,
     normalize_kinopoisk_domain_tail,
     normalize_catalog_provider_mode,
+    normalize_tmdb_proxy_url,
     resolved_tmdb_api_key,
     resolved_tmdb_read_access_token,
     resolved_trakt_client_id,
@@ -63,7 +64,7 @@ from trakt_tracker.domain import (
     ProgressView,
 )
 from trakt_tracker.infrastructure.keyring_store import TokenBundle, TokenStore
-from trakt_tracker.infrastructure.notifications import NotificationSender
+from trakt_tracker.infrastructure.notifications import NotificationMessage, NotificationSender
 from trakt_tracker.infrastructure.cache import BinaryCache, ProviderCache
 from trakt_tracker.infrastructure.artwork_cache import has_cached_image, is_trusted_image_url, warm_image_urls
 from trakt_tracker.infrastructure.artwork_queue import ArtworkQueue
@@ -176,6 +177,7 @@ class AuthService:
         kinopoisk_api_key: str | None = None,
         kinopoisk_domain_tail: str | None = None,
         kinopoisk_domain_options: str | None = None,
+        network_proxy_url: str | None = None,
     ) -> AppConfig:
         self._config.client_id = client_id.strip()
         if client_secret.strip():
@@ -192,6 +194,8 @@ class AuthService:
             self._config.kinopoisk_domain_options = ",".join(options)
         if kinopoisk_domain_tail is not None:
             self._config.kinopoisk_domain_tail = normalize_kinopoisk_domain_tail(kinopoisk_domain_tail)
+        if network_proxy_url is not None:
+            self._config.network_proxy_url = normalize_tmdb_proxy_url(network_proxy_url)
         options = normalize_kinopoisk_domain_options(self._config.kinopoisk_domain_options)
         selected = normalize_kinopoisk_domain_tail(self._config.kinopoisk_domain_tail)
         if selected not in options:
@@ -203,6 +207,10 @@ class AuthService:
         return self._config
 
     def get_client(self) -> TraktClient:
+        if normalize_catalog_provider_mode(
+            getattr(self._config, "catalog_provider_mode", "trakt")
+        ) != "trakt":
+            raise RuntimeError("Trakt client is disabled in TMDb mode.")
         with self._client_lock:
             if self._client is None:
                 client = self._client_factory(self._config)
@@ -385,7 +393,9 @@ class ProgressService:
         enrich_queue: EnrichQueueService | None = None,
         notification_repo: NotificationRepository | None = None,
         trakt_outbox=None,
+        tmdb_catalog: TmdbCatalogService | None = None,
     ) -> None:
+        self._auth = auth_service
         self._workflow = ProgressSyncWorkflow(
             db,
             auth_service,
@@ -402,7 +412,13 @@ class ProgressService:
             catalog=catalog,
             notification_repo=notification_repo,
             trakt_outbox=trakt_outbox,
+            episode_schedule_overlay=getattr(
+                tmdb_catalog,
+                "overlay_episode_row_air_dates",
+                None,
+            ),
         )
+        self._tmdb_catalog = tmdb_catalog
 
     def refresh_show_progress(
         self,
@@ -411,11 +427,19 @@ class ProgressService:
         fresh: bool = False,
         enrich_assets: bool = True,
     ) -> ProgressSnapshot:
-        return self._workflow.refresh_show_progress(
+        auth_config = getattr(getattr(self, "_auth", None), "config", None)
+        if normalize_catalog_provider_mode(
+            getattr(auth_config, "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            raise RuntimeError("Trakt progress refresh is disabled in TMDb mode.")
+        result = self._workflow.refresh_show_progress(
             trakt_id,
             fresh=fresh,
             enrich_assets=enrich_assets,
         )
+        if self._tmdb_catalog is not None:
+            self._tmdb_catalog.overlay_episode_air_dates([result])
+        return result
 
     def dashboard_progress(
         self,
@@ -426,13 +450,52 @@ class ProgressService:
         dropped_only: bool | None = None,
         limit: int | None = 50,
     ) -> list[ProgressSnapshot]:
-        return self._workflow.dashboard_progress(
+        auth_config = getattr(getattr(self, "_auth", None), "config", None)
+        tmdb_local_mode = normalize_catalog_provider_mode(
+            getattr(auth_config, "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview"
+        if tmdb_local_mode:
+            if self._tmdb_catalog is None:
+                return []
+            return self._tmdb_catalog.local_progress_items(
+                view=view,
+                sort_mode=sort_mode,
+                descending=descending,
+                limit=limit,
+            )
+        tmdb_episode_sort = bool(
+            self._tmdb_catalog is not None
+            and self._tmdb_catalog.episode_schedule_enabled()
+            and ProgressRepository.normalize_sort_mode(sort_mode) is ProgressSortMode.EPISODE_RELEASE
+        )
+        result = self._workflow.dashboard_progress(
             view=view,
             sort_mode=sort_mode,
             descending=descending,
             dropped_only=dropped_only,
-            limit=limit,
+            limit=None if tmdb_episode_sort else limit,
         )
+        if self._tmdb_catalog is not None:
+            self._tmdb_catalog.overlay_episode_air_dates(result)
+        if tmdb_episode_sort:
+            dated = [item for item in result if item.next_episode and item.next_episode.first_aired]
+            undated = [item for item in result if not item.next_episode or not item.next_episode.first_aired]
+
+            def episode_air_date(item: ProgressSnapshot) -> datetime:
+                assert item.next_episode is not None
+                assert item.next_episode.first_aired is not None
+                value = item.next_episode.first_aired
+                return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+            dated.sort(
+                key=episode_air_date,
+                reverse=bool(descending),
+            )
+            undated.sort(key=lambda item: (item.title.casefold(), int(item.trakt_id)))
+            result = [*dated, *undated]
+            if limit is not None:
+                result = result[: max(0, int(limit))]
+        return result
 
     def select_title_enrich_keys(
         self,
@@ -476,7 +539,19 @@ class ProgressService:
         force_full_assets: bool = False,
         defer_assets: bool = False,
     ) -> list[ProgressSnapshot]:
-        return self._workflow.sync_progress(
+        auth_config = getattr(getattr(self, "_auth", None), "config", None)
+        if normalize_catalog_provider_mode(
+            getattr(auth_config, "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            if self._tmdb_catalog is None:
+                return []
+            return self._tmdb_catalog.local_progress_items(
+                view=view,
+                sort_mode=sort_mode,
+                descending=descending,
+                limit=None,
+            )
+        result = self._workflow.sync_progress(
             trakt_ids,
             view=view,
             sort_mode=sort_mode,
@@ -486,17 +561,36 @@ class ProgressService:
             force_full_assets=force_full_assets,
             defer_assets=defer_assets,
         )
+        if self._tmdb_catalog is not None:
+            self._tmdb_catalog.overlay_episode_air_dates(result)
+        return result
 
     def pause_show(self, trakt_id: int, *, progress: ProgressSnapshot | None = None) -> None:
+        if normalize_catalog_provider_mode(
+            getattr(getattr(getattr(self, "_auth", None), "config", None), "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            return
         self._workflow.pause_show(trakt_id, progress=progress)
 
     def resume_show(self, trakt_id: int) -> None:
+        if normalize_catalog_provider_mode(
+            getattr(getattr(getattr(self, "_auth", None), "config", None), "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            return
         self._workflow.resume_show(trakt_id)
 
     def drop_show(self, trakt_id: int) -> None:
+        if normalize_catalog_provider_mode(
+            getattr(getattr(getattr(self, "_auth", None), "config", None), "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            return
         self._workflow.drop_show(trakt_id)
 
     def undrop_show(self, trakt_id: int) -> None:
+        if normalize_catalog_provider_mode(
+            getattr(getattr(getattr(self, "_auth", None), "config", None), "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            return
         self._workflow.undrop_show(trakt_id)
 
 
@@ -529,7 +623,11 @@ class NotificationService:
         progress_service: ProgressService | None = None,
         tmdb_catalog: TmdbCatalogService | None = None,
     ) -> None:
+        self._db = db
         self._auth = auth_service
+        self._config_store = config_store
+        self._notification_repo = notification_repo
+        self._sender = sender
         self._workflow = NotificationRefreshWorkflow(
             db,
             auth_service,
@@ -538,6 +636,7 @@ class NotificationService:
             episode_repo,
             progress_repo,
             sender,
+            episode_schedule_overlay=getattr(tmdb_catalog, "overlay_episode_air_dates", None),
         )
         self._release_tracking = release_tracking
         self._progress_service = progress_service
@@ -546,6 +645,171 @@ class NotificationService:
         self._activity_seq = 0
         self._activity_events: deque[dict] = deque(maxlen=32)
         self._pending_sources: set[str] = set()
+
+    def _tmdb_preview_mode(self) -> bool:
+        return normalize_catalog_provider_mode(
+            getattr(getattr(self._auth, "config", None), "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview"
+
+    def _tmdb_progress_items(self, view: str) -> list[ProgressSnapshot]:
+        if self._tmdb_catalog is None:
+            return []
+        try:
+            return list(
+                self._tmdb_catalog.local_progress_items(
+                    view=view,
+                    sort_mode="episode_release",
+                    descending=True,
+                    limit=None,
+                )
+                or []
+            )
+        except Exception:
+            return []
+
+    def _notification_config(self):
+        reader = getattr(self._config_store, "load", None)
+        if callable(reader):
+            try:
+                return reader()
+            except Exception:
+                pass
+        return getattr(self._auth, "config", None) or type("NotificationConfig", (), {})()
+
+    @staticmethod
+    def _tmdb_notification_show_id(show_trakt_id: int, episode: EpisodeSummary | None = None) -> int:
+        supplied = int(show_trakt_id or 0)
+        if supplied < 0:
+            return supplied
+        episode_id = int(getattr(episode, "trakt_id", 0) or 0) if episode is not None else 0
+        if episode_id < 0:
+            tmdb_id = abs(episode_id) // 1_000_000
+            if tmdb_id > 0:
+                return -tmdb_id
+        return -supplied if supplied > 0 else 0
+
+    def _tmdb_unseen_episode_ids(self) -> set[int]:
+        raw_session_factory = getattr(self._db, "session", None)
+        if not callable(raw_session_factory):
+            return set()
+        session_factory = cast(Callable[[], Any], raw_session_factory)
+        with session_factory() as session:
+            return {
+                int(value)
+                for value in self._notification_repo.unseen_episode_ids(session)
+                if int(value) < 0
+            }
+
+    def _poll_tmdb_upcoming(self, *, send_native: bool) -> list[dict]:
+        active_items = self._tmdb_progress_items("active")
+        paused_items = self._tmdb_progress_items("paused")
+        paused_show_ids = {
+            self._tmdb_notification_show_id(int(getattr(item, "tmdb_id", 0) or 0), item.next_episode)
+            for item in paused_items
+            if getattr(item, "next_episode", None) is not None
+        }
+        progress_items = [*active_items, *paused_items]
+        now = datetime.now(tz=UTC)
+        config = self._notification_config()
+        repeat_interval = timedelta(minutes=max(1, int(getattr(config, "notification_repeat_minutes", 5) or 5)))
+        release_delay = timedelta(
+            minutes=max(0, int(getattr(config, "notification_release_delay_minutes", 120) or 0))
+        )
+        sent: list[dict] = []
+        raw_session_factory = getattr(self._db, "session", None)
+        if not callable(raw_session_factory):
+            return sent
+        session_factory = cast(Callable[[], Any], raw_session_factory)
+        with session_factory() as session:
+            for item in progress_items:
+                episode = getattr(item, "next_episode", None)
+                tmdb_id = int(getattr(item, "tmdb_id", 0) or 0)
+                episode_id = int(getattr(episode, "trakt_id", 0) or 0)
+                if episode is None or tmdb_id <= 0 or episode_id >= 0:
+                    continue
+                first_aired = getattr(episode, "first_aired", None)
+                if first_aired is None:
+                    continue
+                release_at = first_aired.replace(tzinfo=UTC) if first_aired.tzinfo is None else first_aired.astimezone(UTC)
+                show_id = -tmdb_id
+                if release_at > now:
+                    continue
+                message = f"S{int(episode.season):02d}E{int(episode.number):02d} {episode.title}"
+                row = self._notification_repo.get_log(session, show_id, episode_id)
+                if row is None:
+                    self._notification_repo.track_released(
+                        session,
+                        show_trakt_id=show_id,
+                        show_title=str(getattr(item, "title", "") or ""),
+                        episode_trakt_id=episode_id,
+                        season=int(episode.season),
+                        episode=int(episode.number),
+                        message=message,
+                        released_at=release_at,
+                    )
+                    row = self._notification_repo.get_log(session, show_id, episode_id)
+                if show_id in paused_show_ids:
+                    self._notification_repo.mark_seen(
+                        session,
+                        show_trakt_id=show_id,
+                        show_title=str(getattr(item, "title", "") or ""),
+                        episode_trakt_id=episode_id,
+                        season=int(episode.season),
+                        episode=int(episode.number),
+                        message=message,
+                    )
+                    continue
+                if now < release_at + release_delay or row is None or row.seen_at is not None:
+                    continue
+                last_sent_at = row.last_sent_at
+                if last_sent_at is not None:
+                    last_sent_at = last_sent_at.replace(tzinfo=UTC) if last_sent_at.tzinfo is None else last_sent_at.astimezone(UTC)
+                    if now - last_sent_at < repeat_interval:
+                        continue
+                if send_native:
+                    self._sender.send(
+                        NotificationMessage(title=str(getattr(item, "title", "") or ""), body=message)
+                    )
+                self._notification_repo.mark_sent(
+                    session,
+                    show_trakt_id=show_id,
+                    show_title=str(getattr(item, "title", "") or ""),
+                    episode_trakt_id=episode_id,
+                    season=int(episode.season),
+                    episode=int(episode.number),
+                    message=message,
+                )
+                sent.append({"show_title": str(getattr(item, "title", "") or ""), "message": message, "source": "progress"})
+        return sent
+
+    def _tmdb_has_due_unseen_current_episode(self) -> bool:
+        current_ids = {
+            int(getattr(item.next_episode, "trakt_id", 0) or 0): item.next_episode
+            for view in ("active", "paused")
+            for item in self._tmdb_progress_items(view)
+            if getattr(item, "next_episode", None) is not None
+        }
+        if not current_ids:
+            return False
+        config = self._notification_config()
+        release_delay = timedelta(
+            minutes=max(0, int(getattr(config, "notification_release_delay_minutes", 120) or 0))
+        )
+        now = datetime.now(tz=UTC)
+        raw_session_factory = getattr(self._db, "session", None)
+        if not callable(raw_session_factory):
+            return False
+        session_factory = cast(Callable[[], Any], raw_session_factory)
+        with session_factory() as session:
+            for row in self._notification_repo.list_unseen(session):
+                episode = current_ids.get(int(row.episode_trakt_id))
+                if episode is None:
+                    continue
+                first_aired = getattr(episode, "first_aired", None) or row.sent_at
+                release_at = first_aired.replace(tzinfo=UTC) if first_aired.tzinfo is None else first_aired.astimezone(UTC)
+                if now >= release_at + release_delay:
+                    return True
+        return False
 
     def poll_upcoming(
         self,
@@ -559,21 +823,32 @@ class NotificationService:
         ) == "tmdb_preview"
         auth_status_reader = getattr(self._auth, "is_authorized", None)
         can_refresh_trakt = bool(
-            refresh_remote and (auth_status_reader() if callable(auth_status_reader) else True)
+            not preview_mode
+            and refresh_remote
+            and (auth_status_reader() if callable(auth_status_reader) else True)
         )
         if can_refresh_trakt and self._progress_service is not None:
             try:
                 self._progress_service.sync_progress(dropped_only=False)
             except Exception:
                 can_refresh_trakt = False
-        try:
-            items = self._workflow.poll_upcoming(
-                send_native=send_native,
-                refresh_remote=can_refresh_trakt,
-            )
-        except Exception:
-            # Preserve local episode notifications if an online refresh fails.
-            items = self._workflow.poll_upcoming(send_native=send_native, refresh_remote=False)
+        if preview_mode and refresh_remote and self._progress_service is not None and self._tmdb_catalog is not None:
+            try:
+                progress_items = self._progress_service.dashboard_progress(limit=None)
+                self._tmdb_catalog.refresh_episode_air_dates(progress_items)
+            except Exception:
+                pass
+        if preview_mode:
+            items = self._poll_tmdb_upcoming(send_native=send_native)
+        else:
+            try:
+                items = self._workflow.poll_upcoming(
+                    send_native=send_native,
+                    refresh_remote=can_refresh_trakt,
+                )
+            except Exception:
+                # Preserve local episode notifications if an online refresh fails.
+                items = self._workflow.poll_upcoming(send_native=send_native, refresh_remote=False)
         if self._release_tracking is not None and not preview_mode:
             try:
                 items.extend(
@@ -598,13 +873,49 @@ class NotificationService:
         return items
 
     def mark_episode_seen(self, *, show_trakt_id: int, show_title: str, episode: EpisodeSummary) -> None:
-        self._workflow.mark_episode_seen(show_trakt_id=show_trakt_id, show_title=show_title, episode=episode)
+        if self._tmdb_preview_mode():
+            show_id = self._tmdb_notification_show_id(show_trakt_id, episode)
+            episode_id = int(getattr(episode, "trakt_id", 0) or 0)
+            if show_id == 0 or episode_id >= 0:
+                return
+            message = f"S{episode.season:02d}E{episode.number:02d} {episode.title}"
+            with self._db.session() as session:
+                self._notification_repo.mark_seen(
+                    session,
+                    show_trakt_id=show_id,
+                    show_title=show_title,
+                    episode_trakt_id=episode_id,
+                    season=episode.season,
+                    episode=episode.number,
+                    message=message,
+                )
+        else:
+            self._workflow.mark_episode_seen(show_trakt_id=show_trakt_id, show_title=show_title, episode=episode)
         self.refresh_pending_sources()
 
     def unseen_episode_ids(self) -> set[int]:
+        if self._tmdb_preview_mode():
+            return self._tmdb_unseen_episode_ids()
         return self._workflow.unseen_episode_ids()
 
     def upcoming_items(self) -> list[dict]:
+        if self._tmdb_preview_mode():
+            result: list[dict] = []
+            for item in self._tmdb_progress_items("active"):
+                episode = getattr(item, "next_episode", None)
+                if episode is None:
+                    continue
+                result.append(
+                    {
+                        "show_title": str(getattr(item, "title", "") or ""),
+                        "episode_trakt_id": int(getattr(episode, "trakt_id", 0) or 0),
+                        "episode_title": str(getattr(episode, "title", "") or ""),
+                        "season": int(episode.season),
+                        "episode": int(episode.number),
+                        "first_aired": getattr(episode, "first_aired", None),
+                    }
+                )
+            return result
         return self._workflow.upcoming_items()
 
     def record_activity(self, items: list[dict]) -> int:
@@ -635,17 +946,19 @@ class NotificationService:
 
     def refresh_pending_sources(self) -> list[str]:
         pending: set[str] = set()
-        if self._workflow.has_due_unseen_current_episode():
+        if self._tmdb_preview_mode():
+            if self._tmdb_has_due_unseen_current_episode():
+                pending.add("progress")
+        elif self._workflow.has_due_unseen_current_episode():
             pending.add("progress")
-        if self._release_tracking is not None and self._release_tracking.has_due_unacknowledged_release():
-            pending.add("release")
         auth_config = getattr(self._auth, "config", None)
-        if (
-            self._tmdb_catalog is not None
-            and normalize_catalog_provider_mode(getattr(auth_config, "catalog_provider_mode", "trakt"))
-            == "tmdb_preview"
-            and self._tmdb_catalog.has_due_unacknowledged_release()
-        ):
+        preview_mode = normalize_catalog_provider_mode(
+            getattr(auth_config, "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview"
+        if preview_mode:
+            if self._tmdb_catalog is not None and self._tmdb_catalog.has_due_unacknowledged_release():
+                pending.add("release")
+        elif self._release_tracking is not None and self._release_tracking.has_due_unacknowledged_release():
             pending.add("release")
         with self._activity_lock:
             self._pending_sources = pending
@@ -714,6 +1027,8 @@ class SyncService:
         )
 
     def initial_import(self, *, status_callback=None, defer_enrichment: bool = False) -> None:
+        if not self._trakt_mode_enabled():
+            return
         self._workflow.initial_import(
             status_callback=status_callback,
             defer_enrichment=defer_enrichment,
@@ -721,6 +1036,8 @@ class SyncService:
         self._reconcile_tmdb_preview_mappings()
 
     def refresh_history(self, *, force_full_assets: bool = False, status_callback=None) -> None:
+        if not self._trakt_mode_enabled():
+            return
         self._workflow.refresh_history(force_full_assets=force_full_assets, status_callback=status_callback)
         self._reconcile_tmdb_preview_mappings()
 
@@ -729,6 +1046,8 @@ class SyncService:
         self.sync_trakt_data(status_callback=status_callback)
 
     def sync_trakt_data(self, *, status_callback=None) -> None:
+        if not self._trakt_mode_enabled():
+            return
         def sync_all() -> None:
             self.refresh_history(
                 force_full_assets=False,
@@ -749,6 +1068,8 @@ class SyncService:
         )
 
     def sync_assets_backfill(self, *, status_callback=None) -> None:
+        if not self._trakt_mode_enabled():
+            return
         self._run_with_enrichment_barrier(
             "Metadata backfill",
             lambda: self._sync_assets(
@@ -764,6 +1085,8 @@ class SyncService:
         )
 
     def sync_assets_timeout_only(self, *, status_callback=None) -> None:
+        if not self._trakt_mode_enabled():
+            return
         self._run_with_enrichment_barrier(
             "Metadata retry",
             lambda: self._sync_assets(
@@ -779,6 +1102,8 @@ class SyncService:
         )
 
     def sync_assets_repair(self, *, status_callback=None) -> None:
+        if not self._trakt_mode_enabled():
+            return
         self._run_with_enrichment_barrier(
             "Metadata recheck",
             lambda: self._sync_assets(
@@ -794,11 +1119,21 @@ class SyncService:
         )
 
     def maybe_refresh_history(self) -> bool:
+        if not self._trakt_mode_enabled():
+            return False
         return self._workflow.maybe_refresh_history()
 
     def sync_updates(self) -> None:
+        if not self._trakt_mode_enabled():
+            return
         self._workflow.sync_updates()
         self._reconcile_tmdb_preview_mappings()
+
+    def _trakt_mode_enabled(self) -> bool:
+        config = getattr(getattr(self, "_auth", None), "config", None)
+        return normalize_catalog_provider_mode(
+            getattr(config, "catalog_provider_mode", "trakt")
+        ) == "trakt"
 
     def _reconcile_tmdb_preview_mappings(self) -> None:
         tmdb_catalog = getattr(self, "_tmdb_catalog", None)
@@ -854,16 +1189,22 @@ class SyncService:
         return self._imdb_client.last_updated_text()
 
     def repair_legacy_episode_history(self) -> bool:
+        if not self._trakt_mode_enabled():
+            return False
         return self._workflow.repair_legacy_episode_history()
 
     def refresh_show(self, trakt_id: int) -> ProgressSnapshot:
+        if not self._trakt_mode_enabled():
+            raise RuntimeError("Trakt progress refresh is disabled in TMDb mode.")
         return self._workflow.refresh_show(trakt_id)
 
     def dashboard_state(self) -> DashboardState:
+        if not self._trakt_mode_enabled():
+            return DashboardState()
         return self._workflow.dashboard_state()
 
     def enqueue_due_background_trakt_episode_ratings(self, *, limit: int = 200) -> int:
-        if self._enrich_queue is None or not self._auth.is_authorized():
+        if not self._trakt_mode_enabled() or self._enrich_queue is None or not self._auth.is_authorized():
             return 0
         batch_limit = max(1, int(limit or 1))
         with self._db.session() as session:
@@ -922,6 +1263,7 @@ class SyncService:
                 timeout=timeout,
                 max_workers=max_workers,
                 skip_cached=True,
+                proxy_url=getattr(self._auth.config, "network_proxy_url", ""),
             )
         else:
             warm_result = {
@@ -1089,7 +1431,13 @@ class SyncService:
             if self._image_queue is not None:
                 self._image_queue.submit(poster_url, priority=3)
             else:
-                warm_image_urls(self._image_cache, [poster_url], timeout=8, max_workers=1)
+                warm_image_urls(
+                    self._image_cache,
+                    [poster_url],
+                    timeout=8,
+                    max_workers=1,
+                    proxy_url=getattr(self._auth.config, "network_proxy_url", ""),
+                )
 
     def _warm_episode_still(self, show_trakt_id: int, season: int, episode: int) -> None:
         with self._db.session() as session:
@@ -1099,7 +1447,13 @@ class SyncService:
             if self._image_queue is not None:
                 self._image_queue.submit(still_url, priority=3)
             else:
-                warm_image_urls(self._image_cache, [still_url], timeout=8, max_workers=1)
+                warm_image_urls(
+                    self._image_cache,
+                    [still_url],
+                    timeout=8,
+                    max_workers=1,
+                    proxy_url=getattr(self._auth.config, "network_proxy_url", ""),
+                )
 
 
 class _ManagedTMDbClientFactory:
@@ -1113,7 +1467,7 @@ class _ManagedTMDbClientFactory:
     def __init__(self, *, cache_provider: str = "tmdb") -> None:
         self._lock = Lock()
         self._client: TMDbClient | None = None
-        self._signature: tuple[str, str, int] | None = None
+        self._signature: tuple[str, str, int, str] | None = None
         self._retired_clients: list[TMDbClient] = []
         self._cache_provider = cache_provider
 
@@ -1122,6 +1476,7 @@ class _ManagedTMDbClientFactory:
             resolved_tmdb_api_key(config),
             resolved_tmdb_read_access_token(config),
             int(config.cache_ttl_hours),
+            normalize_tmdb_proxy_url(getattr(config, "network_proxy_url", "")),
         )
         with self._lock:
             if self._client is None or self._signature != signature:
@@ -1132,6 +1487,7 @@ class _ManagedTMDbClientFactory:
                     read_access_token=signature[1],
                     cache_ttl_hours=signature[2],
                     cache_provider=self._cache_provider,
+                    proxy_url=signature[3],
                 )
                 self._signature = signature
             return self._client
@@ -1178,9 +1534,15 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
     tmdb_catalog_factory = _ManagedTMDbClientFactory(cache_provider="tmdb/catalog")
 
     auth = AuthService(config_store, tokens, client_factory)
+
     trakt_outbox = TraktOutboxService(db, auth, trakt_outbox_repo, episode_repo, sync_state)
     cache = CacheService(auth.config.active_slug)
-    image_queue = ArtworkQueue(BinaryCache("images"), max_workers=4, timeout=8)
+    image_queue = ArtworkQueue(
+        BinaryCache("images"),
+        max_workers=4,
+        timeout=8,
+        proxy_url_provider=lambda: getattr(auth.config, "network_proxy_url", ""),
+    )
     imdb_client = IMDbDatasetClient(cache_ttl_hours=config_store.load().cache_ttl_hours)
     imdb_reconciliation = EpisodeIMDbReconciliationService(db, episode_repo, imdb_client)
     episode_metadata = EpisodeMetadataService(
@@ -1264,6 +1626,15 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         max_workers=2,
     )
     play = PlayService(auth)
+    tmdb_catalog = TmdbCatalogService(
+        db,
+        auth,
+        tmdb_catalog_factory,
+        titles,
+        tmdb_preview_repo,
+        trakt_outbox=trakt_outbox,
+        imdb_client=imdb_client,
+    )
     progress_service = ProgressService(
         db,
         auth,
@@ -1280,6 +1651,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         catalog,
         notification_repo=notification_repo,
         trakt_outbox=trakt_outbox,
+        tmdb_catalog=tmdb_catalog,
     )
     notification_sender = NotificationSender()
     release_tracking = ReleaseTrackingService(
@@ -1291,15 +1663,7 @@ def build_services(config_store: ConfigStore, db: Database) -> ServiceContainer:
         notification_sender,
         titles=titles,
         trakt_outbox=trakt_outbox,
-    )
-    tmdb_catalog = TmdbCatalogService(
-        db,
-        auth,
-        tmdb_catalog_factory,
-        titles,
-        tmdb_preview_repo,
-        trakt_outbox=trakt_outbox,
-        imdb_client=imdb_client,
+        episode_schedule_overlay=tmdb_catalog.overlay_episode_air_dates,
     )
     tmdb_catalog.set_legacy_services(
         catalog=catalog,

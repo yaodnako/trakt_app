@@ -230,6 +230,52 @@ def test_progress_badge_counts_released_next_titles_and_ignores_removed_year_fil
         db.close()
 
 
+def test_progress_badge_applies_current_episode_schedule_before_counting() -> None:
+    with TemporaryDirectory() as directory:
+        db = Database(Path(directory) / "test.sqlite3")
+        db.create_schema()
+        progress_repo = ProgressRepository()
+        with db.session() as session:
+            progress_repo.upsert_progress(
+                session,
+                ProgressSnapshot(
+                    trakt_id=9,
+                    title="Show",
+                    completed=1,
+                    aired=2,
+                    percent_completed=50,
+                    next_episode=EpisodeSummary(
+                        trakt_id=99,
+                        season=1,
+                        number=2,
+                        title="Next",
+                        first_aired=datetime.now(tz=UTC) - timedelta(days=1),
+                    ),
+                ),
+            )
+        overlay_calls: list[list[int]] = []
+
+        def apply_current_schedule(items) -> None:
+            overlay_calls.append([int(item.trakt_id) for item in items])
+            items[0].next_episode.first_aired = datetime.now(tz=UTC) + timedelta(days=3)
+
+        service = ReleaseTrackingService(
+            db,
+            SimpleNamespace(),
+            SimpleNamespace(load=lambda: AppConfig(hide_upcoming_in_progress=True)),
+            ReleaseTrackingRepository(),
+            progress_repo,
+            _Sender(),
+            episode_schedule_overlay=apply_current_schedule,
+        )
+
+        try:
+            assert service.progress_waiting_count() == 0
+            assert overlay_calls == [[9]]
+        finally:
+            db.close()
+
+
 def test_progress_badge_excludes_paused_and_dropped_titles() -> None:
     with TemporaryDirectory() as directory:
         db = Database(Path(directory) / "test.sqlite3")
@@ -357,9 +403,13 @@ def test_release_notification_source_requires_unacknowledged_item_past_delay() -
             row.release_at = (datetime.now(tz=UTC) - timedelta(minutes=121)).replace(tzinfo=None)
         assert service.has_due_unacknowledged_release() is True
         assert service.matured_release_keys() == {("movie", 1)}
+        assert service.notified_release_keys() == set()
+        assert len(service.poll(send_native=False, refresh_remote=False)) == 1
+        assert service.notified_release_keys() == {("movie", 1)}
         assert service.set_acknowledged("movie", 1, acknowledged=True) is True
         assert service.has_due_unacknowledged_release() is False
         assert service.matured_release_keys() == {("movie", 1)}
+        assert service.notified_release_keys() == set()
         db.close()
 
 

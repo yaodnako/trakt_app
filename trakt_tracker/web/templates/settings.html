@@ -2,7 +2,9 @@
 
 {% block content %}
 {% set queue_status = trakt_sync_status|default({}) %}
+{% set tmdb_mode = catalog_provider_mode == 'tmdb_preview' %}
 <section class="panel">
+    {% if not tmdb_mode %}
     <section class="settings-accounts">
         <div class="settings-accounts-head">
             <strong>Trakt accounts</strong>
@@ -49,6 +51,7 @@
     <form id="trakt-defaults-form" method="post" action="/settings/provider-defaults">
         <input type="hidden" name="provider" value="trakt">
     </form>
+    {% endif %}
     <form id="tmdb-defaults-form" method="post" action="/settings/provider-defaults">
         <input type="hidden" name="provider" value="tmdb">
     </form>
@@ -80,13 +83,13 @@
                         <span>Enable debug toasts</span>
                     </label>
                     <label>
-                        <span>Catalog source</span>
+                        <span>Tracking mode</span>
                         <select name="catalog_provider_mode">
-                            <option value="trakt" {% if catalog_provider_mode == 'trakt' %}selected{% endif %}>Trakt (current)</option>
-                            <option value="tmdb_preview" {% if catalog_provider_mode == 'tmdb_preview' %}selected{% endif %}>TMDb preview</option>
+                            <option value="tmdb_preview" {% if catalog_provider_mode == 'tmdb_preview' %}selected{% endif %}>Local + TMDb</option>
+                            <option value="trakt" {% if catalog_provider_mode == 'trakt' %}selected{% endif %}>Trakt</option>
                         </select>
                     </label>
-                    <p class="settings-hint settings-field-span">TMDb preview changes Search, Explore and Releases only. History, Progress and Watchlist remain Trakt/local.</p>
+                    <p class="settings-hint settings-field-span">Local mode uses TMDb for catalog data. SQLite remains the source of truth in every mode; provider writes run only in Trakt mode.</p>
                 </div>
             </section>
 
@@ -149,12 +152,14 @@
         </div>
 
         <details class="settings-provider-details settings-collapsible">
-            <summary>Provider credentials <span>{{ credentials_source }} Trakt · {{ 'configured' if tmdb_configured else 'missing' }} TMDb</span></summary>
+            <summary>{{ 'TMDb credentials' if tmdb_mode else 'Provider credentials' }} <span>{% if not tmdb_mode %}{{ credentials_source }} Trakt · {% endif %}{{ 'configured' if tmdb_configured else 'missing' }} TMDb</span></summary>
             <div class="settings-provider-grid">
+                {% if not tmdb_mode %}
                 <label><span>Client ID</span><input type="text" name="client_id" value="{{ config.client_id }}"></label>
                 <label><span>Client Secret</span><input type="password" name="client_secret" value="" autocomplete="off" placeholder="{{ 'Saved override — leave blank to keep' if config.client_secret else 'Leave blank to use application default' }}"></label>
                 <label><span>Redirect URI</span><input type="text" name="redirect_uri" value="{{ config.redirect_uri }}"></label>
                 <button type="submit" class="button ghost settings-default-button" form="trakt-defaults-form">Use application Trakt defaults</button>
+                {% endif %}
                 <label><span>TMDb API Key</span><input type="password" name="tmdb_api_key" value="" autocomplete="off" placeholder="{{ 'Saved override — leave blank to keep' if config.tmdb_api_key else 'Leave blank to use application default' }}"></label>
                 <label><span>TMDb Read Token</span><input type="password" name="tmdb_read_access_token" value="" autocomplete="off" placeholder="{{ 'Saved override — leave blank to keep' if config.tmdb_read_access_token else 'Leave blank to use application default' }}"></label>
                 <button type="submit" class="button ghost settings-default-button" form="tmdb-defaults-form">Use application TMDb defaults</button>
@@ -164,6 +169,8 @@
         <details class="settings-provider-details settings-collapsible">
             <summary>Advanced sync and cache <span>Performance limits</span></summary>
             <div class="settings-field-grid settings-field-grid-two">
+                <label class="settings-field-span"><span>TMDb SOCKS5 proxy</span><input type="text" name="network_proxy_url" value="{{ config.network_proxy_url }}" placeholder="socks5h://127.0.0.1:10808" autocomplete="off"></label>
+                <p class="settings-hint settings-field-span">Leave blank for the normal direct pooled connection. When set, only TMDb API and TMDb artwork background downloads use this proxy; IMDb and other providers stay direct.</p>
                 <label><span>Cache TTL (hours)</span><input type="number" name="cache_ttl_hours" min="1" max="168" value="{{ config.cache_ttl_hours }}"></label>
                 <label><span>Catalog IMDb scan page limit</span><input type="number" name="explore_imdb_scan_page_limit" min="1" max="100" value="{{ config.explore_imdb_scan_page_limit }}"></label>
                 <label><span>Polling interval (minutes)</span><input type="number" name="poll_interval_minutes" min="5" max="240" value="{{ config.poll_interval_minutes }}"></label>
@@ -180,6 +187,7 @@
         </div>
     </form>
 
+    {% if not tmdb_mode %}
     <section class="settings-card settings-data-update" data-trakt-sync-settings>
         <div class="settings-card-head">
             <div><p class="eyebrow">Trakt</p><h2>Synchronization queue</h2></div>
@@ -193,8 +201,9 @@
         </div>
         <p class="settings-hint" data-trakt-sync-error{% if not queue_status.get('last_error') %} hidden{% endif %}>{{ queue_status.get('last_error', '') }}</p>
         <div class="settings-inline-actions">
-            <button type="button" class="button ghost" data-trakt-sync-retry>Retry Trakt sync</button>
+            <button type="button" class="button ghost" data-trakt-sync-retry {% if catalog_provider_mode != 'trakt' %}disabled{% endif %}>Retry Trakt sync</button>
         </div>
+        {% if catalog_provider_mode != 'trakt' %}<p class="settings-hint">The queue is preserved and resumes only after switching back to Trakt mode.</p>{% endif %}
         <div class="settings-sync-log" data-trakt-sync-items></div>
     </section>
 
@@ -205,21 +214,22 @@
         </div>
         <div class="settings-operation-grid">
             <form method="post" action="/settings/full-sync">
-                <button type="submit" class="button" data-sync-task="full_sync" data-idle-label="Update Trakt data">Update Trakt data</button>
+                <button type="submit" class="button" data-sync-task="full_sync" data-idle-label="Update Trakt data" {% if catalog_provider_mode != 'trakt' %}disabled{% endif %}>Update Trakt data</button>
             </form>
         </div>
         <p class="settings-hint">Updates history, ratings, and progress. Images continue downloading independently in the background.</p>
     </section>
+    {% endif %}
 
     <section class="settings-card settings-data-update">
         <div class="settings-card-head">
-            <div><p class="eyebrow">TMDb preview</p><h2>Local preview data</h2></div>
+            <div><p class="eyebrow">TMDb + local</p><h2>TMDb catalog cache</h2></div>
             <span class="settings-sync-pill">{{ 'Configured' if tmdb_configured else 'Credentials missing' }}</span>
         </div>
-        <p class="settings-hint">Preview actions stay in the profile database until a Trakt identity is known. Clearing this removes only TMDb preview state and catalog cache.</p>
-        <form method="post" action="/settings/tmdb-preview/reset" onsubmit="return window.confirm('Clear TMDb preview state and cache?');">
+        <p class="settings-hint">Watched state, ratings, Watchlist, Releases, and Progress stay in the profile database. Clearing this refresh cache never removes that local activity.</p>
+        <form method="post" action="/settings/tmdb-preview/reset" onsubmit="return window.confirm('Clear only the TMDb catalog response cache? Local activity will be preserved.');">
             <input type="hidden" name="confirm" value="1">
-            <button type="submit" class="button ghost">Clear TMDb preview data</button>
+            <button type="submit" class="button ghost">Clear TMDb cache</button>
         </form>
     </section>
 
@@ -262,7 +272,7 @@
             <p class="settings-sync-current" data-progress-last>Last progress: n/a</p>
             <p class="settings-sync-current" data-refresh-last>Last refresh: n/a</p>
             <div class="settings-sync-log">
-                <div class="settings-sync-log-line" data-provider-health>Providers: ...</div>
+                {% if not tmdb_mode %}<div class="settings-sync-log-line" data-provider-health>Providers: ...</div>{% endif %}
                 <div class="settings-sync-log-line" data-queue-health>Queue: ...</div>
                 <div class="settings-sync-log-line" data-artwork-health>Artwork: ...</div>
                 <div class="settings-sync-log-line" data-poster-stats>Posters: ...</div>

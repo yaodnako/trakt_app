@@ -542,7 +542,13 @@ class HistorySyncWorkflow:
                         refreshed = self._titles.get_title(session, int(title.trakt_id))
                         poster_url = str(refreshed.poster_url or "") if refreshed is not None else ""
                     if poster_url:
-                        warm_image_urls(image_cache, [poster_url], timeout=8, max_workers=1)
+                        warm_image_urls(
+                            image_cache,
+                            [poster_url],
+                            timeout=8,
+                            max_workers=1,
+                            proxy_url=getattr(self._auth.config, "network_proxy_url", ""),
+                        )
                 except Exception as exc:
                     emit(f"Poster refresh failed for {title.title_type}:{title.trakt_id}: {exc}")
                 completed_steps += 1
@@ -557,7 +563,13 @@ class HistorySyncWorkflow:
                         for row in self._episode_repo.list_show_episode_metadata(session, int(show_trakt_id))
                         if row.get("still_url")
                     ]
-                warm_image_urls(image_cache, urls, timeout=8, max_workers=4)
+                warm_image_urls(
+                    image_cache,
+                    urls,
+                    timeout=8,
+                    max_workers=4,
+                    proxy_url=getattr(self._auth.config, "network_proxy_url", ""),
+                )
             except Exception as exc:
                 emit(f"Still refresh failed for show:{show_trakt_id}: {exc}")
             completed_steps += 1

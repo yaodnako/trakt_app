@@ -20,6 +20,7 @@ from trakt_tracker.config import (
     normalize_kinopoisk_domain_options,
     normalize_kinopoisk_domain_tail,
     normalize_catalog_provider_mode,
+    normalize_tmdb_proxy_url,
     normalize_utc_offset,
     resolved_tmdb_api_key,
     resolved_tmdb_read_access_token,
@@ -189,13 +190,23 @@ def register_system_routes(app, *, render, template_filters) -> None:
             if image_queue is not None:
                 image_queue.submit(target_url, priority=3)
             else:
-                warm_image_cache_in_background(cache, target_url, timeout=5)
+                warm_image_cache_in_background(
+                    cache,
+                    target_url,
+                    timeout=5,
+                    proxy_url=getattr(services.auth.config, "network_proxy_url", ""),
+                )
             return _image_response(target_url, stale_payload, media_type)
         image_queue = getattr(services, "image_queue", None)
         if image_queue is not None:
             image_queue.submit(target_url, priority=1)
         else:
-            warm_image_cache_in_background(cache, target_url, timeout=5)
+            warm_image_cache_in_background(
+                cache,
+                target_url,
+                timeout=5,
+                proxy_url=getattr(services.auth.config, "network_proxy_url", ""),
+            )
         return Response(
             content=_PENDING_IMAGE_GIF,
             media_type="image/gif",
@@ -261,6 +272,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
             str(form.get("kinopoisk_api_key", "") or ""),
             normalize_kinopoisk_domain_tail(str(form.get("kinopoisk_domain_tail", "") or "")),
             str(form.get("kinopoisk_domain_options", "") or ""),
+            normalize_tmdb_proxy_url(str(form.get("network_proxy_url", "") or "")),
         )
         try:
             cache_ttl_hours = int(str(form.get("cache_ttl_hours", config.cache_ttl_hours) or config.cache_ttl_hours))
@@ -365,8 +377,8 @@ def register_system_routes(app, *, render, template_filters) -> None:
             payload = dict(form)
         if payload.get("confirm") is not True and str(payload.get("confirm", "")).casefold() not in {"1", "true", "yes", "on"}:
             return RedirectResponse(url="/settings?flash=Explicit+confirmation+is+required.", status_code=303)
-        services.tmdb_catalog.clear()
-        return RedirectResponse(url="/settings?flash=TMDb+preview+state+and+cache+were+cleared.", status_code=303)
+        services.tmdb_catalog.clear_cache()
+        return RedirectResponse(url="/settings?flash=TMDb+catalog+cache+was+cleared.+Local+activity+was+preserved.", status_code=303)
 
     @app.post("/settings/trakt-authorize")
     async def settings_trakt_authorize(request: Request) -> RedirectResponse:
@@ -442,6 +454,11 @@ def register_system_routes(app, *, render, template_filters) -> None:
     @app.post("/trakt-sync/retry")
     async def trakt_sync_retry(request: Request) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
+        if normalize_catalog_provider_mode(services.auth.config.catalog_provider_mode) != "trakt":
+            return JSONResponse(
+                {"ok": False, "message": "Switch to Trakt mode before retrying the Trakt queue."},
+                status_code=409,
+            )
         services.trakt_sync.retry()
         return JSONResponse({"ok": True, **services.trakt_sync.status()})
 
@@ -477,6 +494,11 @@ def register_system_routes(app, *, render, template_filters) -> None:
     @app.post("/settings/full-sync")
     async def settings_full_sync(request: Request) -> RedirectResponse:
         services: ServiceContainer = request.app.state.services
+        if normalize_catalog_provider_mode(services.auth.config.catalog_provider_mode) != "trakt":
+            return RedirectResponse(
+                url="/settings?flash=Switch+to+Trakt+mode+before+updating+Trakt+data.",
+                status_code=303,
+            )
         bg_tasks = request.app.state.bg_tasks
         started = bg_tasks.start(
             "settings_full_sync",
@@ -702,7 +724,7 @@ def register_system_routes(app, *, render, template_filters) -> None:
         try:
             items = services.notifications.poll_upcoming(
                 send_native=False,
-                refresh_remote=services.auth.is_authorized(),
+                refresh_remote=True,
             )
         except Exception:
             items = []

@@ -39,7 +39,7 @@ The first interactive launch opens the portal after the embedded server is ready
 
 After a profile completes its first setup, it remains usable when Trakt or OAuth is unavailable. Trakt mutations commit locally and stay in that profile's durable SQLite sync queue until confirmed; Settings shows queue state and retry controls. TMDb, IMDb, Kinopoisk, and artwork work remain independent.
 
-Settings can optionally enable `TMDb preview`. That reversible mode changes only Search, Explore, and Releases; local TMDb card/episode actions survive restarts and are exported through the existing Trakt outbox after an identity mapping appears. History, Progress, and the existing Watchlist remain Trakt/local, and the preview cache/state has its own confirmed reset action.
+Settings can optionally enable `TMDb preview` (the TMDb + local operating mode). It supplies Search, Explore, Watchlist, Releases, History, Progress/Up next, watched state, pause/drop state, and personal ratings without requiring Trakt. Mutable state remains in the active profile's SQLite database and survives restarts; an identity mapping may later export compatible intents to a tracker connector without deleting the local projection. The confirmed TMDb cache reset preserves all local activity.
 
 Helper scripts:
 

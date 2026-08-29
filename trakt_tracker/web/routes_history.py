@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import UTC
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 from fastapi import Request
@@ -22,7 +22,7 @@ from trakt_tracker.application.metadata_refresh_policy import (
     TRIGGER_VISIBLE_RATINGS_REFRESH,
 )
 from trakt_tracker.application.services import ServiceContainer
-from trakt_tracker.config import timezone_from_utc_offset
+from trakt_tracker.config import normalize_catalog_provider_mode, timezone_from_utc_offset
 from trakt_tracker.domain import RatingInput
 from trakt_tracker.web.viewmodels import (
     EPISODE_RATINGS_READY_REFRESH_SECONDS,
@@ -85,7 +85,10 @@ def register_history_routes(app, *, render, render_fragment) -> None:
                 current_page=current_page,
                 rated_only=only_rated_episodes,
             )
-        title_options = services.history.history_titles(title_type=title_type)
+        if _tmdb_history_enabled(services):
+            title_options = services.tmdb_catalog.local_history_titles(title_type=title_type)
+        else:
+            title_options = services.history.history_titles(title_type=title_type)
         response = render(
             request,
             "history.html",
@@ -118,6 +121,14 @@ def register_history_routes(app, *, render, render_fragment) -> None:
     @app.get("/history/auto-sync")
     async def history_auto_sync(request: Request) -> JSONResponse:
         services: ServiceContainer = request.app.state.services
+        if _tmdb_history_enabled(services):
+            return JSONResponse(
+                {
+                    "changed": False,
+                    "started": False,
+                    "message": "Remote sync is disabled in local mode.",
+                }
+            )
         bg_tasks = request.app.state.bg_tasks
         started = bg_tasks.start(
             "history_sync",
@@ -190,7 +201,7 @@ def register_history_routes(app, *, render, render_fragment) -> None:
             rows_by_title_key,
             viewport_title_keys or page_title_keys or current_page_keys,
         )
-        if not request.app.state.bg_tasks.is_running("history_sync"):
+        if not _tmdb_history_enabled(services) and not request.app.state.bg_tasks.is_running("history_sync"):
             services.enrich_queue.submit_history_refresh(
                 viewport_tasks=_build_history_bucket_tasks(
                     services,
@@ -387,13 +398,22 @@ def _load_history_page_data(
     current_page: int,
     rated_only: bool,
 ) -> tuple[list[dict], bool, list[dict]]:
-    rows = services.history.history(
-        title_type=title_type,
-        title_filter=title_filter,
-        rated_only=rated_only,
-        limit=HISTORY_PAGE_SIZE + 1,
-        offset=(current_page - 1) * HISTORY_PAGE_SIZE,
-    )
+    if _tmdb_history_enabled(services):
+        rows = services.tmdb_catalog.local_history_rows(
+            title_type=title_type,
+            title_filter=title_filter,
+            rated_only=rated_only,
+            limit=HISTORY_PAGE_SIZE + 1,
+            offset=(current_page - 1) * HISTORY_PAGE_SIZE,
+        )
+    else:
+        rows = services.history.history(
+            title_type=title_type,
+            title_filter=title_filter,
+            rated_only=rated_only,
+            limit=HISTORY_PAGE_SIZE + 1,
+            offset=(current_page - 1) * HISTORY_PAGE_SIZE,
+        )
     has_next = len(rows) > HISTORY_PAGE_SIZE
     rows = rows[:HISTORY_PAGE_SIZE]
     grouped_days = _group_history_rows(rows, services.auth.config.utc_offset)
@@ -410,15 +430,26 @@ def _load_history_title_page_data(
     sort_by: str,
     sort_direction: str,
 ) -> tuple[list[dict], bool]:
-    rows = services.history.history_title_summaries(
-        title_type=title_type,
-        title_filter=title_filter,
-        rated_only=rated_only,
-        sort_by=sort_by,
-        sort_direction=sort_direction,
-        limit=HISTORY_PAGE_SIZE + 1,
-        offset=(current_page - 1) * HISTORY_PAGE_SIZE,
-    )
+    if _tmdb_history_enabled(services):
+        rows = services.tmdb_catalog.local_history_title_summaries(
+            title_type=title_type,
+            title_filter=title_filter,
+            rated_only=rated_only,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            limit=HISTORY_PAGE_SIZE + 1,
+            offset=(current_page - 1) * HISTORY_PAGE_SIZE,
+        )
+    else:
+        rows = services.history.history_title_summaries(
+            title_type=title_type,
+            title_filter=title_filter,
+            rated_only=rated_only,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            limit=HISTORY_PAGE_SIZE + 1,
+            offset=(current_page - 1) * HISTORY_PAGE_SIZE,
+        )
     has_next = len(rows) > HISTORY_PAGE_SIZE
     return rows[:HISTORY_PAGE_SIZE], has_next
 
@@ -431,6 +462,46 @@ def _normalize_history_title_sort(value: str) -> str:
 def _normalize_history_sort_direction(value: str) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in _HISTORY_SORT_DIRECTIONS else "desc"
+
+
+def _tmdb_history_enabled(services: ServiceContainer) -> bool:
+    tmdb_catalog = getattr(services, "tmdb_catalog", None)
+    return bool(
+        normalize_catalog_provider_mode(
+            getattr(services.auth.config, "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview"
+        and callable(getattr(tmdb_catalog, "local_history_rows", None))
+        and callable(getattr(tmdb_catalog, "local_history_title_summaries", None))
+    )
+
+
+def _sort_combined_history_titles(
+    rows: list[dict],
+    *,
+    sort_by: str,
+    sort_direction: str,
+) -> list[dict]:
+    def value(row):
+        if sort_by == "rating":
+            return row.get("my_rating")
+        if sort_by == "release_year":
+            return row.get("title_year")
+        watched_at = row.get("last_watched_at")
+        if not row.get("last_watched_at_known", True) or not isinstance(watched_at, datetime):
+            return None
+        known = watched_at.replace(tzinfo=UTC) if watched_at.tzinfo is None else watched_at.astimezone(UTC)
+        return known.timestamp()
+
+    known = [row for row in rows if value(row) is not None]
+    unknown = [row for row in rows if value(row) is None]
+    known.sort(key=value, reverse=sort_direction != "asc")
+    unknown.sort(
+        key=lambda row: (
+            str(row.get("title", "")).casefold(),
+            int(row.get("tmdb_id") or row.get("title_trakt_id") or 0),
+        )
+    )
+    return [*known, *unknown]
 
 
 def _normalize_title_keys(raw_keys) -> list[str]:
@@ -472,8 +543,11 @@ def _build_history_bucket_tasks(
         title_rows = rows_by_title_key.get(title_key, [])
         if not title_rows:
             continue
+        enrich_rows = [row for row in title_rows if row.get("provider", "trakt") != "tmdb"]
+        if not enrich_rows:
+            continue
         title_enrich_keys = services.catalog.select_title_enrich_keys(
-            title_rows,
+            enrich_rows,
             trigger=trigger,
             requested_parts=title_requested_parts,
         )
@@ -489,7 +563,7 @@ def _build_history_bucket_tasks(
                 )
             )
         episode_enrich_keys = services.history.select_episode_enrich_keys(
-            title_rows,
+            enrich_rows,
             trigger=trigger,
             requested_parts=episode_requested_parts,
         )
@@ -542,11 +616,13 @@ def _group_history_rows(rows: list[dict], utc_offset: str) -> list[dict]:
             day_label = local_dt.strftime("%d.%m.%Y")
         group = groups.setdefault(day_label, {"day_label": day_label, "count": 0, "title_groups": [], "_title_map": OrderedDict()})
         group["count"] += 1
-        title_key = (row.get("type"), row.get("title_trakt_id"))
+        title_key = (row.get("type"), *_history_identity(row))
         title_group = group["_title_map"].get(title_key)
         if title_group is None:
             title_group = {
-                "title_key": _history_title_key_for_day(day_label, row.get("type", ""), row.get("title_trakt_id")),
+                "title_key": _history_title_key_for_day(day_label, row),
+                "provider": row.get("provider", "trakt"),
+                "tmdb_id": row.get("tmdb_id"),
                 "title_trakt_id": row.get("title_trakt_id"),
                 "title": row.get("title", ""),
                 "title_slug": row.get("title_slug", ""),
@@ -555,6 +631,8 @@ def _group_history_rows(rows: list[dict], utc_offset: str) -> list[dict]:
                 "title_poster_status": row.get("title_poster_status", "unknown"),
                 "title_trakt_rating": row.get("title_trakt_rating"),
                 "title_trakt_votes": row.get("title_trakt_votes"),
+                "title_tmdb_rating": row.get("title_tmdb_rating"),
+                "title_tmdb_votes": row.get("title_tmdb_votes"),
                 "title_imdb_rating": row.get("title_imdb_rating"),
                 "title_imdb_votes": row.get("title_imdb_votes"),
                 "title_ratings_status": row.get("title_ratings_status", "unknown"),
@@ -572,8 +650,17 @@ def _group_history_rows(rows: list[dict], utc_offset: str) -> list[dict]:
     return list(groups.values())
 
 
-def _history_title_key_for_day(day_label: str, title_type: str, title_trakt_id) -> str:
-    return f"{day_label}:{title_type}:{title_trakt_id}"
+def _history_identity(row: dict) -> tuple[str, int]:
+    if row.get("provider") == "tmdb" and int(row.get("tmdb_id") or 0) > 0:
+        return "tmdb", int(row["tmdb_id"])
+    return "trakt", int(row.get("title_trakt_id") or 0)
+
+
+def _history_title_key_for_day(day_label: str, row: dict) -> str:
+    provider, provider_id = _history_identity(row)
+    if provider == "tmdb":
+        return f"{day_label}:{row.get('type', '')}:tmdb:{provider_id}"
+    return f"{day_label}:{row.get('type', '')}:{provider_id}"
 
 
 def _history_title_key_for_row(row: dict, utc_offset: str) -> str:
@@ -586,7 +673,7 @@ def _history_title_key_for_row(row: dict, utc_offset: str) -> str:
         tz = timezone_from_utc_offset(utc_offset)
         normalized = watched_at if watched_at.tzinfo is not None else watched_at.replace(tzinfo=UTC)
         day_label = normalized.astimezone(tz).strftime("%d.%m.%Y")
-    return _history_title_key_for_day(day_label, row.get("type", ""), row.get("title_trakt_id"))
+    return _history_title_key_for_day(day_label, row)
 
 
 def _select_stale_history_rating_title_keys(rows_by_title_key: dict[str, list[dict]], title_keys: list[str]) -> list[str]:
@@ -625,6 +712,8 @@ def _select_stale_history_rating_title_keys(rows_by_title_key: dict[str, list[di
 
 
 def _schedule_title_alias_refresh(request: Request, services: ServiceContainer) -> None:
+    if _tmdb_history_enabled(services):
+        return
     alias_service = getattr(services, "title_aliases", None)
     if alias_service is None:
         return

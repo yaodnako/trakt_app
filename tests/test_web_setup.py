@@ -88,6 +88,13 @@ def test_completed_profile_without_token_uses_local_portal_mode(tmp_path: Path) 
     assert partial.status_code == 200
 
 
+def test_sync_banner_is_spaced_from_page_content() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    css = (project_root / "trakt_tracker" / "web" / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert ".banner + .content {\n    margin-top: 16px;\n}" in css
+
+
 def test_request_that_loses_authorization_keeps_completed_local_response(tmp_path: Path) -> None:
     app, _store = _app(tmp_path)
     mark_setup_complete(app.state.services.database)
@@ -375,8 +382,7 @@ def test_tray_poller_refreshes_profile_before_polling() -> None:
 
     assert calls == [
         "refresh",
-        "authorized",
-        ("poll", {"send_native": True, "refresh_remote": False}),
+        ("poll", {"send_native": True, "refresh_remote": True}),
     ]
 
 
@@ -404,7 +410,6 @@ def test_tray_poller_does_not_duplicate_progress_sync_owned_by_notification_serv
 
     assert calls == [
         "refresh",
-        "authorized",
         ("poll", {"send_native": True, "refresh_remote": True}),
         "emit",
     ]

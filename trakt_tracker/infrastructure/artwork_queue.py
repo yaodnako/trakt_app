@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Condition, Thread
 from time import monotonic
-from typing import Iterator
+from typing import Callable, Iterator
 
 from trakt_tracker.infrastructure.artwork_cache import fetch_and_cache_image, has_cached_image, is_trusted_image_url
 from trakt_tracker.infrastructure.cache import BinaryCache
@@ -21,9 +21,17 @@ class _ImageTask:
 class ArtworkQueue:
     """Bounded, deduplicated image work that never occupies an HTTP response."""
 
-    def __init__(self, cache: BinaryCache, *, max_workers: int = 4, timeout: float = 8.0) -> None:
+    def __init__(
+        self,
+        cache: BinaryCache,
+        *,
+        max_workers: int = 4,
+        timeout: float = 8.0,
+        proxy_url_provider: Callable[[], str] | None = None,
+    ) -> None:
         self._cache = cache
         self._timeout = max(1.0, float(timeout))
+        self._proxy_url_provider = proxy_url_provider
         self._condition = Condition()
         self._pending: dict[str, tuple[int, _ImageTask]] = {}
         self._running: set[str] = set()
@@ -121,7 +129,21 @@ class ArtworkQueue:
                 return
             failed = False
             try:
-                failed = fetch_and_cache_image(self._cache, task.url, self._timeout) is None
+                proxy_url = (
+                    str(self._proxy_url_provider() or "").strip()
+                    if self._proxy_url_provider is not None
+                    else ""
+                )
+                if proxy_url:
+                    result = fetch_and_cache_image(
+                        self._cache,
+                        task.url,
+                        self._timeout,
+                        proxy_url=proxy_url,
+                    )
+                else:
+                    result = fetch_and_cache_image(self._cache, task.url, self._timeout)
+                failed = result is None
             except Exception:
                 failed = True
             finally:

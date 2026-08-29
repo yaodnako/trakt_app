@@ -13,7 +13,10 @@
         return target;
     }
 
-    async function navigateHistory(target, {push = true, restoreTitleFocus = false} = {}) {
+    async function navigateHistory(
+        target,
+        {push = true, restoreTitleFocus = false, scrollToPageStart = false} = {},
+    ) {
         filterRequest?.abort();
         const controller = new AbortController();
         filterRequest = controller;
@@ -41,6 +44,10 @@
             document.title = parsed.title || document.title;
             bindFilterControls();
             startHistoryController();
+            if (scrollToPageStart) {
+                const pageRoot = document.getElementById("history-page-root");
+                pageRoot?.scrollIntoView({block: "start", behavior: "auto"});
+            }
             if (restoreTitleFocus) {
                 const nextInput = document.querySelector('.history-filter-form input[name="title"]');
                 if (nextInput instanceof HTMLInputElement) {
@@ -581,8 +588,9 @@
     document.addEventListener("click", (event) => {
         const link = event.target.closest("#history-page-region a[href^='/history']");
         if (!link || link.target || event.defaultPrevented) return;
+        const scrollToPageStart = Boolean(link.closest(".history-pager"));
         event.preventDefault();
-        navigateHistory(new URL(link.href, window.location.href));
+        navigateHistory(new URL(link.href, window.location.href), {scrollToPageStart});
     });
     window.addEventListener("popstate", () => {
         if (window.location.pathname === "/history") {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,14 @@ class TemplateFilterTests(unittest.TestCase):
         self.assertEqual(_TemplateFilters.season_episode_label(1, 25, 2, 1), "S01E25 (S02E01)")
         self.assertEqual(_TemplateFilters.season_episode_label(1, 25, 1, 25), "S01E25")
         self.assertEqual(_TemplateFilters.season_episode_label(1, 25), "S01E25")
+
+    def test_full_page_render_reads_pending_notification_snapshot_only(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "trakt_tracker" / "web" / "app.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("services.notifications.pending_sources()", source)
+        self.assertNotIn("services.notifications.refresh_pending_sources()", source)
 
 
 class ArtworkCacheWarmLoopTests(unittest.TestCase):

@@ -248,6 +248,43 @@ class IMDbDatasetClient:
         finally:
             conn.close()
 
+    def list_show_episode_metadata(self, show_imdb_id: str) -> list[dict]:
+        if not show_imdb_id or not self._db_path.exists():
+            return []
+        conn = sqlite3.connect(self._db_path)
+        try:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT e.tconst, e.season_number, e.episode_number,
+                           b.primary_title, r.average_rating, r.num_votes
+                    FROM episodes e
+                    LEFT JOIN basics b ON b.tconst = e.tconst
+                    LEFT JOIN ratings r ON r.tconst = e.tconst
+                    WHERE e.parent_tconst = ?
+                    ORDER BY e.season_number, e.episode_number
+                    """,
+                    (show_imdb_id,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            return [
+                {
+                    "season": int(row[1]),
+                    "number": int(row[2]),
+                    "imdb_season": int(row[1]),
+                    "imdb_episode": int(row[2]),
+                    "imdb_id": str(row[0] or ""),
+                    "title": str(row[3] or ""),
+                    "imdb_rating": float(row[4]) if row[4] is not None else None,
+                    "imdb_votes": int(row[5]) if row[5] is not None else None,
+                }
+                for row in rows
+                if row[1] is not None and int(row[1]) >= 0 and row[2] is not None and int(row[2]) > 0
+            ]
+        finally:
+            conn.close()
+
     def lookup_episode_imdb_id(self, show_imdb_id: str, season_number: int, episode_number: int) -> str:
         if not show_imdb_id or not self._db_path.exists() or season_number <= 0 or episode_number <= 0:
             return ""

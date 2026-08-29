@@ -122,7 +122,7 @@ class WebSystemRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["activity_seq"], 7)
         self.assertEqual(response.json()["items"][0]["source"], "progress")
-        self.assertEqual(calls, [{"send_native": False, "refresh_remote": False}])
+        self.assertEqual(calls, [{"send_native": False, "refresh_remote": True}])
 
     def test_notification_nav_state_is_not_cleared_by_navigation(self) -> None:
         script = (PROJECT_ROOT / "trakt_tracker" / "web" / "static" / "ui_core.js").read_text(

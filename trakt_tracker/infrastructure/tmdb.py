@@ -27,6 +27,7 @@ TMDB_STILL_IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
 TMDB_DIRECT_ATTEMPT_SECONDS = 3.0
 TMDB_CURL_ATTEMPT_SECONDS = 4.0
 TMDB_URLLIB_ATTEMPT_SECONDS = 2.0
+TMDB_SCHEDULE_REFRESH_TTL_HOURS = 0.5
 
 
 class TMDbClient:
@@ -38,6 +39,7 @@ class TMDbClient:
         timeout: float = 15.0,
         cache_ttl_hours: int = 24,
         cache_provider: str = "tmdb",
+        proxy_url: str = "",
     ) -> None:
         self.api_key = api_key.strip()
         self.read_access_token = read_access_token.strip()
@@ -45,6 +47,7 @@ class TMDbClient:
         self._client = httpx.Client(timeout=self._request_budget_seconds)
         self._cache = ProviderCache(cache_provider)
         self._cache_ttl_hours = cache_ttl_hours
+        self._proxy_url = str(proxy_url or "").strip()
         self._direct_dns_loopback_only: bool | None = None
 
     def is_configured(self) -> bool:
@@ -192,7 +195,6 @@ class TMDbClient:
             today = datetime.now(tz=UTC).date().isoformat()
             params[f"{date_field}.gte"] = today
             params[f"{date_field}.lte"] = (datetime.now(tz=UTC).date() + timedelta(days=730)).isoformat()
-            params["sort_by"] = f"{date_field}.asc"
         return self._request("GET", f"/discover/{media}", params=params, stale_fallback=True)
 
     def get_catalog_details(self, title_type: str, tmdb_id: int) -> dict[str, Any] | None:
@@ -215,6 +217,38 @@ class TMDbClient:
             stale_fallback=True,
         )
 
+    def refresh_catalog_season(self, show_tmdb_id: int, season: int) -> dict[str, Any] | None:
+        """Refresh the season schedule on a short cadence with last-good fallback."""
+        if not self.is_configured():
+            return None
+        return self._request_optional(
+            "GET",
+            f"/tv/{int(show_tmdb_id)}/season/{int(season)}",
+            stale_fallback=True,
+            cache_ttl_hours=min(float(self._cache_ttl_hours), TMDB_SCHEDULE_REFRESH_TTL_HOURS),
+        )
+
+    def get_cached_catalog_season(self, show_tmdb_id: int, season: int) -> dict[str, Any] | None:
+        """Return the last cached season snapshot without starting network work."""
+        path = f"/tv/{int(show_tmdb_id)}/season/{int(season)}"
+        params: dict[str, Any] = {}
+        if not self.read_access_token and self.api_key:
+            params["api_key"] = self.api_key
+        cache_key = self._cache_key("GET", path, params)
+        entry_reader = getattr(self._cache, "get_json_entry", None)
+        if callable(entry_reader):
+            for ttl_hours in (self._cache_ttl_hours, None):
+                entry = entry_reader(cache_key, ttl_hours=ttl_hours)
+                if isinstance(entry, ProviderCacheEntry):
+                    return entry.value
+        legacy_reader = getattr(self._cache, "get_json", None)
+        if callable(legacy_reader):
+            for ttl_hours in (self._cache_ttl_hours, None):
+                value = legacy_reader(cache_key, ttl_hours=ttl_hours)
+                if value is not None:
+                    return value
+        return None
+
     def _request(
         self,
         method: str,
@@ -222,6 +256,7 @@ class TMDbClient:
         *,
         params: dict[str, Any] | None = None,
         stale_fallback: bool = False,
+        cache_ttl_hours: float | None = None,
     ) -> Any:
         headers = {
             "Accept": "application/json",
@@ -231,21 +266,22 @@ class TMDbClient:
             headers["Authorization"] = f"Bearer {self.read_access_token}"
         elif self.api_key:
             params["api_key"] = self.api_key
-        cache_key = f"{method.upper()}|{path}|{repr(sorted(params.items()))}"
+        cache_key = self._cache_key(method, path, params)
         # Keep compatibility with the small cache doubles used by callers and
         # older integrations that only expose ``get_json``.  A bare MagicMock
         # returned by an unconfigured ``get_json_entry`` must not be treated as
         # a real cache entry.
         entry_reader = getattr(self._cache, "get_json_entry", None)
+        fresh_ttl_hours = self._cache_ttl_hours if cache_ttl_hours is None else cache_ttl_hours
         cached_entry = (
-            entry_reader(cache_key, ttl_hours=self._cache_ttl_hours)
+            entry_reader(cache_key, ttl_hours=fresh_ttl_hours)
             if callable(entry_reader)
             else None
         )
         if not isinstance(cached_entry, ProviderCacheEntry):
             legacy_reader = getattr(self._cache, "get_json", None)
             cached_value = (
-                legacy_reader(cache_key, ttl_hours=self._cache_ttl_hours)
+                legacy_reader(cache_key, ttl_hours=fresh_ttl_hours)
                 if callable(legacy_reader)
                 else None
             )
@@ -267,7 +303,15 @@ class TMDbClient:
                 stale_entry = candidate
         try:
             deadline = monotonic() + self._request_budget_seconds
-            if self._system_dns_is_loopback_only():
+            if self._proxy_url:
+                payload = self._request_with_curl(
+                    method,
+                    path,
+                    headers=headers,
+                    params=params,
+                    deadline=deadline,
+                )
+            elif self._system_dns_is_loopback_only():
                 try:
                     payload = self._request_with_fragmented_tls(
                         method,
@@ -327,6 +371,10 @@ class TMDbClient:
             )
         return self._direct_dns_loopback_only
 
+    @staticmethod
+    def _cache_key(method: str, path: str, params: dict[str, Any]) -> str:
+        return f"{method.upper()}|{path}|{repr(sorted(params.items()))}"
+
     def _request_with_curl(
         self,
         method: str,
@@ -349,8 +397,6 @@ class TMDbClient:
             "--show-error",
             "--location",
             "--ipv4",
-            "--doh-url",
-            "https://cloudflare-dns.com/dns-query",
             "--max-time",
             str(max(1, int(curl_timeout))),
             "--request",
@@ -358,6 +404,10 @@ class TMDbClient:
             "--header",
             "Accept: application/json",
         ]
+        if self._proxy_url:
+            command.extend(["--proxy", self._proxy_url])
+        else:
+            command.extend(["--doh-url", "https://cloudflare-dns.com/dns-query"])
         authorization = headers.get("Authorization")
         if authorization:
             command.extend(["--header", f"Authorization: {authorization}"])
@@ -381,6 +431,8 @@ class TMDbClient:
             )
             return json.loads(completed.stdout)
         except (OSError, subprocess.SubprocessError, ValueError) as curl_error:
+            if self._proxy_url:
+                raise curl_error
             try:
                 return self._request_with_fragmented_tls(
                     method,
@@ -463,9 +515,16 @@ class TMDbClient:
         *,
         params: dict[str, Any] | None = None,
         stale_fallback: bool = False,
+        cache_ttl_hours: float | None = None,
     ) -> Any | None:
         try:
-            return self._request(method, path, params=params, stale_fallback=stale_fallback)
+            return self._request(
+                method,
+                path,
+                params=params,
+                stale_fallback=stale_fallback,
+                cache_ttl_hours=cache_ttl_hours,
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from trakt_tracker.config import normalize_catalog_provider_mode
 from trakt_tracker.domain import CalendarEntry, ProgressView
 from trakt_tracker.infrastructure.notifications import NotificationMessage
 
@@ -19,6 +20,7 @@ class NotificationRefreshWorkflow:
         episode_repo,
         progress_repo,
         sender,
+        episode_schedule_overlay=None,
     ) -> None:
         self._db = db
         self._auth = auth_service
@@ -27,6 +29,7 @@ class NotificationRefreshWorkflow:
         self._episode_repo = episode_repo
         self._progress_repo = progress_repo
         self._sender = sender
+        self._episode_schedule_overlay = episode_schedule_overlay
 
     def poll_upcoming(
         self,
@@ -35,6 +38,10 @@ class NotificationRefreshWorkflow:
         refresh_remote: bool = True,
     ) -> list[dict]:
         config = self._config_store.load()
+        if normalize_catalog_provider_mode(
+            getattr(config, "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            return []
         if not config.notifications_enabled:
             return []
         repeat_interval = timedelta(minutes=max(1, int(config.notification_repeat_minutes or 1)))
@@ -61,7 +68,10 @@ class NotificationRefreshWorkflow:
                 view=ProgressView.PAUSED,
                 limit=None,
             )
-            progress_items = [*active_items, *paused_items]
+        progress_items = [*active_items, *paused_items]
+        if self._episode_schedule_overlay is not None:
+            self._episode_schedule_overlay(progress_items)
+        with self._db.session() as session:
             current_next_episodes = {
                 item.trakt_id: item.next_episode
                 for item in progress_items
@@ -94,7 +104,9 @@ class NotificationRefreshWorkflow:
 
             for entry in entries.values():
                 expected_episode = current_next_episodes[entry.show_trakt_id]
-                first_aired = entry.episode.first_aired or expected_episode.first_aired
+                # The progress projection may carry an authoritative TMDb-preview
+                # date; do not let the Trakt calendar overwrite it again.
+                first_aired = expected_episode.first_aired or entry.episode.first_aired
                 if first_aired is None:
                     continue
                 release_at = first_aired.replace(tzinfo=UTC) if first_aired.tzinfo is None else first_aired.astimezone(UTC)
@@ -205,6 +217,10 @@ class NotificationRefreshWorkflow:
         return sent
 
     def mark_episode_seen(self, *, show_trakt_id: int, show_title: str, episode) -> None:
+        if normalize_catalog_provider_mode(
+            getattr(getattr(self._auth, "config", None), "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            return
         message = f"S{episode.season:02d}E{episode.number:02d} {episode.title}"
         with self._db.session() as session:
             self._notification_repo.mark_seen(
@@ -218,25 +234,37 @@ class NotificationRefreshWorkflow:
             )
 
     def unseen_episode_ids(self) -> set[int]:
+        if normalize_catalog_provider_mode(
+            getattr(getattr(self._auth, "config", None), "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            return set()
         with self._db.session() as session:
             return self._notification_repo.unseen_episode_ids(session)
 
     def has_due_unseen_current_episode(self) -> bool:
+        if normalize_catalog_provider_mode(
+            getattr(getattr(self._auth, "config", None), "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            return False
         config = self._config_store.load()
         release_delay = timedelta(
             minutes=max(0, int(getattr(config, "notification_release_delay_minutes", 120) or 0))
         )
         now = datetime.now(tz=UTC)
         with self._db.session() as session:
-            current_episodes = {
-                int(item.next_episode.trakt_id): item.next_episode
-                for item in self._progress_repo.list_in_progress(
-                    session,
-                    view=ProgressView.ACTIVE,
-                    limit=None,
-                )
-                if item.next_episode is not None
-            }
+            progress_items = self._progress_repo.list_in_progress(
+                session,
+                view=ProgressView.ACTIVE,
+                limit=None,
+            )
+        if self._episode_schedule_overlay is not None:
+            self._episode_schedule_overlay(progress_items)
+        current_episodes = {
+            int(item.next_episode.trakt_id): item.next_episode
+            for item in progress_items
+            if item.next_episode is not None
+        }
+        with self._db.session() as session:
             for row in self._notification_repo.list_unseen(session):
                 episode = current_episodes.get(int(row.episode_trakt_id))
                 if episode is None:
@@ -252,6 +280,10 @@ class NotificationRefreshWorkflow:
             return False
 
     def upcoming_items(self) -> list[dict]:
+        if normalize_catalog_provider_mode(
+            getattr(getattr(self._auth, "config", None), "catalog_provider_mode", "trakt")
+        ) == "tmdb_preview":
+            return []
         with self._db.session() as session:
             rows = self._episode_repo.list_upcoming(session)
             return [

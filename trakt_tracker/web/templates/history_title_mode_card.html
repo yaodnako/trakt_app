@@ -1,11 +1,13 @@
+{% set tmdb_history = title_card.tmdb_id|default(none) and (title_card.provider|default('trakt') == 'tmdb' or catalog_provider_mode|default('trakt') == 'tmdb_preview') %}
 <article
     class="history-title-mode-card"
     data-history-title-key="{{ title_card.title_key }}"
     data-history-entry-count="{{ title_card.watched_count }}"
+    {% if tmdb_history %}data-tmdb-card data-tmdb-id="{{ title_card.tmdb_id }}" data-title-type="{{ title_card.type }}"{% endif %}
 >
     {% set trakt_title_url = "" %}
     {% if title_card.type in ('show', 'movie') %}
-        {% set trakt_title_url = "https://trakt.tv/" ~ title_card.type ~ "s/" ~ (title_card.title_slug or title_card.title_trakt_id) %}
+        {% set trakt_title_url = ("https://www.themoviedb.org/" ~ ('tv' if title_card.type == 'show' else 'movie') ~ "/" ~ title_card.tmdb_id) if tmdb_history else ("https://trakt.tv/" ~ title_card.type ~ "s/" ~ (title_card.title_slug or title_card.title_trakt_id)) %}
     {% endif %}
     <div class="history-title-heading history-title-mode-heading">
         <a href="{{ trakt_title_url }}" target="_blank" rel="noreferrer">{{ title_card.title }}</a>
@@ -18,9 +20,14 @@
             target="_blank"
             rel="noreferrer"
             {% if title_card.type == 'show' %}
+            {% if tmdb_history %}
+            data-tmdb-progress-watch-panel
+            data-tmdb-id="{{ title_card.tmdb_id }}"
+            {% else %}
             data-history-show-watch-trigger
             data-watch-panel-url="/search/show/{{ title_card.title_trakt_id }}/watch-panel"
             data-trakt-id="{{ title_card.title_trakt_id }}"
+            {% endif %}
             data-title="{{ title_card.title }}"
             aria-label="Open episode watch panel for {{ title_card.title }}"
             {% endif %}
@@ -45,8 +52,10 @@
                 role="button"
                 tabindex="0"
                 data-rating-trigger
+                data-rating-provider="{{ 'tmdb' if tmdb_history else 'trakt' }}"
                 data-rating-title-type="movie"
-                data-rating-trakt-id="{{ title_card.title_trakt_id }}"
+                {% if not tmdb_history %}data-rating-trakt-id="{{ title_card.title_trakt_id }}"{% endif %}
+                data-rating-tmdb-id="{{ title_card.tmdb_id if tmdb_history else '' }}"
                 data-rating-title="{{ title_card.title }}"
                 {% endif %}
             >
@@ -61,8 +70,13 @@
             class="poster-chip history-poster-chip history-title-chip title-matrix-trigger history-title-matrix-trigger history-title-mode-rating-chip"
             data-title-matrix-trigger
             data-title-matrix-title="{{ title_card.title }}"
+            {% if tmdb_history %}
+            data-title-matrix-tmdb-id="{{ title_card.tmdb_id }}"
+            data-title-matrix-url="/titles/tmdb/show/{{ title_card.tmdb_id }}/episode-ratings-matrix"
+            {% else %}
             data-title-matrix-trakt-id="{{ title_card.title_trakt_id }}"
             data-title-matrix-url="/titles/show/{{ title_card.title_trakt_id }}/episode-ratings-matrix"
+            {% endif %}
             aria-label="Open episode IMDb ratings matrix for {{ title_card.title }}"
         >
         {% else %}
@@ -71,12 +85,12 @@
             <span class="poster-chip-part">
                 <img
                     class="poster-chip-icon"
-                    src="{{ request.url_for('static', path='trakt_logo_bw.svg') }}"
-                    alt="trakt"
+                    src="{{ request.url_for('static', path='tmdb.png' if tmdb_history else 'trakt_logo_bw.svg') }}"
+                    alt="{{ 'tmdb' if tmdb_history else 'trakt' }}"
                 >
                 <span>
-                    {% if title_card.title_trakt_rating is not none %}
-                    {{ title_card.title_trakt_rating|rating_with_votes(title_card.title_trakt_votes) }}
+                    {% if (title_card.title_tmdb_rating if tmdb_history else title_card.title_trakt_rating) is not none %}
+                    {{ (title_card.title_tmdb_rating if tmdb_history else title_card.title_trakt_rating)|rating_with_votes(title_card.title_tmdb_votes if tmdb_history else title_card.title_trakt_votes) }}
                     {% elif title_card.title_ratings_status in ('checked_no_data', 'ready') %}
                     n/a
                     {% else %}
@@ -115,9 +129,9 @@
         class="icon-button history-unwatch-action"
         title="Remove movie from watched history"
         aria-label="Remove {{ title_card.title }} from watched history"
-        data-search-unwatch-action
+        {% if tmdb_history %}data-tmdb-history-unwatch data-tmdb-id="{{ title_card.tmdb_id }}"{% else %}data-search-unwatch-action{% endif %}
         data-title-type="movie"
-        data-trakt-id="{{ title_card.title_trakt_id }}"
+        {% if not tmdb_history %}data-trakt-id="{{ title_card.title_trakt_id }}"{% endif %}
         data-title="{{ title_card.title }}"
         data-scope="title"
     >

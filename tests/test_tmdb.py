@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ssl
+import subprocess
 import unittest
+from datetime import UTC, datetime
 from email.message import Message
 from threading import Event, Thread
 from unittest.mock import MagicMock
@@ -15,10 +17,152 @@ from trakt_tracker.infrastructure.fragmented_https import (
     request_with_fragmented_tls,
     resolve_ipv4_with_doh,
 )
+from trakt_tracker.infrastructure.cache import ProviderCacheEntry
 from trakt_tracker.infrastructure.tmdb import TMDbClient
 
 
 class TMDbClientTests(unittest.TestCase):
+    def test_configured_socks_proxy_skips_direct_transport(self) -> None:
+        client = TMDbClient(
+            read_access_token="token",
+            proxy_url="socks5h://127.0.0.1:10808",
+        )
+        client._cache = MagicMock()
+        client._cache.get_json.return_value = None
+        client._client = MagicMock()
+        payload = {"episodes": []}
+
+        with patch.object(client, "_request_with_curl", return_value=payload) as proxy_transport:
+            result = client._request("GET", "/tv/1/season/1")
+
+        self.assertEqual(result, payload)
+        client._client.request.assert_not_called()
+        proxy_transport.assert_called_once()
+
+    def test_configured_socks_proxy_is_passed_to_curl_without_doh(self) -> None:
+        client = TMDbClient(
+            read_access_token="token",
+            proxy_url="socks5h://127.0.0.1:10808",
+        )
+        completed = subprocess.CompletedProcess([], 0, stdout='{"episodes": []}', stderr="")
+
+        with patch("trakt_tracker.infrastructure.tmdb.subprocess.run", return_value=completed) as execute:
+            result = client._request_with_curl(
+                "GET",
+                "/tv/1/season/1",
+                headers={"Accept": "application/json"},
+                params={},
+            )
+
+        self.assertEqual(result, {"episodes": []})
+        command = execute.call_args.args[0]
+        self.assertEqual(command[command.index("--proxy") + 1], "socks5h://127.0.0.1:10808")
+        self.assertNotIn("--doh-url", command)
+
+    def test_cached_catalog_season_never_starts_network(self) -> None:
+        client = TMDbClient(read_access_token="token")
+        stale_payload = {"episodes": [{"episode_number": 1}]}
+        client._cache = MagicMock()
+        client._cache.get_json_entry.side_effect = [
+            None,
+            ProviderCacheEntry(value=stale_payload, created_at=datetime.now(tz=UTC)),
+        ]
+        client._client = MagicMock()
+
+        result = client.get_cached_catalog_season(1, 2)
+
+        self.assertEqual(result, stale_payload)
+        client._client.request.assert_not_called()
+
+    def test_refresh_catalog_season_bypasses_general_cache_after_schedule_window(self) -> None:
+        client = TMDbClient(read_access_token="token")
+        cached_payload = {"episodes": [{"episode_number": 1, "air_date": "2026-08-07"}]}
+        current_payload = {"episodes": [{"episode_number": 1, "air_date": "2026-08-14"}]}
+        client._cache = MagicMock()
+        cached_entry = ProviderCacheEntry(
+            value=cached_payload,
+            created_at=datetime.now(tz=UTC),
+        )
+        client._cache.get_json_entry.side_effect = lambda key, *, ttl_hours: (
+            cached_entry if ttl_hours is None else None
+        )
+        client._cache.get_json.return_value = None
+        response = MagicMock()
+        response.json.return_value = current_payload
+        client._client = MagicMock()
+        client._client.request.return_value = response
+
+        try:
+            with patch.object(client, "_system_dns_is_loopback_only", return_value=False):
+                result = client.refresh_catalog_season(1, 2)
+
+            self.assertEqual(result, current_payload)
+            client._client.request.assert_called_once()
+            client._cache.set_json.assert_called_once()
+            self.assertEqual(client._cache.get_json_entry.call_args_list[0].kwargs["ttl_hours"], 0.5)
+        finally:
+            client.close()
+
+    def test_refresh_catalog_season_reuses_current_schedule_snapshot(self) -> None:
+        client = TMDbClient(read_access_token="token")
+        current_payload = {"episodes": [{"episode_number": 1, "air_date": "2026-08-14"}]}
+        client._cache = MagicMock()
+        client._cache.get_json_entry.return_value = ProviderCacheEntry(
+            value=current_payload,
+            created_at=datetime.now(tz=UTC),
+        )
+        client._client = MagicMock()
+
+        try:
+            result = client.refresh_catalog_season(1, 2)
+
+            self.assertEqual(result, current_payload)
+            client._client.request.assert_not_called()
+            self.assertEqual(client._cache.get_json_entry.call_args.kwargs["ttl_hours"], 0.5)
+        finally:
+            client.close()
+
+    def test_refresh_catalog_season_uses_last_good_cache_when_network_fails(self) -> None:
+        client = TMDbClient(read_access_token="token")
+        cached_payload = {"episodes": [{"episode_number": 1, "air_date": "2026-08-07"}]}
+        client._cache = MagicMock()
+        cached_entry = ProviderCacheEntry(
+            value=cached_payload,
+            created_at=datetime.now(tz=UTC),
+        )
+        client._cache.get_json_entry.side_effect = lambda key, *, ttl_hours: (
+            cached_entry if ttl_hours is None else None
+        )
+        client._cache.get_json.return_value = None
+        client._client = MagicMock()
+        client._client.request.side_effect = httpx.ConnectError("offline")
+
+        try:
+            with (
+                patch.object(client, "_system_dns_is_loopback_only", return_value=False),
+                patch.object(client, "_request_with_curl", side_effect=httpx.ConnectError("offline")),
+            ):
+                result = client.refresh_catalog_season(1, 2)
+
+            self.assertEqual(result, cached_payload)
+            client._cache.set_json.assert_not_called()
+        finally:
+            client.close()
+
+    def test_upcoming_discover_keeps_popularity_sort(self) -> None:
+        client = TMDbClient(read_access_token="token")
+
+        with patch.object(client, "_request", return_value={"results": []}) as request:
+            client.discover_catalog("show", page=3, upcoming=True)
+
+        request.assert_called_once()
+        self.assertEqual(request.call_args.args[0:2], ("GET", "/discover/tv"))
+        params = request.call_args.kwargs["params"]
+        self.assertEqual(params["page"], 3)
+        self.assertEqual(params["sort_by"], "popularity.desc")
+        self.assertIn("first_air_date.gte", params)
+        self.assertIn("first_air_date.lte", params)
+
     def test_loopback_only_system_dns_uses_fragmented_transport_first(self) -> None:
         client = TMDbClient(read_access_token="token")
         client._cache = MagicMock()

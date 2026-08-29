@@ -26,6 +26,27 @@ class ArtworkQueueTests(unittest.TestCase):
         finally:
             self.assertTrue(queue.close())
 
+    @patch("trakt_tracker.infrastructure.artwork_queue.fetch_and_cache_image", return_value=b"image")
+    @patch("trakt_tracker.infrastructure.artwork_queue.has_cached_image", return_value=False)
+    @patch("trakt_tracker.infrastructure.artwork_queue.is_trusted_image_url", return_value=True)
+    def test_tmdb_proxy_is_resolved_when_background_work_runs(self, _trusted, _cached, fetch) -> None:
+        queue = ArtworkQueue(
+            object(),
+            max_workers=1,
+            proxy_url_provider=lambda: "socks5h://127.0.0.1:10808",
+        )
+        try:
+            self.assertTrue(queue.submit("https://image.tmdb.org/t/p/w342/a.jpg"))
+            self._wait_until(lambda: fetch.call_count == 1)
+            fetch.assert_called_once_with(
+                queue._cache,
+                "https://image.tmdb.org/t/p/w342/a.jpg",
+                queue._timeout,
+                proxy_url="socks5h://127.0.0.1:10808",
+            )
+        finally:
+            self.assertTrue(queue.close())
+
     @staticmethod
     def _wait_until(predicate, *, timeout: float = 1.0) -> None:
         deadline = time.time() + timeout

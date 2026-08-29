@@ -6,7 +6,7 @@ from trakt_tracker.application.enrich_state import (
     ENRICH_STATUS_READY,
     ENRICH_STATUS_UNKNOWN,
 )
-from trakt_tracker.domain import EpisodeSummary, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary
+from trakt_tracker.domain import EpisodeSummary, HistoryItemInput, ProgressSnapshot, RatingInput, TitleSummary, synthetic_episode_id
 
 
 UNDATED_HISTORY_AT = datetime(1970, 1, 1, tzinfo=UTC)
@@ -784,10 +784,17 @@ class HistoryService:
 
     @staticmethod
     def _progress_episode(row: dict | None) -> EpisodeSummary | None:
-        if row is None or not int(row.get("episode_trakt_id") or 0):
+        if row is None:
             return None
         return EpisodeSummary(
-            trakt_id=int(row["episode_trakt_id"]),
+            trakt_id=(
+                int(row.get("episode_trakt_id") or 0)
+                or synthetic_episode_id(
+                    int(row.get("show_trakt_id") or 0),
+                    int(row["season"]),
+                    int(row["number"]),
+                )
+            ),
             season=int(row["season"]),
             number=int(row["number"]),
             title=str(row.get("title") or ""),
